@@ -1,0 +1,15 @@
+# Build
+/build/
+/build-release/
+*.o
+*.a
+*.so
+
+# Meson
+/subprojects/*/
+!/subprojects/*.wrap
+
+# Editor / misc
+*.swp
+.cache/
+compile_commands.json
