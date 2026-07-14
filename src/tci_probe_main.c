@@ -127,7 +127,7 @@ int main(int argc, char **argv) {
   }
   printf("handshake: protocol %s, device \"%s\"\n",
          skim_tci_client_protocol(c), skim_tci_client_device(c));
-  printf("           dds centre %.0f Hz, granted iq_samplerate %u\n",
+  printf("           dds centre %.0f Hz, device iq rate at connect %u\n",
          skim_tci_client_center_hz(c), skim_tci_client_iq_rate(c));
 
   for (int s = 0; s < secs; s++) {
@@ -139,7 +139,8 @@ int main(int argc, char **argv) {
     fflush(stdout);
   }
   printf("\n");
-  double center = skim_tci_client_center_hz(c);
+  double center  = skim_tci_client_center_hz(c);
+  guint  granted = skim_tci_client_iq_rate(c);   /* echoed by now (or default) */
   skim_tci_client_stop(c);
 
   g_mutex_lock(&p_lock);
@@ -167,8 +168,8 @@ int main(int argc, char **argv) {
   double dev = hdrrate > 0 ? (eff - hdrrate) / hdrrate * 100.0 : 0;
 
   printf("\nIQ stats:\n");
-  printf("  blocks %u, frames %" G_GUINT64_FORMAT ", header rate %.0f Hz\n",
-         blocks, frames, hdrrate);
+  printf("  blocks %u, frames %" G_GUINT64_FORMAT ", header rate %.0f Hz, "
+         "granted iq_samplerate %u\n", blocks, frames, hdrrate, granted);
   printf("  effective rate %.1f Hz (%+.3f %% vs header) — %s\n",
          eff, dev, fabs(dev) < 2.0 ? "ok" : "OUT OF TOLERANCE");
   printf("  RMS %.1f dBFS, peak %.3f, DC offset I %+.5f Q %+.5f\n",

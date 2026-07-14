@@ -118,7 +118,9 @@ where relevant, a live check against a running `sdr-for-linux`.
   headless) + a minimal GTK4/libadwaita window. Gate: `meson compile` is clean;
   the empty app launches.
 - **M1 — TCI client + IQ ingest. IMPLEMENTED (offline-verified 2026-07-15;
-  live probe pending a running radio).** WebSocket client (libwebsockets),
+  live probe run the same evening against a real SDR-for-Linux on 80 m:
+  handshake + 192 kHz stream ok, effective rate −0.02 %; the eyeball
+  orientation check against the panadapter awaits Richard's verdict).** WebSocket client (libwebsockets),
   handshake (`protocol:ExpertSDR3,…` → `ready;` → `start;`), `iq_samplerate` +
   `iq_start:0`, reassemble binary Stream `type=0` blocks, **verify the conjugate
   orientation** (codify the wire convention: a +12 kHz DDC tone must land at
