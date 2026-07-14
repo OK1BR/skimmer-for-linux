@@ -92,6 +92,16 @@ skimmer_chan_test = executable('skimmer-chan-test',
 )
 test('channelizer', skimmer_chan_test, timeout : 120)
 
+# M3: offline gate — CW backend on synthetic keying (speeds, SNR, jitter,
+# QSB, speed change, squelch-on-noise, channelizer integration).
+skimmer_cw_test = executable('skimmer-cw-test',
+  ['src/cw_test.c'],
+  include_directories : include_directories('src'),
+  dependencies : engine_deps,
+  link_with : engine_lib,
+)
+test('cw-decode', skimmer_cw_test, timeout : 120)
+
 # --- Application ------------------------------------------------------------
 executable('skimmer-for-linux',
   ['src/app/main.c'],

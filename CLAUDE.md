@@ -44,18 +44,19 @@ back to the radio panadapter and to the RBN. The full plan is in
 
 ## Status
 
-**M2 — polyphase channelizer, offline-verified 2026-07-15.** `channelizer.c`
-is a 2×-oversampled PFB (WDSP `fir_bandpass` prototype, fftw3f, hop M/2,
-per-channel rings); measured −109 dBc adjacent isolation, phase preserved,
-0.9 % of one core for the full 192 k segment. `vendor/wdsp` is a **SUBSET**
-(fir/resample/impulse_cache + headers; rnnoise/specbleach header-only stubs) —
-see `vendor/wdsp/VENDOR.md` before touching it. Gates: `skimmer-wdsp-smoke`,
-`skimmer-chan-test`, all in `meson test`.
-M1 (TCI client) is live-verified against a real radio except the **panadapter
-eyeball orientation check — still awaiting Richard's verdict** ("station above
-centre ⇒ positive offset in `skimmer-tci-probe`").
-Next: **M3** — CW decode backend (`decode_cw.c`, `skimmer-cw-test` on recorded
-CW, A/B against fldigi/CW Skimmer).
+**M3 — CW decoder, synthetic gate green 2026-07-15.** `decode_cw.c` v1
+(classical, HMM later): envelope → mean-floor tracker → Schmitt keying →
+blip-folding run classifier → adaptive dit → Morse LUT; layered squelch
+(peak/floor hysteresis + keying-duty test) keeps noise channels MUTE. Copies
+15–35 WPM exact; 12 dB SNR / 15 % jitter / 10 dB QSB ≤2 errors. Gates:
+`skimmer-cw-test` (+ `skimmer-chan-test`, `skimmer-wdsp-smoke`, tci) all in
+`meson test`. `vendor/wdsp` is a **SUBSET** — read `vendor/wdsp/VENDOR.md`
+before touching it.
+Still pending live: **M1 orientation eyeball check** (panadapter vs
+`skimmer-tci-probe` — Richard) and the **M3 off-air A/B** vs fldigi/CW Skimmer
+(needs a recorded IQ capture).
+Next: **M4** — callsign extraction + validation (`callsign.c`,
+`skimmer-call-test`, precision/recall on a labelled corpus). M4 gates M6 (RBN).
 
 ## Layout
 

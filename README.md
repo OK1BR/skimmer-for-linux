@@ -11,14 +11,13 @@ into hundreds of narrow channels, and decodes them in parallel. Valid callsigns
 are pushed back as **spots** onto the `sdr-for-linux` panadapter (click to tune)
 and, as a goal, out to the **Reverse Beacon Network**.
 
-> **Status: M2 — polyphase channelizer done.** The TCI client (M1) pulls and
-> reorients the wideband IQ stream (live-verified against a real radio), and
-> the 2×-oversampled polyphase filter bank now splits it into hundreds of
-> complex 125 Hz channels: −109 dBc adjacent isolation, phase preserved
-> (RTTY/PSK-ready), the whole 192 kHz segment in ~1 % of one core. Everything
-> is gated offline (`meson test`: tci-client, wdsp-smoke, channelizer).
-> Next: M3 — the CW decode backend. See [`docs/SCOPE.md`](docs/SCOPE.md)
-> for the full plan.
+> **Status: M3 — the CW decoder decodes.** The chain works end-to-end on
+> synthetic signals: TCI client (M1, live-verified) → polyphase channelizer
+> (M2: −109 dBc isolation, ~1 % of a core for a 192 kHz segment) → CW backend
+> (M3: exact copy at 15–35 WPM, still copying at 12 dB SNR, through 10 dB QSB
+> and a ±15 % ragged fist, silent on noise-only channels). Everything gated
+> offline (`meson test`). Next: M4 — RBN-grade callsign extraction +
+> validation. See [`docs/SCOPE.md`](docs/SCOPE.md) for the full plan.
 
 ## How it works
 

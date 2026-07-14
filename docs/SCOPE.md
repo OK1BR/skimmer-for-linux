@@ -154,10 +154,29 @@ where relevant, a live check against a running `sdr-for-linux`.
   recovered to 0.01 Hz (phase preserved for RTTY/PSK), channel-edge tone −6 dB
   in both straddlers; at the real 192 k/125 Hz geometry (M = 1536) the whole
   segment channelizes in **0.9 % of one core**.
-- **M3 — CW decode backend.** Per-channel envelope → adaptive threshold → dot/dash
-  timing → adaptive WPM → Morse; HMM/Bayes for a ragged fist. Implements
-  `decode.h`. Gate: `skimmer-cw-test` on recorded CW; A/B against fldigi and
-  CW Skimmer on the same off-air capture.
+- **M3 — CW decode backend. IMPLEMENTED (synthetic gate 2026-07-15; the
+  off-air A/B vs fldigi/CW Skimmer awaits a recorded capture).** Per-channel
+  envelope → adaptive threshold → dot/dash timing → adaptive WPM → Morse;
+  HMM/Bayes for a ragged fist (planned refinement — v1 is classical).
+  Implements `decode.h`. Gate: `skimmer-cw-test` on synthetic CW.
+  Done as `decode_cw.c`: |IQ| envelope (3-tap MA) → dual-rate trackers (peak
+  attack/0.8 s release; floor = EMA of the below-midpoint samples, i.e. the
+  quiet-state MEAN — a min-follower reads Rayleigh noise as signal) → Schmitt
+  keying (on 0.55/off 0.30 of the span) → pending-run classifier with blip
+  folding (a sub-glitch dropout resumes the interrupted run, discarded noise
+  pings re-bridge the space they split) → adaptive dit (EMA; clustering
+  bootstrap) → live char emission at 2.2 dits / word space at 5.5 → Morse LUT.
+  Squelch is layered: peak>4×floor with hysteresis (close at 2.6× — a single
+  threshold flaps during word gaps and eats the following char) AND a
+  keying-likeness test (fraction of samples near the peak: CW ≈ its duty
+  cycle, noise ≈ 4 % — peak ratio alone cannot tell a weak signal from noise).
+  Estimates per event: WPM, SNR, confidence, and the tone offset inside the
+  channel from the marks' phase slope (M5 refines spot frequencies with it).
+  Gate results: exact copy 15–35 WPM; 12 dB SNR, ±15 % jitter and 10 dB QSB
+  copy with ≤2 errors; 18→28 WPM re-locks; 20 s of noise emits nothing; and
+  end-to-end through the real channelizer the right channel copies while a
+  noise-only channel stays mute. (Adjacent-channel ghosts of very strong
+  stations are real signals — the M5 station tracker dedups them.)
 - **M4 — callsign extraction + validation.** Prefix/suffix regex + known-call
   dictionary + plausibility scoring; suppress garbage (RBN-grade). Gate:
   `skimmer-call-test` on a labelled decode corpus (precision/recall).
