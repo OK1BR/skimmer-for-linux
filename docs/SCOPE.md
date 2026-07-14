@@ -117,13 +117,23 @@ where relevant, a live check against a running `sdr-for-linux`.
 - **M0 — scaffold.** `meson` project, GPLv3, docs, engine skeleton (GLib-only,
   headless) + a minimal GTK4/libadwaita window. Gate: `meson compile` is clean;
   the empty app launches.
-- **M1 — TCI client + IQ ingest.** WebSocket client (libwebsockets), handshake
-  (`protocol:ExpertSDR3,…` → `ready;` → `start;`), `iq_samplerate` +
+- **M1 — TCI client + IQ ingest. IMPLEMENTED (offline-verified 2026-07-15;
+  live probe pending a running radio).** WebSocket client (libwebsockets),
+  handshake (`protocol:ExpertSDR3,…` → `ready;` → `start;`), `iq_samplerate` +
   `iq_start:0`, reassemble binary Stream `type=0` blocks, **verify the conjugate
   orientation** (codify the wire convention: a +12 kHz DDC tone must land at
   −12 kHz; conjugate to recover true spectrum), print IQ stats / a raw spectrum.
-  Reuse: libwebsockets, piHPSDR `tci.c` reference. Gate: `skimmer-tci-probe`
-  against a live `sdr-for-linux`, in the spirit of `sdrfl-tci-test`.
+  Reuse: libwebsockets, piHPSDR `tci.c` reference. Done as
+  `src/engine/tci_client.c` (own LWS service thread, text split on `;`,
+  byte-stream Stream reassembly so WS fragmentation is invisible, Q negated on
+  ingest, dds tracked live, outgoing text queue that M5's spot() already rides).
+  Offline gate: `skimmer-tci-test` — mock TCI server, 16 checks incl. the
+  orientation correlation (+12 kHz recovered, image < −40 dB) and the spot
+  format. Live gate: `skimmer-tci-probe [host] [port] [rate] [secs]` — prints
+  handshake, IQ stats (effective vs. nominal rate), top spectrum peaks + an
+  ASCII panorama in true orientation; the eyeball check against the panadapter
+  (station above centre ⇒ positive offset) is the orientation verdict, since
+  the skimmer is read-only and cannot key a reference tone.
 - **M2 — polyphase channelizer.** Wideband IQ → N narrow **complex** channels via
   a polyphase filter bank (WDSP FFT / resampler). Gate: `skimmer-chan-test` —
   synthetic multi-tone input, verify per-channel isolation + alias rejection,

@@ -44,9 +44,14 @@ back to the radio panadapter and to the RBN. The full plan is in
 
 ## Status
 
-**M0 — scaffold.** Skeleton builds (`skimmer-for-linux` GTK app + headless engine
-stubs). No pipeline yet. Next: **M1** — TCI client + IQ ingest + conjugate
-orientation check, gated by `skimmer-tci-probe` against a live `sdr-for-linux`.
+**M1 — TCI client + IQ ingest, offline-verified 2026-07-15.** `tci_client.c` is
+real: LWS client thread, handshake, Stream `type=0` reassembly, conjugate on
+ingest, dds tracking, outgoing spot queue. Gates: `skimmer-tci-test` (offline
+mock server, 16 checks, wired as `meson test`) and `skimmer-tci-probe` (live —
+**still to be run against a running `sdr-for-linux`**: check effective rate and
+the eyeball orientation rule "station above centre ⇒ positive offset").
+Next: **M2** — polyphase channelizer (vendor WDSP in-tree first; `vendor/wdsp`
+does not exist yet despite the Layout section below).
 
 ## Layout
 
