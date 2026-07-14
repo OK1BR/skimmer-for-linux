@@ -136,10 +136,24 @@ where relevant, a live check against a running `sdr-for-linux`.
   ASCII panorama in true orientation; the eyeball check against the panadapter
   (station above centre ⇒ positive offset) is the orientation verdict, since
   the skimmer is read-only and cannot key a reference tone.
-- **M2 — polyphase channelizer.** Wideband IQ → N narrow **complex** channels via
-  a polyphase filter bank (WDSP FFT / resampler). Gate: `skimmer-chan-test` —
+- **M2 — polyphase channelizer. IMPLEMENTED (offline-verified 2026-07-15).**
+  Wideband IQ → N narrow **complex** channels via a polyphase filter bank
+  (WDSP FFT / resampler). Gate: `skimmer-chan-test` —
   synthetic multi-tone input, verify per-channel isolation + alias rejection,
   measure CPU (target: whole CW segment well under one core).
+  Done as `src/engine/channelizer.c`: 2×-oversampled PFB — M = rate/spacing
+  channels, K·M-tap prototype (WDSP `fir_bandpass`, BH4, Σh-normalised), hop
+  M/2, backward fftw3f FFT (channel c ⇔ +c·spacing in true orientation),
+  (−1)^c fix on odd hops, per-channel 8 s output rings with a dropped counter.
+  WDSP vendored as a **subset** (fir/resample/impulse_cache + all headers +
+  header-only rnnoise/specbleach stubs — decided with Richard 2026-07-15, the
+  full mirror would be ~95 MB of NN weights a skimmer never runs;
+  `vendor/wdsp/VENDOR.md` has provenance + the extend/re-sync procedure),
+  smoke-gated by `skimmer-wdsp-smoke`. Measured at 48 k/125 Hz (M = 384):
+  adjacent channels −109 dBc, mirror −302 dBc, ±30 Hz in-channel offsets
+  recovered to 0.01 Hz (phase preserved for RTTY/PSK), channel-edge tone −6 dB
+  in both straddlers; at the real 192 k/125 Hz geometry (M = 1536) the whole
+  segment channelizes in **0.9 % of one core**.
 - **M3 — CW decode backend.** Per-channel envelope → adaptive threshold → dot/dash
   timing → adaptive WPM → Morse; HMM/Bayes for a ragged fist. Implements
   `decode.h`. Gate: `skimmer-cw-test` on recorded CW; A/B against fldigi and

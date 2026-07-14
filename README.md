@@ -11,12 +11,13 @@ into hundreds of narrow channels, and decodes them in parallel. Valid callsigns
 are pushed back as **spots** onto the `sdr-for-linux` panadapter (click to tune)
 and, as a goal, out to the **Reverse Beacon Network**.
 
-> **Status: M1 — TCI client + IQ ingest (offline-verified).** The WebSocket
-> TCI client connects, completes the handshake, subscribes to the wideband IQ
-> stream, reassembles binary Stream blocks and conjugates the ExpertSDR wire
-> orientation on ingest — all gated by `skimmer-tci-test` (mock server,
-> 16 checks). The live check against a running radio is `skimmer-tci-probe`.
-> Next: M2 — the polyphase channelizer. See [`docs/SCOPE.md`](docs/SCOPE.md)
+> **Status: M2 — polyphase channelizer done.** The TCI client (M1) pulls and
+> reorients the wideband IQ stream (live-verified against a real radio), and
+> the 2×-oversampled polyphase filter bank now splits it into hundreds of
+> complex 125 Hz channels: −109 dBc adjacent isolation, phase preserved
+> (RTTY/PSK-ready), the whole 192 kHz segment in ~1 % of one core. Everything
+> is gated offline (`meson test`: tci-client, wdsp-smoke, channelizer).
+> Next: M3 — the CW decode backend. See [`docs/SCOPE.md`](docs/SCOPE.md)
 > for the full plan.
 
 ## How it works

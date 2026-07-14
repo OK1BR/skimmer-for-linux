@@ -23,8 +23,13 @@ gtk_dep   = dependency('gtk4')                # app front-end
 adw_dep   = dependency('libadwaita-1')        # app control surface
 m_dep     = cc.find_library('m', required : false)
 lws_dep   = dependency('libwebsockets')       # M1: TCI client transport
-# Declared ahead of use (activated at their milestone):
-#   fftw3f_dep = dependency('fftw3f')         # M2: channelizer FFT
+fftw3f_dep  = dependency('fftw3f')            # M2: channelizer FFT (float)
+fftw3_dep   = dependency('fftw3')             # WDSP fir.c min-phase path (double)
+threads_dep = dependency('threads')
+
+# WDSP subset (FIR designer + resampler) — declares wdsp_dep. VENDOR.md there
+# records provenance and the subset rationale.
+subdir('vendor/wdsp')
 
 engine_inc = include_directories('src/engine')
 
@@ -39,7 +44,7 @@ engine_sources = [
   'src/engine/callsign.c',     # M4: extraction + validation
   'src/engine/spot_out.c',     # M5/M6: TCI SPOT + RBN telnet feed
 ]
-engine_deps = [glib_dep, lws_dep, m_dep]
+engine_deps = [glib_dep, lws_dep, wdsp_dep, fftw3f_dep, m_dep]
 
 engine_lib = static_library('skimmer-engine',
   engine_sources,
@@ -66,6 +71,26 @@ executable('skimmer-tci-probe',
   dependencies : engine_deps,
   link_with : engine_lib,
 )
+
+# M2: WDSP subset smoke — headers compile against our c11, fir_bandpass +
+# create_resample link and behave (the sdrfl-wdsp-smoke counterpart).
+skimmer_wdsp_smoke = executable('skimmer-wdsp-smoke',
+  ['src/wdsp_smoke.c'],
+  dependencies : [wdsp_dep, m_dep],
+  # includes WDSP's comm.h, which needs the GNU dialect (see vendor/wdsp/meson.build)
+  override_options : ['c_std=gnu11'],
+)
+test('wdsp-smoke', skimmer_wdsp_smoke, timeout : 30)
+
+# M2: offline gate — polyphase channelizer on synthetic tones (isolation,
+# alias rejection, phase preservation, CPU headroom).
+skimmer_chan_test = executable('skimmer-chan-test',
+  ['src/chan_test.c'],
+  include_directories : include_directories('src'),
+  dependencies : engine_deps,
+  link_with : engine_lib,
+)
+test('channelizer', skimmer_chan_test, timeout : 120)
 
 # --- Application ------------------------------------------------------------
 executable('skimmer-for-linux',
