@@ -102,6 +102,16 @@ skimmer_cw_test = executable('skimmer-cw-test',
 )
 test('cw-decode', skimmer_cw_test, timeout : 120)
 
+# M4: offline gate — callsign validity (ITU allocation), labelled-corpus
+# precision/recall, fragment feeds, dictionary boost, noise fuzz.
+skimmer_call_test = executable('skimmer-call-test',
+  ['src/call_test.c'],
+  include_directories : include_directories('src'),
+  dependencies : engine_deps,
+  link_with : engine_lib,
+)
+test('callsign', skimmer_call_test, timeout : 60)
+
 # --- Application ------------------------------------------------------------
 executable('skimmer-for-linux',
   ['src/app/main.c'],

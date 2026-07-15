@@ -52,11 +52,17 @@ blip-folding run classifier → adaptive dit → Morse LUT; layered squelch
 `skimmer-cw-test` (+ `skimmer-chan-test`, `skimmer-wdsp-smoke`, tci) all in
 `meson test`. `vendor/wdsp` is a **SUBSET** — read `vendor/wdsp/VENDOR.md`
 before touching it.
+**M4 — callsign validation, gate green 2026-07-15.** `callsign.c`: structural
+parser + ITU allocation tables (the letter+digit prefix table kills "T1BR"),
+stateful extractor with DE/CQ context, repetition and MASTER.SCP dictionary;
+spot threshold 0.70 — a lone valid token never spots. Corpus precision 1.0.
+Gates now 5 in `meson test` (tci, wdsp, chan, cw, call).
 Still pending live: **M1 orientation eyeball check** (panadapter vs
 `skimmer-tci-probe` — Richard) and the **M3 off-air A/B** vs fldigi/CW Skimmer
 (needs a recorded IQ capture).
-Next: **M4** — callsign extraction + validation (`callsign.c`,
-`skimmer-call-test`, precision/recall on a labelled corpus). M4 gates M6 (RBN).
+Next: **M5** — spot feeder + light UI (station tracker with cross-channel
+ghost dedup, SPOT over TCI, station-list window + decode log; live gate
+against the radio panadapter).
 
 ## Layout
 

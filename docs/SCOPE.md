@@ -177,9 +177,24 @@ where relevant, a live check against a running `sdr-for-linux`.
   end-to-end through the real channelizer the right channel copies while a
   noise-only channel stays mute. (Adjacent-channel ghosts of very strong
   stations are real signals — the M5 station tracker dedups them.)
-- **M4 — callsign extraction + validation.** Prefix/suffix regex + known-call
-  dictionary + plausibility scoring; suppress garbage (RBN-grade). Gate:
-  `skimmer-call-test` on a labelled decode corpus (precision/recall).
+- **M4 — callsign extraction + validation. IMPLEMENTED (offline gate
+  2026-07-15).** Prefix/suffix regex + known-call dictionary + plausibility
+  scoring; suppress garbage (RBN-grade). Gate: `skimmer-call-test` on a
+  labelled decode corpus (precision/recall).
+  Done as `callsign.c`: a structural parser over the four shapes real calls
+  take (single-letter series, two-letter prefix, letter+digit country prefix,
+  digit-first prefix) with the ITU allocation encoded where it discriminates —
+  the letter+digit table is what kills decode garbage like "T1BR" (T1 is not
+  allocated) while passing T77XX, E73ABC, C6AGU, 3DA0RS. Q* is rejected
+  outright (Q-codes). Portable designators parse from either side (OK1BR/P,
+  F/OK1BR). Extraction is a stateful per-channel tokenizer with CW context:
+  scores 0.55 structural + 0.25 DE marker (survives ≤2 garbled tokens) +
+  0.10 CQ window + 0.20 repetition (+0.05 at ≥3) + 0.15 known-call dictionary
+  (MASTER.SCP format, `skim_callsign_dict_load`), spot threshold 0.70 — a lone
+  structurally-valid token is never spotted. Gate: 26 real calls accepted,
+  18 garbage shapes rejected, labelled corpus at precision 1.0 / recall 1.0,
+  token continuity across fragmented feeds, dictionary boost, and 2×4000-token
+  fuzz (E/T noise babble; random alnum single mentions) with zero spots.
 - **M5 — spot feeder + light UI.** Valid call on a frequency → `SPOT:…` back over
   TCI (renders on the `sdr-for-linux` panadapter, click tunes) + the station-list
   window + decode log. Gate: live — spots appear on the radio panadapter and a

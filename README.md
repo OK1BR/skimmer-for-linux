@@ -11,13 +11,15 @@ into hundreds of narrow channels, and decodes them in parallel. Valid callsigns
 are pushed back as **spots** onto the `sdr-for-linux` panadapter (click to tune)
 and, as a goal, out to the **Reverse Beacon Network**.
 
-> **Status: M3 — the CW decoder decodes.** The chain works end-to-end on
-> synthetic signals: TCI client (M1, live-verified) → polyphase channelizer
-> (M2: −109 dBc isolation, ~1 % of a core for a 192 kHz segment) → CW backend
-> (M3: exact copy at 15–35 WPM, still copying at 12 dB SNR, through 10 dB QSB
-> and a ±15 % ragged fist, silent on noise-only channels). Everything gated
-> offline (`meson test`). Next: M4 — RBN-grade callsign extraction +
-> validation. See [`docs/SCOPE.md`](docs/SCOPE.md) for the full plan.
+> **Status: M4 — RBN-grade callsign validation.** The chain works end-to-end
+> on synthetic signals: TCI client (M1, live-verified) → polyphase channelizer
+> (M2: −109 dBc isolation, ~1 % of a core per 192 kHz segment) → CW decoder
+> (M3: exact copy 15–35 WPM, copies at 12 dB SNR, through QSB and a ragged
+> fist, silent on noise) → callsign extraction (M4: ITU-allocation parser,
+> DE/CQ context, repetition + dictionary scoring; corpus precision 1.0, fuzz
+> zero false spots). Everything gated offline (`meson test`, 5 gates).
+> Next: M5 — the spot feeder + station list UI, live against the radio.
+> See [`docs/SCOPE.md`](docs/SCOPE.md) for the full plan.
 
 ## How it works
 
