@@ -36,6 +36,10 @@ void  skim_spot_out_set_sink(SkimSpotOut *s, SkimSpotSink sink, gpointer user);
 gboolean skim_spot_out_emit(SkimSpotOut *s, const char *call, const char *mode,
                             double freq_hz, double snr_db);
 
+/* The station is gone (TTL / takeover): pull its label off the panadapter
+ * (SPOT_DELETE) and forget its dedup memo, so a comeback re-spots at once. */
+void skim_spot_out_delete(SkimSpotOut *s, const char *call);
+
 /* Spots actually emitted since creation. */
 guint64 skim_spot_out_count(const SkimSpotOut *s);
 

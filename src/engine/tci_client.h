@@ -61,6 +61,9 @@ const char *skim_tci_client_protocol(SkimTciClient *c);  /* protocol:<n>,<v>  */
 void     skim_tci_client_spot(SkimTciClient *c, const char *call, const char *mode,
                              double freq_hz, guint32 argb, const char *text);
 
+/* Remove a spot label from the panadapter (SPOT_DELETE:call). */
+void     skim_tci_client_spot_delete(SkimTciClient *c, const char *call);
+
 /* Tune the radio (vfo:0,0,<hz>) — only ever on an explicit user action; the
  * skimmer never changes radio state on its own. */
 void     skim_tci_client_tune(SkimTciClient *c, double freq_hz);

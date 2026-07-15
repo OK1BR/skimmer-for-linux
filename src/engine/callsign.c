@@ -174,13 +174,30 @@ static gboolean dict_has(const char *call) {
 
 /* --- stateful extractor -------------------------------------------------------- */
 
-#define MAX_CAND    12
+/* Enough slots that a rare clean copy of a QSB-mangled call SURVIVES the
+ * flood of its own mutations until the next clean copy arrives — with 12,
+ * 9A170NT's single good decode kept getting evicted before its second
+ * hearing could lift it over the spot threshold (live, 2026-07-15). */
+#define MAX_CAND    24
 #define CALL_MAX    16
 #define CQ_WINDOW   3                          /* tokens after CQ that count */
+
+/* A candidate goes STALE this many processed tokens after its last hit —
+ * the frequency changed hands and the new occupant must win immediately;
+ * an ever-growing count kept the OLD call on top for the rest of the run
+ * (live-caught 2026-07-15). The clock ticks on channel traffic, not wall
+ * time, so a station pausing between overs never ages out. Short on
+ * purpose: while a stale best keeps being re-reported, its station record
+ * keeps a fresh last_heard and the takeover eviction never fires — the
+ * tuned label flickered between the old and the new occupant (EA2BTN vs
+ * IT9IQN, live-caught 2026-07-15). A runner repeats their call every CQ
+ * cycle (~5-10 tokens), so 12 keeps real stations alive. */
+#define CAND_STALE_TOKENS 12
 
 typedef struct {
   char     call[CALL_MAX];
   guint    count;
+  guint    last_tok;                           /* x->tok_n at the last hit   */
   gboolean de_marked;
   gboolean cq_context;
 } Cand;
@@ -189,6 +206,11 @@ struct _SkimCallsignExtractor {
   GString *tok;                                /* partial token across feeds */
   gint     de_pending;                         /* DE marker lives ≤ 2 tokens */
   gint     cq_recent;                          /* tokens since CQ (≤ window) */
+  guint    tok_n;                              /* tokens processed (age clock)*/
+  char     prev_tok[CALL_MAX];                 /* previous token (join hyp.) */
+  gboolean prev_valid;                         /* it was a valid call itself */
+  gboolean prev_de;                            /* DE applied to it           */
+  gboolean prev_cq;                            /* CQ window applied to it    */
   Cand     cand[MAX_CAND];
   guint    ncand;
 };
@@ -211,10 +233,15 @@ void skim_callsign_extractor_reset(SkimCallsignExtractor *x) {
   g_string_set_size(x->tok, 0);
   x->de_pending = 0;
   x->cq_recent  = CQ_WINDOW + 1;
+  x->tok_n      = 0;
   x->ncand      = 0;
+  x->prev_tok[0] = '\0';
+  x->prev_valid = x->prev_de = x->prev_cq = FALSE;
 }
 
-static double cand_score(const Cand *c) {
+static double cand_score(const SkimCallsignExtractor *x, const Cand *c) {
+  if (x->tok_n - c->last_tok > CAND_STALE_TOKENS)
+    return 0.0;                                /* not heard lately — dead    */
   double s = 0.55;                             /* structural + allocation    */
   if (c->de_marked)  { s += 0.25; }
   if (c->cq_context) { s += 0.10; }
@@ -224,43 +251,126 @@ static double cand_score(const Cand *c) {
   return MIN(s, 1.0);
 }
 
+static void cand_add(SkimCallsignExtractor *x, const char *call,
+                     gboolean de_marked, gboolean cq_context) {
+  Cand *c = NULL;
+  for (guint i = 0; i < x->ncand; i++) {
+    if (strcmp(x->cand[i].call, call) == 0) { c = &x->cand[i]; break; }
+  }
+  if (!c) {
+    if (x->ncand < MAX_CAND) {
+      c = &x->cand[x->ncand++];
+    } else {
+      /* Evict the weakest; among equally weak (stale ones all score 0),
+       * the LEAST-REPEATED goes first — a stale twice-heard call is worth
+       * keeping over a stale one-off mutation. */
+      c = &x->cand[0];
+      for (guint i = 1; i < MAX_CAND; i++) {
+        double si = cand_score(x, &x->cand[i]), sc = cand_score(x, c);
+        if (si < sc || (si == sc && x->cand[i].count < c->count)) {
+          c = &x->cand[i];
+        }
+      }
+    }
+    memset(c, 0, sizeof(*c));
+    g_strlcpy(c->call, call, sizeof(c->call));
+  }
+  c->count++;
+  c->last_tok = x->tok_n;
+  if (de_marked)  { c->de_marked  = TRUE; }
+  if (cq_context) { c->cq_context = TRUE; }
+}
+
+/* Tokens that never take part in a join: prosigns and stock CW abbreviations
+ * glue onto a neighbouring call into a VALID-looking phantom ("OK1BR K" →
+ * "OK1BRK", "R EA3I" → "REA3I" — R is a legal prefix). */
+static gboolean join_stop_word(const char *s) {
+  static const char *STOP[] = {
+    "K", "KN", "BK", "SK", "AR", "AS", "TU", "R", "E", "T", "EE",
+    "PSE", "QRZ", "QRL", "TEST", "NR", "UR", "5NN", "599", "73", "88",
+    /* stock QSO vocabulary — "UB7M TNX" glued into the valid-looking
+     * phantom UB7MTNX (live-caught 2026-07-15) */
+    "TNX", "FER", "RPRT", "QSO", "QTH", "AGN", "HW", "GA", "GE", "GM",
+    "DR", "OM", "ES", "VY", "ABT", "HPE", "SRI", "RIG", "ANT", "WX", "OP",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS(STOP); i++) {
+    if (strcmp(s, STOP[i]) == 0) { return TRUE; }
+  }
+  return FALSE;
+}
+
 static void take_token(SkimCallsignExtractor *x, const char *tok) {
-  if (strcmp(tok, "DE") == 0) {
-    x->de_pending = 2;
+  if (strcmp(tok, "\xC2\xB7") == 0) {
+    /* The decoder's over-break mark ("·") is metadata, not received text —
+     * fully transparent here: it must not eat a DE marker and must not
+     * break prev_tok, or a QSB dip inside a call kills the join hypothesis
+     * ("LZ67 · PP" never reassembled into LZ67PP; live-caught 2026-07-15). */
     return;
   }
-  if (strcmp(tok, "CQ") == 0) {
+  x->tok_n++;
+  if (strcmp(tok, "DE") == 0) {
+    x->de_pending = 2;
+    x->prev_tok[0] = '\0';                     /* a call never straddles DE  */
+    return;
+  }
+  if (strcmp(tok, "CQ") == 0 || strcmp(tok, "TEST") == 0 ||
+      strcmp(tok, "QRZ") == 0 || strcmp(tok, "CWT") == 0 ||
+      strcmp(tok, "TU") == 0) {
+    /* A calling marker: CQ/QRZ, TEST and CWT (CWops) — both contest-style
+     * leading ("TEST SD1A") and trailing ("SD1A TEST" / "F5IN CWT") —
+     * bless the call that was JUST sent too, then open the window for the
+     * one that follows. TU is LEADING-only: "TU M0NGN" is the runner
+     * closing a QSO and re-announcing (Richard, 2026-07-15), but in
+     * "<call> TU" the thanks may go to the OTHER station. */
     x->cq_recent = 0;
+    if (strcmp(tok, "TU") != 0 && x->prev_tok[0]) {
+      for (guint i = 0; i < x->ncand; i++) {
+        if (strcmp(x->cand[i].call, x->prev_tok) == 0) {
+          x->cand[i].cq_context = TRUE;
+          break;
+        }
+      }
+    }
+    x->prev_tok[0] = '\0';
     return;
   }
   if (x->cq_recent <= CQ_WINDOW) { x->cq_recent++; }
 
-  if (!skim_callsign_is_valid(tok) || strlen(tok) >= CALL_MAX) {
+  const gboolean valid = skim_callsign_is_valid(tok) && strlen(tok) < CALL_MAX;
+  const gboolean de_now = x->de_pending > 0;
+  const gboolean cq_now = x->cq_recent <= CQ_WINDOW;
+
+  /* Join hypothesis — the sloppy-fist fix: an operator who stretches an
+   * inter-letter gap splits their call across two tokens ("EA3I XQ" for
+   * EA3IXQ, live-caught 2026-07-15). Try gluing the previous token on:
+   * accept when the JOIN is a structurally valid call and it explains
+   * something the parts do not (a dictionary hit, or a fragment that is no
+   * call by itself). Repetition then outscores the torn variants, and the
+   * station table's clip fold retires them. */
+  if (x->prev_tok[0] && !join_stop_word(x->prev_tok) && !join_stop_word(tok)) {
+    char join[CALL_MAX];
+    if (strlen(x->prev_tok) + strlen(tok) < CALL_MAX) {
+      g_snprintf(join, sizeof(join), "%s%s", x->prev_tok, tok);
+      if (skim_callsign_is_valid(join) &&
+          (dict_has(join) || !valid || !x->prev_valid)) {
+        cand_add(x, join, x->prev_de || de_now, x->prev_cq || cq_now);
+      }
+    }
+  }
+
+  g_strlcpy(x->prev_tok, tok, sizeof(x->prev_tok));
+  x->prev_valid = valid;
+  x->prev_de    = de_now;
+  x->prev_cq    = cq_now;
+
+  if (!valid) {
     /* A garbled token between DE and the call must not eat the marker
      * ("DE R OK1BR") — but the marker does not live forever either. */
     if (x->de_pending > 0) { x->de_pending--; }
     return;
   }
 
-  Cand *c = NULL;
-  for (guint i = 0; i < x->ncand; i++) {
-    if (strcmp(x->cand[i].call, tok) == 0) { c = &x->cand[i]; break; }
-  }
-  if (!c) {
-    if (x->ncand < MAX_CAND) {
-      c = &x->cand[x->ncand++];
-    } else {
-      c = &x->cand[0];                         /* evict the weakest          */
-      for (guint i = 1; i < MAX_CAND; i++) {
-        if (cand_score(&x->cand[i]) < cand_score(c)) { c = &x->cand[i]; }
-      }
-    }
-    memset(c, 0, sizeof(*c));
-    g_strlcpy(c->call, tok, sizeof(c->call));
-  }
-  c->count++;
-  if (x->de_pending > 0) { c->de_marked = TRUE; }
-  if (x->cq_recent <= CQ_WINDOW) { c->cq_context = TRUE; }
+  cand_add(x, tok, de_now, cq_now);
   x->de_pending = 0;
 }
 
@@ -279,20 +389,33 @@ void skim_callsign_extractor_feed(SkimCallsignExtractor *x, const char *text) {
   }
 }
 
-double skim_callsign_extractor_best(SkimCallsignExtractor *x,
-                                    char *out, gsize out_size) {
+double skim_callsign_extractor_best_ex(SkimCallsignExtractor *x,
+                                       char *out, gsize out_size,
+                                       gboolean *cq_context) {
   double best = 0.0;
   const Cand *bc = NULL;
   for (guint i = 0; i < x->ncand; i++) {
-    double s = cand_score(&x->cand[i]);
-    if (s > best) { best = s; bc = &x->cand[i]; }
+    double s = cand_score(x, &x->cand[i]);
+    /* Tie goes to the LONGER call: a torn fragment ("EA3I") and its join
+     * ("EA3IXQ") both max the score once repeated — the join is the call. */
+    if (s > best ||
+        (s == best && bc && strlen(x->cand[i].call) > strlen(bc->call))) {
+      best = s;
+      bc = &x->cand[i];
+    }
   }
+  if (cq_context) { *cq_context = bc ? bc->cq_context : FALSE; }
   if (!bc || best < SKIM_CALLSIGN_SPOT_THRESHOLD) {
     if (out && out_size) { out[0] = '\0'; }
     return 0.0;
   }
   if (out && out_size) { g_strlcpy(out, bc->call, out_size); }
   return best;
+}
+
+double skim_callsign_extractor_best(SkimCallsignExtractor *x,
+                                    char *out, gsize out_size) {
+  return skim_callsign_extractor_best_ex(x, out, out_size, NULL);
 }
 
 double skim_callsign_extract(const char *text, char *out, gsize out_size) {

@@ -73,6 +73,15 @@ executable('skimmer-tci-probe',
   link_with : engine_lib,
 )
 
+# M3 A/B harness: offline decode of a probe-recorded cf32 sample through the
+# full pipeline — decoder versions diff on the same off-air corpus.
+executable('skimmer-replay',
+  ['src/replay_main.c'],
+  include_directories : include_directories('src'),
+  dependencies : engine_deps,
+  link_with : engine_lib,
+)
+
 # M2: WDSP subset smoke — headers compile against our c11, fir_bandpass +
 # create_resample link and behave (the sdrfl-wdsp-smoke counterpart).
 skimmer_wdsp_smoke = executable('skimmer-wdsp-smoke',

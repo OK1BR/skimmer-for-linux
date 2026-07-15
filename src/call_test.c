@@ -138,6 +138,66 @@ int main(void) {
     skim_callsign_extractor_free(x);
   }
 
+  /* -- sloppy fist: a stretched gap tears the call into two tokens ------------- */
+  {
+    SkimCallsignExtractor *x = skim_callsign_extractor_new();
+    /* EA3IXQ sent with a too-wide gap before the last two letters — the join
+     * hypothesis must reassemble it (live-caught 2026-07-15: spotted EA3I). */
+    skim_callsign_extractor_feed(x, "CQ TEST DE EA3I XQ CQ TEST DE EA3I XQ K ");
+    char got[32];
+    double s = skim_callsign_extractor_best(x, got, sizeof(got));
+    check("split call re-joins across a sloppy gap (EA3I XQ → EA3IXQ)",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "EA3IXQ") == 0);
+    skim_callsign_extractor_free(x);
+
+    /* A QSB dip fires the decoder's over-break mark MID-CALL — it is
+     * metadata and must stay transparent to the join ("LZ67 · PP"). */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x,
+        "CQ DE LZ67 \xC2\xB7 PP CQ DE LZ67 \xC2\xB7 PP K ");
+    s = skim_callsign_extractor_best(x, got, sizeof(got));
+    check("over-break mark is transparent (LZ67 · PP → LZ67PP)",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "LZ67PP") == 0);
+    skim_callsign_extractor_free(x);
+
+    /* The prosign K must NOT glue onto the call (OK1BRK is a valid shape). */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "CQ DE OK1BR K CQ DE OK1BR K ");
+    s = skim_callsign_extractor_best(x, got, sizeof(got));
+    check("prosign K does not join onto the call (no OK1BRK phantom)",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "OK1BR") == 0);
+    skim_callsign_extractor_free(x);
+  }
+
+  /* -- calling context: leading and trailing markers ---------------------------- */
+  {
+    SkimCallsignExtractor *x = skim_callsign_extractor_new();
+    char got[32];
+    gboolean cq = FALSE;
+    /* contest-style TRAILING marker only: "SD1A TEST SD1A TEST" */
+    skim_callsign_extractor_feed(x, "SD1A TEST SD1A TEST ");
+    double s = skim_callsign_extractor_best_ex(x, got, sizeof(got), &cq);
+    check("trailing TEST marks the call as CALLING",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "SD1A") == 0 && cq);
+    skim_callsign_extractor_free(x);
+
+    /* a runner closing QSOs with "TU <call>" owns the frequency too */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "5NN TU M0NGN 5NN TU M0NGN ");
+    s = skim_callsign_extractor_best_ex(x, got, sizeof(got), &cq);
+    check("leading TU marks the runner as CALLING (TU M0NGN)",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "M0NGN") == 0 && cq);
+    skim_callsign_extractor_free(x);
+
+    /* an S&P answer has no calling marker at all */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "EA2BTN EA2BTN 5NN 73 EA2BTN EA2BTN ");
+    s = skim_callsign_extractor_best_ex(x, got, sizeof(got), &cq);
+    check("an S&P answer is NOT flagged as calling",
+          strcmp(got, "EA2BTN") == 0 && !cq);
+    skim_callsign_extractor_free(x);
+  }
+
   /* -- dictionary boost -------------------------------------------------------- */
   {
     char got[32];

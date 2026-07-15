@@ -67,6 +67,13 @@ static void morse_init(void) {
 
 #define BOOT_MARKS 8            /* marks buffered while the dit is unlearned  */
 
+/* A space this many dits long ends the TRANSMISSION (over), not just a word
+ * (~2× the nominal 7-dit word space): the decoder emits "· " (UTF-8 middle
+ * dot) as a compact over separator ("F6HKA · CQ CWT F6HKA…" — Richard's
+ * pick, matching the header's separator style; 2026-07-15). */
+#define BREAK_DITS 16.0
+#define BREAK_MARK "\xC2\xB7 "  /* "· " */
+
 typedef struct {
   double rate;                  /* baseband sample rate (channelizer out)     */
 
@@ -96,6 +103,10 @@ typedef struct {
   /* character assembly */
   guint    code;                /* 1-prefixed element bits                    */
   guint    nelem;
+  guint    marks_ok;            /* post-bootstrap marks since assembly reset  */
+  gboolean brk_out;             /* over-break separator already emitted       */
+  gboolean paused;              /* quiet, but the learned fist is kept        */
+  double   quiet;               /* samples spent paused                       */
   gboolean char_out;            /* char already emitted in this space run     */
   gboolean word_out;            /* word space already emitted                 */
   gboolean overlong;            /* current mark is a carrier, not keying      */
@@ -126,9 +137,21 @@ static void cw_channel_free(gpointer state) { g_free(state); }
 static void assembly_reset(CwState *st) {
   st->code = 0;
   st->nelem = 0;
+  st->marks_ok = 0;
   st->dit = 0;
   st->nboot = 0;
   st->char_out = st->word_out = TRUE;   /* no leading space on next signal    */
+  st->overlong = FALSE;
+}
+
+/* Pause: the signal went quiet, but the fist was learned — KEEP the dit
+ * clock so the first character after the pause decodes whole. A full reset
+ * here sent 4-8 marks back into the bootstrap and ate the leading letter of
+ * every over ("Z31RM" logged as "31RM" all through the 2026-07-15 sample). */
+static void assembly_pause(CwState *st) {
+  st->code = 0;
+  st->nelem = 0;
+  st->char_out = st->word_out = TRUE;
   st->overlong = FALSE;
 }
 
@@ -139,10 +162,26 @@ static void emit(SkimDecode *out, guint *pos, char c) {
   }
 }
 
+/* Whole string or nothing — a multi-byte UTF-8 mark must never be split. */
+static void emit_str(SkimDecode *out, guint *pos, const char *s) {
+  gsize n = strlen(s);
+  if (*pos + n < SKIM_DECODE_TEXT_MAX) {
+    memcpy(out->text + *pos, s, n + 1);
+    *pos += (guint)n;
+  }
+}
+
 static void emit_code(CwState *st, SkimDecode *out, guint *pos) {
   if (st->nelem && st->code < G_N_ELEMENTS(morse_lut)) {
     char c = morse_lut[st->code];
-    if (c) { emit(out, pos, c); }
+    /* Single-element characters (E/T) are what random noise degenerates
+     * into — an isolated mark only counts once the channel has shown a
+     * consistent fist (several classified marks, stable element timing).
+     * Real E/T inside running text always passes; lone noise pings do not
+     * (2026-07-15 contest sample: E+T were 33 % of all decoded chars). */
+    gboolean lone_et = st->nelem == 1 &&
+                       (st->marks_ok < 4 || st->elem_err > 0.45);
+    if (c && !lone_et) { emit(out, pos, c); }
   }
   st->code  = 0;
   st->nelem = 0;
@@ -176,7 +215,10 @@ static void classify_mark(CwState *st, double run) {
   double   ideal = dash ? 3.0 * st->dit : st->dit;
   st->elem_err += 0.1 * (fabs(run - ideal) / ideal - st->elem_err);
   st->dit      += 0.15 * ((dash ? run / 3.0 : run) - st->dit);
-  st->dit       = CLAMP(st->dit, st->rate * 0.015, st->rate * 0.30);
+  /* Lower dit bound = 55 WPM. Nobody CQs faster; every "80 WPM" trace on
+   * the 2026-07-15 contest sample was noise riding the old 0.015 clamp. */
+  st->dit       = CLAMP(st->dit, st->rate * 0.022, st->rate * 0.30);
+  st->marks_ok++;
   if (st->nelem < 7) {
     st->code  = (st->nelem ? st->code : 1u) << 1 | (dash ? 1u : 0u);
     st->nelem++;
@@ -237,13 +279,39 @@ static gboolean cw_process(gpointer state, const float *iq, guint nframes,
       st->keying = FALSE;
     }
 
-    if (!st->gate_open || !st->keying) {
-      if (st->dit > 0 || st->nboot) { assembly_reset(st); }
+    /* A channel with a PROVEN fist is gated by the envelope squelch alone:
+     * the keying-duty test exists to keep unknown/noise channels mute, but
+     * its EMA dips during inter-over pauses and used to hard-reset the dit
+     * clock (and truncate the first mark back) — the clipped-first-letter
+     * bug. Proven = enough consistently timed marks; a bogus dit learned
+     * from noise (few marks, ragged timing) still faces the duty test.
+     * Quiet longer than 8 s forgets the fist for real. */
+    const gboolean solid =
+        st->dit > 0 && st->marks_ok >= 8 && st->elem_err < 0.35;
+    if (!st->gate_open || (!st->keying && !solid)) {
+      if (solid || st->nboot) {
+        if (!st->paused) {
+          /* The signal vanished — that ends the over too. */
+          if (st->dit > 0 && !st->brk_out) {
+            st->brk_out = TRUE;
+            emit_str(out, &pos, BREAK_MARK);
+          }
+          assembly_pause(st);
+          st->paused = TRUE;
+          st->quiet  = 0.0;
+        }
+        st->quiet += 1.0;
+        if (st->quiet > 8.0 * st->rate) {
+          assembly_reset(st);
+          st->paused = FALSE;
+        }
+      }
       st->key = FALSE;
       st->run = 0;
       st->pend_valid = FALSE;
       continue;
     }
+    st->paused = FALSE;
 
     /* In-channel tone offset from the phase slope, marks only. */
     if (st->key && mag > st->env_lo * 3.0) {
@@ -298,6 +366,7 @@ static gboolean cw_process(gpointer state, const float *iq, guint nframes,
           classify_mark(st, st->pend_len);
           st->char_out = FALSE;
           st->word_out = FALSE;
+          st->brk_out  = FALSE;
           st->last_space = 0.0;
         } else if (!st->overlong) {
           /* Discarded ping: it split one space in two — bridge them, or the
@@ -333,6 +402,10 @@ static gboolean cw_process(gpointer state, const float *iq, guint nframes,
         st->word_out = TRUE;
         emit(out, &pos, ' ');
       }
+      if (!st->brk_out && st->word_out && st->run > BREAK_DITS * st->dit) {
+        st->brk_out = TRUE;                    /* over ended — separator     */
+        emit_str(out, &pos, BREAK_MARK);
+      }
     }
   }
 
@@ -346,12 +419,22 @@ static gboolean cw_process(gpointer state, const float *iq, guint nframes,
   return TRUE;
 }
 
+static double cw_level(gpointer state) {
+  return ((CwState *)state)->env_hi;
+}
+
+static double cw_tone_offset_hz(gpointer state) {
+  return ((CwState *)state)->foff_hz;
+}
+
 const SkimDecodeBackend *skim_decode_cw(void) {
   static const SkimDecodeBackend backend = {
-    .name         = "cw",
-    .channel_new  = cw_channel_new,
-    .channel_free = cw_channel_free,
-    .process      = cw_process,
+    .name           = "cw",
+    .channel_new    = cw_channel_new,
+    .channel_free   = cw_channel_free,
+    .process        = cw_process,
+    .level          = cw_level,
+    .tone_offset_hz = cw_tone_offset_hz,
   };
   return &backend;
 }

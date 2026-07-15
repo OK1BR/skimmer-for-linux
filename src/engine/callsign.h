@@ -44,6 +44,13 @@ void   skim_callsign_extractor_feed(SkimCallsignExtractor *x, const char *text);
 double skim_callsign_extractor_best(SkimCallsignExtractor *x,
                                     char *out, gsize out_size);
 
+/* As best(), and reports whether the candidate was heard CALLING — in the
+ * context of a CQ/TEST/QRZ marker (leading or trailing). The CQ-only spot
+ * policy keys off this: S&P answers do not own the frequency. */
+double skim_callsign_extractor_best_ex(SkimCallsignExtractor *x,
+                                       char *out, gsize out_size,
+                                       gboolean *cq_context);
+
 /* One-shot convenience over a complete text buffer (same scoring). */
 double skim_callsign_extract(const char *text, char *out, gsize out_size);
 

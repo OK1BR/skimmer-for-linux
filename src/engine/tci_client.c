@@ -422,6 +422,12 @@ void skim_tci_client_spot(SkimTciClient *c, const char *call, const char *mode,
   g_free(t);
 }
 
+void skim_tci_client_spot_delete(SkimTciClient *c, const char *call) {
+  if (!c->thread || !call || !call[0])
+    return;
+  cli_queue(c, g_strdup_printf("spot_delete:%s;", call));
+}
+
 void skim_tci_client_tune(SkimTciClient *c, double freq_hz) {
   if (!c->thread || freq_hz <= 0)
     return;

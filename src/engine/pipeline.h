@@ -31,6 +31,8 @@ typedef struct _SkimPipeline SkimPipeline;
  * also fire on the network thread (connection loss, radio retune) or the
  * caller's thread (start/stop). Marshal accordingly. */
 typedef void (*SkimPipelineStationCb)(const SkimStation *st, gpointer user);
+/* A station left the tracker (TTL, or its frequency was taken over). */
+typedef void (*SkimPipelineStationGoneCb)(const SkimStation *st, gpointer user);
 typedef void (*SkimPipelineTextCb)(double freq_hz, const char *text, gpointer user);
 typedef void (*SkimPipelineStateCb)(gboolean connected, const char *detail, gpointer user);
 /* The radio's tuned frequency (vfo:0,0) changed. */
@@ -40,6 +42,7 @@ SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg);
 void          skim_pipeline_free(SkimPipeline *p);
 
 void skim_pipeline_set_station_cb(SkimPipeline *p, SkimPipelineStationCb cb, gpointer user);
+void skim_pipeline_set_station_gone_cb(SkimPipeline *p, SkimPipelineStationGoneCb cb, gpointer user);
 void skim_pipeline_set_text_cb(SkimPipeline *p, SkimPipelineTextCb cb, gpointer user);
 void skim_pipeline_set_state_cb(SkimPipeline *p, SkimPipelineStateCb cb, gpointer user);
 void skim_pipeline_set_vfo_cb(SkimPipeline *p, SkimPipelineVfoCb cb, gpointer user);
@@ -48,12 +51,25 @@ void skim_pipeline_set_vfo_cb(SkimPipeline *p, SkimPipelineVfoCb cb, gpointer us
 gboolean skim_pipeline_start(SkimPipeline *p, GError **error);
 void     skim_pipeline_stop(SkimPipeline *p);
 
+/* Offline mode (the .cf32 replayer / M3 A/B gate): no TCI, no engine thread —
+ * the caller feeds IQ synchronously and callbacks fire on the caller's
+ * thread. The decode log is stamped with STREAM time (deterministic across
+ * runs). host/port/iq_rate in the config are ignored. */
+gboolean skim_pipeline_start_offline(SkimPipeline *p, GError **error);
+void     skim_pipeline_feed(SkimPipeline *p, const float *iq, guint nframes,
+                            double rate, double center_hz);
+
 /* The radio's tuned frequency (0 until the first vfo broadcast lands). */
 double skim_pipeline_vfo_hz(const SkimPipeline *p);
 
 /* Tune the radio to freq_hz — only ever on an explicit user action (a no-op
  * while disconnected). The vfo broadcast confirms the retune. */
 void   skim_pipeline_tune(SkimPipeline *p, double freq_hz);
+
+/* Spot policy: when TRUE, only stations heard CALLING (CQ/TEST/QRZ context)
+ * reach the spot sinks — S&P answers stay off the panadapter/RBN. The
+ * station list still tracks everything. Runtime-switchable, thread-safe. */
+void   skim_pipeline_set_spot_cq_only(SkimPipeline *p, gboolean cq_only);
 
 /* Counters for the status line / gates. */
 guint64 skim_pipeline_frames(const SkimPipeline *p);

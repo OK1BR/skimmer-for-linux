@@ -53,6 +53,9 @@ typedef struct {
   SkimPipeline   *pipeline;      /* running pipeline (owned by main thread)   */
   SkimPipeline   *starting;      /* pipeline mid-handshake on a worker thread */
   char           *host;          /* TCI server host (persisted preference)    */
+  gboolean        cq_only;       /* spot only CALLING stations (persisted)    */
+  int             decode_font;   /* decode pane font size, pt (persisted)     */
+  GtkCssProvider *css;           /* carries the decode pane font rule         */
   gboolean        probing;       /* port probe / handshake in flight          */
   double          vfo_hz;        /* the radio's tuned frequency (vfo:0,0)     */
   GListStore     *stations;      /* of SkimRow                                */
@@ -60,22 +63,26 @@ typedef struct {
   GtkTextBuffer  *tuned;         /* decode text at the tuned frequency        */
   GtkTextView    *tuned_view;
   GtkLabel       *tuned_label;
+  GtkWidget      *tuned_scroll;  /* the decode pane's scroller                */
+  GtkWidget      *list_scroll;   /* the station list's scroller               */
+  GtkWidget      *list_sep;      /* separator between list and decode pane    */
+  gboolean        list_visible;  /* station list shown (persisted); the CW
+                                  * decode pane is ALWAYS visible             */
   AdwWindowTitle *title;
   GtkLabel       *status;
   GtkWindow      *window;
   GPtrArray      *freq_logs;     /* of FreqLog — decode history per frequency */
 } App;
 
-/* The bottom pane's header: tuned frequency + the station heard there. */
+/* The bottom pane's header: the station heard on the tuned frequency (the
+ * frequency itself lives in the footer). */
 static void tuned_label_update(App *app, const SkimStation *st) {
   char s[128];
-  if (app->vfo_hz <= 0) {
-    g_strlcpy(s, "Tuned: —", sizeof(s));
-  } else if (st) {
-    g_snprintf(s, sizeof(s), "Tuned: %.1f kHz — %s · %.0f WPM · %.0f dB",
-               app->vfo_hz / 1000.0, st->call, st->speed, st->snr_db);
+  if (st) {
+    g_snprintf(s, sizeof(s), "%s · %.0f WPM · %.0f dB",
+               st->call, st->speed, st->snr_db);
   } else {
-    g_snprintf(s, sizeof(s), "Tuned: %.1f kHz", app->vfo_hz / 1000.0);
+    g_strlcpy(s, "—", sizeof(s));
   }
   gtk_label_set_text(app->tuned_label, s);
 }
@@ -128,15 +135,19 @@ static FreqLog *freqlog_get(App *app, double freq_hz) {
   return fl;
 }
 
-/* Re-resolve which known station (if any) sits on the tuned frequency. */
+/* Re-resolve which known station sits on the tuned frequency. When two
+ * records overlap the window (frequency changing hands), the FRESHEST one
+ * wins — updating from every incoming event made the label flicker between
+ * the old and the new occupant. */
 static void tuned_station_refresh(App *app) {
   SkimStation hit;
   gboolean have = FALSE;
   if (app->vfo_hz > 0) {
     guint n = g_list_model_get_n_items(G_LIST_MODEL(app->stations));
-    for (guint i = 0; i < n && !have; i++) {
+    for (guint i = 0; i < n; i++) {
       SkimRow *r = g_list_model_get_item(G_LIST_MODEL(app->stations), i);
-      if (ABS(r->st.freq_hz - app->vfo_hz) <= TUNED_WINDOW_HZ) {
+      if (ABS(r->st.freq_hz - app->vfo_hz) <= TUNED_WINDOW_HZ &&
+          (!have || r->st.last_heard > hit.last_heard)) {
         hit  = r->st;
         have = TRUE;
       }
@@ -177,10 +188,8 @@ static gboolean on_station_idle(gpointer data) {
   guint n = g_list_model_get_n_items(G_LIST_MODEL(app->stations));
   for (guint i = 0; i < n; i++) {
     SkimRow *r = g_list_model_get_item(G_LIST_MODEL(app->stations), i);
-    /* Same-call radius mirrors the tracker's merge key, so a row follows its
-     * merged record even when the frequency snaps to a stronger peak. */
-    gboolean same = g_strcmp0(r->st.call, ev->st.call) == 0 &&
-                    ABS(r->st.freq_hz - ev->st.freq_hz) <= SKIM_STATION_SAMECALL_HZ;
+    /* The tracker keeps ONE record per call (QSY moves it) — match by call. */
+    gboolean same = g_strcmp0(r->st.call, ev->st.call) == 0;
     g_object_unref(r);
     if (same) {
       /* Rows carry no notify — replace to refresh the bound labels. */
@@ -189,10 +198,35 @@ static gboolean on_station_idle(gpointer data) {
     }
   }
   g_list_store_append(app->stations, skim_row_new(&ev->st));
-  /* Keep the tuned pane's header fresh if this is the tuned station. */
+  /* Keep the tuned pane's header fresh if this touches the tuned window —
+   * via the freshest-record resolver, never straight from the event. */
   if (app->vfo_hz > 0 && ABS(ev->st.freq_hz - app->vfo_hz) <= TUNED_WINDOW_HZ) {
-    tuned_label_update(app, &ev->st);
+    tuned_station_refresh(app);
   }
+  g_free(ev);
+  return G_SOURCE_REMOVE;
+}
+
+/* Station left the tracker (TTL / frequency takeover) — drop its row. */
+typedef struct {
+  App        *app;
+  SkimStation st;
+} GoneEvent;
+
+static gboolean on_gone_idle(gpointer data) {
+  GoneEvent *ev = data;
+  App *app = ev->app;
+  guint n = g_list_model_get_n_items(G_LIST_MODEL(app->stations));
+  for (guint i = 0; i < n; i++) {
+    SkimRow *r = g_list_model_get_item(G_LIST_MODEL(app->stations), i);
+    gboolean same = g_strcmp0(r->st.call, ev->st.call) == 0;
+    g_object_unref(r);
+    if (same) {
+      g_list_store_remove(app->stations, i);
+      break;
+    }
+  }
+  tuned_station_refresh(app);
   g_free(ev);
   return G_SOURCE_REMOVE;
 }
@@ -298,17 +332,35 @@ static void pipe_vfo_cb(double vfo_hz, gpointer user) {
   ev->vfo_hz = vfo_hz;
   g_idle_add(on_vfo_idle, ev);
 }
+static void pipe_gone_cb(const SkimStation *st, gpointer user) {
+  GoneEvent *ev = g_new0(GoneEvent, 1);
+  ev->app = user;
+  ev->st  = *st;
+  g_idle_add(on_gone_idle, ev);
+}
 
 /* --- status line -------------------------------------------------------------------- */
+
+/* Rebind visible rows so the Age column ticks even for silent stations. */
+static gboolean age_tick(gpointer data) {
+  App *app = data;
+  guint n = g_list_model_get_n_items(G_LIST_MODEL(app->stations));
+  if (n) { g_list_model_items_changed(G_LIST_MODEL(app->stations), 0, n, n); }
+  return G_SOURCE_CONTINUE;
+}
 
 static gboolean status_tick(gpointer data) {
   App *app = data;
   if (app->pipeline) {
-    char s[128];
+    char s[160];
+    char vfo[32] = "";
+    if (app->vfo_hz > 0) {
+      g_snprintf(vfo, sizeof(vfo), "%.2f kHz · ", app->vfo_hz / 1000.0);
+    }
     g_snprintf(s, sizeof(s),
-               "%u stations · %" G_GUINT64_FORMAT " spots · %" G_GUINT64_FORMAT
-               " Mframes",
-               skim_pipeline_stations(app->pipeline),
+               "%s%u stations · %" G_GUINT64_FORMAT " spots · %"
+               G_GUINT64_FORMAT " Mframes",
+               vfo, skim_pipeline_stations(app->pipeline),
                skim_pipeline_spots(app->pipeline),
                skim_pipeline_frames(app->pipeline) / 1000000);
     gtk_label_set_text(app->status, s);
@@ -339,13 +391,55 @@ static char *settings_load_host(void) {
   return g_strdup("127.0.0.1");
 }
 
-static void settings_save_host(const char *host) {
+static gboolean settings_load_cq_only(void) {
+  char *path = settings_file();
+  GKeyFile *kf = g_key_file_new();
+  gboolean v = TRUE;                           /* RBN etiquette by default   */
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL) &&
+      g_key_file_has_key(kf, "spots", "cq_only", NULL)) {
+    v = g_key_file_get_boolean(kf, "spots", "cq_only", NULL);
+  }
+  g_key_file_free(kf);
+  g_free(path);
+  return v;
+}
+
+static int settings_load_decode_font(void) {
+  char *path = settings_file();
+  GKeyFile *kf = g_key_file_new();
+  int v = 11;
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL) &&
+      g_key_file_has_key(kf, "ui", "decode_font_pt", NULL)) {
+    v = g_key_file_get_integer(kf, "ui", "decode_font_pt", NULL);
+  }
+  g_key_file_free(kf);
+  g_free(path);
+  return CLAMP(v, 8, 32);
+}
+
+static gboolean settings_load_list_visible(void) {
+  char *path = settings_file();
+  GKeyFile *kf = g_key_file_new();
+  gboolean v = TRUE;
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL) &&
+      g_key_file_has_key(kf, "ui", "station_list", NULL)) {
+    v = g_key_file_get_boolean(kf, "ui", "station_list", NULL);
+  }
+  g_key_file_free(kf);
+  g_free(path);
+  return v;
+}
+
+static void settings_save(const App *app) {
   char *path = settings_file();
   char *dir  = g_path_get_dirname(path);
   g_mkdir_with_parents(dir, 0755);
   GKeyFile *kf = g_key_file_new();
   g_key_file_load_from_file(kf, path, G_KEY_FILE_KEEP_COMMENTS, NULL);
-  g_key_file_set_string(kf, "tci", "host", host);
+  g_key_file_set_string(kf, "tci", "host", app->host);
+  g_key_file_set_boolean(kf, "spots", "cq_only", app->cq_only);
+  g_key_file_set_integer(kf, "ui", "decode_font_pt", app->decode_font);
+  g_key_file_set_boolean(kf, "ui", "station_list", app->list_visible);
   GError *err = NULL;
   if (!g_key_file_save_to_file(kf, path, &err)) {
     g_warning("settings: %s not saved: %s", path, err ? err->message : "?");
@@ -354,6 +448,35 @@ static void settings_save_host(const char *host) {
   g_key_file_free(kf);
   g_free(dir);
   g_free(path);
+}
+
+/* Station list show/hide (the header-bar toggle next to Preferences). The
+ * CW decode pane stays put and takes over the space when the list hides. */
+static void on_list_toggled(GtkToggleButton *btn, gpointer user) {
+  App *app = user;
+  gboolean vis = gtk_toggle_button_get_active(btn);
+  gtk_widget_set_visible(app->list_scroll, vis);
+  gtk_widget_set_visible(app->list_sep, vis);
+  gtk_widget_set_vexpand(app->tuned_scroll, !vis);
+  if (vis != app->list_visible) {
+    app->list_visible = vis;
+    settings_save(app);
+  }
+}
+
+/* The decode pane's font size rides a CSS provider — reloading the rule
+ * restyles the view live. */
+static void decode_font_apply(App *app) {
+  if (!app->css) {
+    app->css = gtk_css_provider_new();
+    gtk_style_context_add_provider_for_display(
+        gdk_display_get_default(), GTK_STYLE_PROVIDER(app->css),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+  }
+  char rule[96];
+  g_snprintf(rule, sizeof(rule), "textview.decode-pane { font-size: %dpt; }",
+             app->decode_font);
+  gtk_css_provider_load_from_string(app->css, rule);
 }
 
 /* --- auto-connect ------------------------------------------------------------------------
@@ -386,6 +509,7 @@ static void start_pipeline_done(GObject *src, GAsyncResult *res, gpointer user) 
   }
   app->pipeline = app->starting;
   app->starting = NULL;
+  skim_pipeline_set_spot_cq_only(app->pipeline, app->cq_only);
   app->vfo_hz   = skim_pipeline_vfo_hz(app->pipeline);
   tuned_label_update(app, NULL);
 }
@@ -428,6 +552,7 @@ static void probe_done(GObject *src, GAsyncResult *res, gpointer user) {
   g_free(dict);
   g_free(dlog);
   skim_pipeline_set_station_cb(app->starting, pipe_station_cb, app);
+  skim_pipeline_set_station_gone_cb(app->starting, pipe_gone_cb, app);
   skim_pipeline_set_text_cb(app->starting, pipe_text_cb, app);
   skim_pipeline_set_state_cb(app->starting, pipe_state_cb, app);
   skim_pipeline_set_vfo_cb(app->starting, pipe_vfo_cb, app);
@@ -457,13 +582,37 @@ static gboolean scan_tick(gpointer data) {
 
 static void prefs_closed(AdwDialog *dlg, gpointer user) {
   App *app = user;
-  GtkWidget *row = g_object_get_data(G_OBJECT(dlg), "host-row");
+  GtkWidget *row  = g_object_get_data(G_OBJECT(dlg), "host-row");
+  GtkWidget *sw   = g_object_get_data(G_OBJECT(dlg), "cq-row");
+  GtkWidget *frow = g_object_get_data(G_OBJECT(dlg), "font-row");
   const char *h = gtk_editable_get_text(GTK_EDITABLE(row));
   char *host = g_strstrip(g_strdup((h && h[0]) ? h : "127.0.0.1"));
-  if (host[0] && g_strcmp0(host, app->host) != 0) {
+  gboolean cq_only = adw_switch_row_get_active(ADW_SWITCH_ROW(sw));
+  int font_pt = (int)adw_spin_row_get_value(ADW_SPIN_ROW(frow));
+  gboolean host_changed = host[0] && g_strcmp0(host, app->host) != 0;
+  gboolean cq_changed   = cq_only != app->cq_only;
+  gboolean font_changed = font_pt != app->decode_font;
+
+  if (host_changed) {
     g_free(app->host);
     app->host = host;
-    settings_save_host(app->host);
+  } else {
+    g_free(host);
+  }
+  if (cq_changed) {
+    app->cq_only = cq_only;
+    if (app->pipeline) {                       /* applies live               */
+      skim_pipeline_set_spot_cq_only(app->pipeline, cq_only);
+    }
+  }
+  if (font_changed) {
+    app->decode_font = font_pt;
+    decode_font_apply(app);
+  }
+  if (host_changed || cq_changed || font_changed) {
+    settings_save(app);
+  }
+  if (host_changed) {
     if (app->pipeline) {                       /* move to the new server      */
       skim_pipeline_stop(app->pipeline);
       g_clear_pointer(&app->pipeline, skim_pipeline_free);
@@ -471,8 +620,6 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
       tuned_label_update(app, NULL);
     }
     scan_tick(app);
-  } else {
-    g_free(host);
   }
 }
 
@@ -492,9 +639,34 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(grp), row);
   adw_preferences_page_add(ADW_PREFERENCES_PAGE(page),
                            ADW_PREFERENCES_GROUP(grp));
+
+  GtkWidget *sgrp = adw_preferences_group_new();
+  adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(sgrp), "Spots");
+  GtkWidget *sw = adw_switch_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(sw), "CQ only");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(sw),
+      "Spot only stations heard calling (CQ, TEST, QRZ) — "
+      "S&P answers stay off the panadapter");
+  adw_switch_row_set_active(ADW_SWITCH_ROW(sw), app->cq_only);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(sgrp), sw);
+  adw_preferences_page_add(ADW_PREFERENCES_PAGE(page),
+                           ADW_PREFERENCES_GROUP(sgrp));
+
+  GtkWidget *ugrp = adw_preferences_group_new();
+  adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(ugrp), "Display");
+  GtkWidget *frow = adw_spin_row_new_with_range(8, 32, 1);
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(frow),
+                                "Decode pane font size (pt)");
+  adw_spin_row_set_value(ADW_SPIN_ROW(frow), app->decode_font);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(ugrp), frow);
+  adw_preferences_page_add(ADW_PREFERENCES_PAGE(page),
+                           ADW_PREFERENCES_GROUP(ugrp));
+
   adw_preferences_dialog_add(ADW_PREFERENCES_DIALOG(dlg),
                              ADW_PREFERENCES_PAGE(page));
   g_object_set_data(G_OBJECT(dlg), "host-row", row);
+  g_object_set_data(G_OBJECT(dlg), "cq-row", sw);
+  g_object_set_data(G_OBJECT(dlg), "font-row", frow);
   g_signal_connect(dlg, "closed", G_CALLBACK(prefs_closed), app);
   adw_dialog_present(dlg, GTK_WIDGET(app->window));
 }
@@ -524,7 +696,8 @@ static void fmt_call(const SkimStation *st, char *o, gsize n) {
   g_strlcpy(o, st->call, n);
 }
 static void fmt_freq(const SkimStation *st, char *o, gsize n) {
-  g_snprintf(o, n, "%.1f", st->freq_hz / 1000.0);
+  g_snprintf(o, n, "%.2f", st->freq_hz / 1000.0);   /* 10 Hz — the estimate's
+                                                     * real accuracy         */
 }
 static void fmt_wpm(const SkimStation *st, char *o, gsize n) {
   g_snprintf(o, n, "%.0f", st->speed);
@@ -534,6 +707,18 @@ static void fmt_snr(const SkimStation *st, char *o, gsize n) {
 }
 static void fmt_heard(const SkimStation *st, char *o, gsize n) {
   g_snprintf(o, n, "%u×", st->reports);
+}
+static void fmt_cq(const SkimStation *st, char *o, gsize n) {
+  g_strlcpy(o, st->cq ? "CQ" : "", n);
+}
+static void fmt_age(const SkimStation *st, char *o, gsize n) {
+  int s = (int)((g_get_monotonic_time() - st->last_heard) / G_USEC_PER_SEC);
+  if (s < 0) { s = 0; }
+  if (s < 60) {
+    g_snprintf(o, n, "%ds", s);
+  } else {
+    g_snprintf(o, n, "%dm%02ds", s / 60, s % 60);
+  }
 }
 
 static void add_column(GtkColumnView *view, const char *title, RowToText fmt,
@@ -553,7 +738,7 @@ static int freq_cmp(gconstpointer a, gconstpointer b, gpointer u) {
   return (ra->st.freq_hz > rb->st.freq_hz) - (ra->st.freq_hz < rb->st.freq_hz);
 }
 
-/* Row activated (double-click / Enter) → tune the radio to the station; the
+/* Row activated (SINGLE click / Enter) → tune the radio to the station; the
  * vfo broadcast comes back and swaps the tuned pane to that frequency. */
 static void on_row_activated(GtkColumnView *view, guint position, gpointer user) {
   (void)view;
@@ -574,8 +759,11 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   GtkWidget *window = adw_application_window_new(gtk_app);
   gtk_window_set_title(GTK_WINDOW(window), "Skimmer for Linux");
   gtk_window_set_default_size(GTK_WINDOW(window), 900, 640);
-  app->window = GTK_WINDOW(window);
-  app->host   = settings_load_host();
+  app->window       = GTK_WINDOW(window);
+  app->host         = settings_load_host();
+  app->cq_only      = settings_load_cq_only();
+  app->decode_font  = settings_load_decode_font();
+  app->list_visible = settings_load_list_visible();
 
   app->title = ADW_WINDOW_TITLE(adw_window_title_new("Skimmer for Linux", ""));
   GtkWidget *header = adw_header_bar_new();
@@ -587,6 +775,13 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   g_signal_connect(prefs_btn, "clicked", G_CALLBACK(prefs_open), app);
   adw_header_bar_pack_end(ADW_HEADER_BAR(header), prefs_btn);
 
+  GtkWidget *list_btn = gtk_toggle_button_new();
+  gtk_button_set_icon_name(GTK_BUTTON(list_btn), "view-list-symbolic");
+  gtk_widget_set_tooltip_text(list_btn, "Show station list");
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(list_btn), app->list_visible);
+  g_signal_connect(list_btn, "toggled", G_CALLBACK(on_list_toggled), app);
+  adw_header_bar_pack_end(ADW_HEADER_BAR(header), list_btn);
+
   /* Station list, sorted by frequency — a text band map. Activate a row
    * (double-click / Enter) to tune the radio to that station. */
   app->freq_logs = g_ptr_array_new_with_free_func(freqlog_free);
@@ -596,13 +791,15 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   g_object_ref(app->sorted);
   GtkSingleSelection *sel = gtk_single_selection_new(G_LIST_MODEL(app->sorted));
   GtkWidget *view = gtk_column_view_new(GTK_SELECTION_MODEL(sel));
-  gtk_column_view_set_single_click_activate(GTK_COLUMN_VIEW(view), FALSE);
+  gtk_column_view_set_single_click_activate(GTK_COLUMN_VIEW(view), TRUE);
   g_signal_connect(view, "activate", G_CALLBACK(on_row_activated), app);
   add_column(GTK_COLUMN_VIEW(view), "Call", fmt_call, TRUE);
   add_column(GTK_COLUMN_VIEW(view), "kHz", fmt_freq, FALSE);
   add_column(GTK_COLUMN_VIEW(view), "WPM", fmt_wpm, FALSE);
   add_column(GTK_COLUMN_VIEW(view), "SNR", fmt_snr, FALSE);
   add_column(GTK_COLUMN_VIEW(view), "Heard", fmt_heard, FALSE);
+  add_column(GTK_COLUMN_VIEW(view), "CQ", fmt_cq, FALSE);
+  add_column(GTK_COLUMN_VIEW(view), "Age", fmt_age, FALSE);
   GtkWidget *list_scroll = gtk_scrolled_window_new();
   gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(list_scroll), view);
   gtk_widget_set_vexpand(list_scroll, TRUE);
@@ -626,9 +823,12 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   gtk_text_view_set_cursor_visible(app->tuned_view, FALSE);
   gtk_text_view_set_wrap_mode(app->tuned_view, GTK_WRAP_WORD_CHAR);
   gtk_text_view_set_left_margin(app->tuned_view, 12);
+  gtk_widget_add_css_class(tuned_view, "decode-pane");
+  decode_font_apply(app);
   GtkWidget *tuned_scroll = gtk_scrolled_window_new();
   gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(tuned_scroll), tuned_view);
   gtk_widget_set_size_request(tuned_scroll, -1, 160);
+  app->tuned_scroll = tuned_scroll;
 
   app->status = GTK_LABEL(gtk_label_new("not connected"));
   gtk_label_set_xalign(app->status, 0.0);
@@ -637,14 +837,20 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   gtk_widget_set_margin_top(GTK_WIDGET(app->status), 4);
   gtk_widget_set_margin_bottom(GTK_WIDGET(app->status), 4);
   g_timeout_add_seconds(1, status_tick, app);
+  g_timeout_add_seconds(2, age_tick, app);
 
   GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_box_append(GTK_BOX(box), header);
   gtk_box_append(GTK_BOX(box), list_scroll);
-  gtk_box_append(GTK_BOX(box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+  app->list_scroll = list_scroll;
+  app->list_sep    = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+  gtk_box_append(GTK_BOX(box), app->list_sep);
   gtk_box_append(GTK_BOX(box), GTK_WIDGET(app->tuned_label));
   gtk_box_append(GTK_BOX(box), tuned_scroll);
   gtk_box_append(GTK_BOX(box), GTK_WIDGET(app->status));
+  gtk_widget_set_visible(list_scroll, app->list_visible);
+  gtk_widget_set_visible(app->list_sep, app->list_visible);
+  gtk_widget_set_vexpand(tuned_scroll, !app->list_visible);
 
   adw_application_window_set_content(ADW_APPLICATION_WINDOW(window), box);
   gtk_window_present(GTK_WINDOW(window));

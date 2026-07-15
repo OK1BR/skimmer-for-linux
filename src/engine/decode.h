@@ -39,6 +39,18 @@ struct _SkimDecodeBackend {
    * Returns TRUE and fills *out when characters were decoded this block. */
   gboolean (*process)(gpointer state, const float *iq, guint nframes,
                       SkimDecode *out);
+
+  /* Current peak signal level, linear envelope units (comparable across
+   * channels of one bank). The pipeline arbitrates adjacent-channel ghosts
+   * with it: only the strongest channel of a splatter group may report.
+   * Optional (NULL = backend cannot tell). */
+  double (*level)(gpointer state);
+
+  /* Current in-channel tone offset estimate (Hz, EMA) — lets the pipeline
+   * recognise that two OVERLAPPING channels are tracking the same physical
+   * tone (a signal midway decodes in both at equal level and doubles every
+   * character). Optional. */
+  double (*tone_offset_hz)(gpointer state);
 };
 
 G_END_DECLS

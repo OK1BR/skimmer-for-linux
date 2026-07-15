@@ -345,14 +345,24 @@ int main(void) {
     check("ghost within 300 Hz merges (1 station)", skim_station_table_size(t) == 1);
     check("stronger report keeps the frequency",
           m1 == m2 && fabs(m2->freq_hz - 7032018) < 1);
-    SkimStation qsy = a;
-    qsy.freq_hz = 7040000;
-    skim_station_table_report(t, &qsy);
-    check("same call far away is a second station",
-          skim_station_table_size(t) == 2);
+    SkimStation qsy = a;                       /* one call = one record:     */
+    qsy.freq_hz = 7040000;                     /* a confident far report is  */
+    qsy.last_heard = 2;                        /* a QSY and MOVES the record */
+    const SkimStation *m3 = skim_station_table_report(t, &qsy);
+    check("confident far report is a QSY — still 1 station, moved",
+          skim_station_table_size(t) == 1 && m3 == m1 &&
+          fabs(m3->freq_hz - 7040000) < 1);
+    SkimStation garble = a;                    /* one-off garble of the call */
+    garble.freq_hz = 7010000;                  /* elsewhere must NOT move it */
+    garble.score   = 0.70;
+    garble.last_heard = 3;
+    const SkimStation *m4 = skim_station_table_report(t, &garble);
+    check("weak far report does not move the station",
+          m4 == m1 && fabs(m4->freq_hz - 7040000) < 1 &&
+          skim_station_table_size(t) == 1);
     check("lookup finds the call", skim_station_table_lookup(t, "OK1BR") != NULL);
     check("prune drops idle stations",
-          skim_station_table_prune(t, 0) == 2 && skim_station_table_size(t) == 0);
+          skim_station_table_prune(t, 0) == 1 && skim_station_table_size(t) == 0);
     skim_station_table_free(t);
   }
 

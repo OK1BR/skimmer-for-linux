@@ -50,7 +50,8 @@ SkimSpotOut *skim_spot_out_new(SkimTciClient *tci, const char *rbn_host, guint16
   s->rbn_host  = g_strdup(rbn_host); /* NULL-safe: g_strdup(NULL) == NULL */
   s->rbn_port  = rbn_port;
   s->respot_s  = 180;
-  s->qsy_hz    = 150.0;
+  s->qsy_hz    = 30.0;    /* re-spot as the frequency estimate converges —
+                           * the label follows onto the true carrier         */
   s->max_per_s = 5;
   s->tokens    = 5.0;
   s->token_at  = g_get_monotonic_time();
@@ -114,6 +115,13 @@ gboolean skim_spot_out_emit(SkimSpotOut *s, const char *call, const char *mode,
   if (s->sink) { s->sink(call, mode, freq_hz, snr_db, s->sink_user); }
   s->emitted++;
   return TRUE;
+}
+
+void skim_spot_out_delete(SkimSpotOut *s, const char *call) {
+  if (!call || !call[0])
+    return;
+  g_hash_table_remove(s->memo, call);
+  if (s->tci) { skim_tci_client_spot_delete(s->tci, call); }
 }
 
 guint64 skim_spot_out_count(const SkimSpotOut *s) {
