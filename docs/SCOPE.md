@@ -220,9 +220,27 @@ where relevant, a live check against a running `sdr-for-linux`.
   two-station 48 kHz band, the pipeline spots BACK, and the mock asserts both
   calls at ±30 Hz absolute (measured: exact to the Hz), zero bogus calls
   (RBN precision end to end), zero dropped blocks.
-- **M6 — RBN telnet feed.** Emit validated spots to the Reverse Beacon Network
-  (telnet spot format), rate-limited and de-duplicated. Gate: local telnet sink
-  captures well-formed, deduped spots; then a supervised live RBN feed.
+- **M6 — RBN telnet feed. IMPLEMENTED (offline gate 2026-07-15; the
+  supervised live feed through the RBN Aggregator awaits Richard).** The RBN
+  does not take spots from a skimmer directly — the Aggregator connects TO
+  the skimmer's telnet server (the CW Skimmer convention, default port 7300)
+  and relays. `rbn_feed.c` is that server: a GLib/GIO GSocketService on its
+  own GMainContext thread (login handshake, any number of clients,
+  non-blocking writes — a stalled client is dropped, the Aggregator
+  reconnects), broadcasting classic cluster lines
+  `DX de OK1BR-#: 7032.0 DL1ABC CW 25 dB 22 WPM CQ 1234Z`. The feed is
+  app-owned so aggregator sessions ride out TCI reconnects; Preferences
+  gained an RBN group (enable / operator callsign / port, persisted under
+  `[rbn]`), the status line shows the port + client count. Policy: a second
+  `spot_out` instance — the RBN is ALWAYS CQ-only (independent of the local
+  panadapter switch) and gated at callsign score ≥0.85 (vs 0.70 locally:
+  repetition, dictionary or DE+CQ context required, a single unmarked copy
+  is never fed), re-spot 600 s / QSY 100 Hz / 5 per s. Gate
+  `skimmer-rbn-test` (26 checks): handshake + line format + multi-client
+  broadcast against a local telnet sink, then the OFFLINE pipeline over a
+  synthesized three-station band — the two CQ callers arrive at the exact
+  kHz ONCE each (dedup across two band passes), the S&P answerer is tracked
+  locally but NEVER hits the wire, zero unvalidated lines.
 - **Later — RTTY backend** (FSK 45.45 bd, Baudot/ITA2), **PSK backend**
   (BPSK31 + BPSK63, Costas loop, varicode), and an optional **own-panorama
   waterfall** (port `waterfall.c`).

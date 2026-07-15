@@ -12,6 +12,7 @@
 #define SKIMMER_PIPELINE_H
 
 #include <glib.h>
+#include "rbn_feed.h"
 #include "station.h"
 
 G_BEGIN_DECLS
@@ -23,6 +24,13 @@ typedef struct {
   double      chan_bw_hz;     /* channel spacing (default 125 Hz)            */
   const char *dict_path;      /* optional MASTER.SCP; NULL = none            */
   const char *decode_log_path; /* append raw decodes here; NULL = no log     */
+
+  /* M6 — RBN telnet feed (borrowed; the app owns it so aggregator sessions
+   * survive TCI reconnects). NULL = no RBN. The feed is ALWAYS CQ-only and
+   * gated at rbn_min_score (0 = default 0.85): stricter than the 0.70 that
+   * puts a label on the local panadapter — the network wants certainty. */
+  SkimRbnFeed *rbn;
+  double       rbn_min_score;
 } SkimPipelineConfig;
 
 typedef struct _SkimPipeline SkimPipeline;
@@ -74,6 +82,7 @@ void   skim_pipeline_set_spot_cq_only(SkimPipeline *p, gboolean cq_only);
 /* Counters for the status line / gates. */
 guint64 skim_pipeline_frames(const SkimPipeline *p);
 guint64 skim_pipeline_spots(const SkimPipeline *p);
+guint64 skim_pipeline_rbn_spots(const SkimPipeline *p);
 guint   skim_pipeline_stations(const SkimPipeline *p);
 guint64 skim_pipeline_dropped_blocks(const SkimPipeline *p);
 

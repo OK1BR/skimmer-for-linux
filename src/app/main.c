@@ -54,6 +54,11 @@ typedef struct {
   SkimPipeline   *starting;      /* pipeline mid-handshake on a worker thread */
   char           *host;          /* TCI server host (persisted preference)    */
   gboolean        cq_only;       /* spot only CALLING stations (persisted)    */
+  SkimRbnFeed    *rbn;           /* RBN telnet server — app-owned so
+                                  * aggregator sessions ride out reconnects   */
+  gboolean        rbn_enabled;   /* persisted [rbn]                           */
+  char           *rbn_call;      /* spotter callsign (persisted)              */
+  int             rbn_port;      /* telnet port (persisted, default 7300)     */
   int             decode_font;   /* decode pane font size, pt (persisted)     */
   GtkCssProvider *css;           /* carries the decode pane font rule         */
   gboolean        probing;       /* port probe / handshake in flight          */
@@ -351,21 +356,28 @@ static gboolean age_tick(gpointer data) {
 
 static gboolean status_tick(gpointer data) {
   App *app = data;
+  char rbn[64] = "";
+  if (app->rbn) {
+    g_snprintf(rbn, sizeof(rbn), " · RBN :%u (%u)",
+               skim_rbn_feed_port(app->rbn), skim_rbn_feed_clients(app->rbn));
+  }
   if (app->pipeline) {
-    char s[160];
+    char s[224];
     char vfo[32] = "";
     if (app->vfo_hz > 0) {
       g_snprintf(vfo, sizeof(vfo), "%.2f kHz · ", app->vfo_hz / 1000.0);
     }
     g_snprintf(s, sizeof(s),
                "%s%u stations · %" G_GUINT64_FORMAT " spots · %"
-               G_GUINT64_FORMAT " Mframes",
+               G_GUINT64_FORMAT " Mframes%s",
                vfo, skim_pipeline_stations(app->pipeline),
                skim_pipeline_spots(app->pipeline),
-               skim_pipeline_frames(app->pipeline) / 1000000);
+               skim_pipeline_frames(app->pipeline) / 1000000, rbn);
     gtk_label_set_text(app->status, s);
   } else {
-    gtk_label_set_text(app->status, "not connected");
+    char s[96];
+    g_snprintf(s, sizeof(s), "not connected%s", rbn);
+    gtk_label_set_text(app->status, s);
   }
   return G_SOURCE_CONTINUE;
 }
@@ -430,6 +442,27 @@ static gboolean settings_load_list_visible(void) {
   return v;
 }
 
+static void settings_load_rbn(App *app) {
+  char *path = settings_file();
+  GKeyFile *kf = g_key_file_new();
+  app->rbn_enabled = FALSE;
+  app->rbn_call    = NULL;
+  app->rbn_port    = 7300;                     /* the CW Skimmer convention  */
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
+    if (g_key_file_has_key(kf, "rbn", "enabled", NULL)) {
+      app->rbn_enabled = g_key_file_get_boolean(kf, "rbn", "enabled", NULL);
+    }
+    app->rbn_call = g_key_file_get_string(kf, "rbn", "call", NULL);
+    if (g_key_file_has_key(kf, "rbn", "port", NULL)) {
+      int port = g_key_file_get_integer(kf, "rbn", "port", NULL);
+      if (port > 0 && port <= 65535) { app->rbn_port = port; }
+    }
+  }
+  g_key_file_free(kf);
+  g_free(path);
+  if (!app->rbn_call) { app->rbn_call = g_strdup(""); }
+}
+
 static void settings_save(const App *app) {
   char *path = settings_file();
   char *dir  = g_path_get_dirname(path);
@@ -438,6 +471,9 @@ static void settings_save(const App *app) {
   g_key_file_load_from_file(kf, path, G_KEY_FILE_KEEP_COMMENTS, NULL);
   g_key_file_set_string(kf, "tci", "host", app->host);
   g_key_file_set_boolean(kf, "spots", "cq_only", app->cq_only);
+  g_key_file_set_boolean(kf, "rbn", "enabled", app->rbn_enabled);
+  g_key_file_set_string(kf, "rbn", "call", app->rbn_call);
+  g_key_file_set_integer(kf, "rbn", "port", app->rbn_port);
   g_key_file_set_integer(kf, "ui", "decode_font_pt", app->decode_font);
   g_key_file_set_boolean(kf, "ui", "station_list", app->list_visible);
   GError *err = NULL;
@@ -448,6 +484,23 @@ static void settings_save(const App *app) {
   g_key_file_free(kf);
   g_free(dir);
   g_free(path);
+}
+
+/* (Re)start the RBN telnet server to match the current settings. The feed
+ * is app-owned (not per-connection): aggregator sessions survive TCI
+ * reconnects. The caller restarts the pipeline if one is running — its
+ * config holds the old feed pointer. */
+static void rbn_apply(App *app) {
+  g_clear_pointer(&app->rbn, skim_rbn_feed_free);
+  if (!app->rbn_enabled || !app->rbn_call[0])
+    return;
+  GError *err = NULL;
+  app->rbn = skim_rbn_feed_new(app->rbn_call, (guint16)app->rbn_port, &err);
+  if (!app->rbn) {
+    g_warning("RBN feed on port %d: %s", app->rbn_port,
+              err ? err->message : "?");
+    g_clear_error(&err);
+  }
 }
 
 /* Station list show/hide (the header-bar toggle next to Preferences). The
@@ -547,6 +600,7 @@ static void probe_done(GObject *src, GAsyncResult *res, gpointer user) {
     .chan_bw_hz = 125.0,
     .dict_path = g_file_test(dict, G_FILE_TEST_EXISTS) ? dict : NULL,
     .decode_log_path = dlog,
+    .rbn = app->rbn,                           /* NULL when the feed is off  */
   };
   app->starting = skim_pipeline_new(&cfg);
   g_free(dict);
@@ -585,13 +639,22 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   GtkWidget *row  = g_object_get_data(G_OBJECT(dlg), "host-row");
   GtkWidget *sw   = g_object_get_data(G_OBJECT(dlg), "cq-row");
   GtkWidget *frow = g_object_get_data(G_OBJECT(dlg), "font-row");
+  GtkWidget *rsw  = g_object_get_data(G_OBJECT(dlg), "rbn-row");
+  GtkWidget *rcall = g_object_get_data(G_OBJECT(dlg), "rbn-call-row");
+  GtkWidget *rport = g_object_get_data(G_OBJECT(dlg), "rbn-port-row");
   const char *h = gtk_editable_get_text(GTK_EDITABLE(row));
   char *host = g_strstrip(g_strdup((h && h[0]) ? h : "127.0.0.1"));
   gboolean cq_only = adw_switch_row_get_active(ADW_SWITCH_ROW(sw));
   int font_pt = (int)adw_spin_row_get_value(ADW_SPIN_ROW(frow));
+  gboolean rbn_enabled = adw_switch_row_get_active(ADW_SWITCH_ROW(rsw));
+  char *rbn_call = g_strstrip(g_strdup(gtk_editable_get_text(GTK_EDITABLE(rcall))));
+  int rbn_port = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rport));
   gboolean host_changed = host[0] && g_strcmp0(host, app->host) != 0;
   gboolean cq_changed   = cq_only != app->cq_only;
   gboolean font_changed = font_pt != app->decode_font;
+  gboolean rbn_changed  = rbn_enabled != app->rbn_enabled ||
+                          g_strcmp0(rbn_call, app->rbn_call) != 0 ||
+                          rbn_port != app->rbn_port;
 
   if (host_changed) {
     g_free(app->host);
@@ -609,11 +672,22 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
     app->decode_font = font_pt;
     decode_font_apply(app);
   }
-  if (host_changed || cq_changed || font_changed) {
+  if (rbn_changed) {
+    app->rbn_enabled = rbn_enabled;
+    g_free(app->rbn_call);
+    app->rbn_call = rbn_call;
+    app->rbn_port = rbn_port;
+    rbn_apply(app);
+  } else {
+    g_free(rbn_call);
+  }
+  if (host_changed || cq_changed || font_changed || rbn_changed) {
     settings_save(app);
   }
-  if (host_changed) {
-    if (app->pipeline) {                       /* move to the new server      */
+  /* The pipeline's config carries the feed pointer — an RBN change needs a
+   * fresh pipeline just like a host change does. */
+  if (host_changed || rbn_changed) {
+    if (app->pipeline) {
       skim_pipeline_stop(app->pipeline);
       g_clear_pointer(&app->pipeline, skim_pipeline_free);
       app->vfo_hz = 0;
@@ -652,6 +726,29 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   adw_preferences_page_add(ADW_PREFERENCES_PAGE(page),
                            ADW_PREFERENCES_GROUP(sgrp));
 
+  GtkWidget *rgrp = adw_preferences_group_new();
+  adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(rgrp), "RBN feed");
+  adw_preferences_group_set_description(ADW_PREFERENCES_GROUP(rgrp),
+      "CW-Skimmer-compatible telnet server — point the RBN Aggregator "
+      "(or any cluster client) at this port");
+  GtkWidget *rsw = adw_switch_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(rsw), "Enable");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(rsw),
+      "Feeds only validated stations heard calling CQ");
+  adw_switch_row_set_active(ADW_SWITCH_ROW(rsw), app->rbn_enabled);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(rgrp), rsw);
+  GtkWidget *rcall = adw_entry_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(rcall),
+                                "Operator callsign");
+  gtk_editable_set_text(GTK_EDITABLE(rcall), app->rbn_call);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(rgrp), rcall);
+  GtkWidget *rport = adw_spin_row_new_with_range(1024, 65535, 1);
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(rport), "Telnet port");
+  adw_spin_row_set_value(ADW_SPIN_ROW(rport), app->rbn_port);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(rgrp), rport);
+  adw_preferences_page_add(ADW_PREFERENCES_PAGE(page),
+                           ADW_PREFERENCES_GROUP(rgrp));
+
   GtkWidget *ugrp = adw_preferences_group_new();
   adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(ugrp), "Display");
   GtkWidget *frow = adw_spin_row_new_with_range(8, 32, 1);
@@ -667,6 +764,9 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   g_object_set_data(G_OBJECT(dlg), "host-row", row);
   g_object_set_data(G_OBJECT(dlg), "cq-row", sw);
   g_object_set_data(G_OBJECT(dlg), "font-row", frow);
+  g_object_set_data(G_OBJECT(dlg), "rbn-row", rsw);
+  g_object_set_data(G_OBJECT(dlg), "rbn-call-row", rcall);
+  g_object_set_data(G_OBJECT(dlg), "rbn-port-row", rport);
   g_signal_connect(dlg, "closed", G_CALLBACK(prefs_closed), app);
   adw_dialog_present(dlg, GTK_WIDGET(app->window));
 }
@@ -764,6 +864,8 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   app->cq_only      = settings_load_cq_only();
   app->decode_font  = settings_load_decode_font();
   app->list_visible = settings_load_list_visible();
+  settings_load_rbn(app);
+  rbn_apply(app);                /* the telnet server is up before the radio */
 
   app->title = ADW_WINDOW_TITLE(adw_window_title_new("Skimmer for Linux", ""));
   GtkWidget *header = adw_header_bar_new();

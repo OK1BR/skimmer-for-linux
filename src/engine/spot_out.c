@@ -11,7 +11,8 @@
  * openings in a contest can validate tens of calls per second).
  *
  * Sinks: the TCI client (labels on the radio panadapter) and an optional
- * callback (offline gates now, the RBN telnet feed in M6).
+ * callback (the RBN telnet feed, offline gates). The pipeline runs one
+ * instance per sink so each feed keeps its own dedup memo and budget.
  *
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
@@ -28,8 +29,6 @@ typedef struct {
 
 struct _SkimSpotOut {
   SkimTciClient *tci;                          /* not owned                  */
-  char          *rbn_host;                     /* M6                         */
-  guint16        rbn_port;
 
   guint   respot_s;
   double  qsy_hz;
@@ -44,11 +43,9 @@ struct _SkimSpotOut {
   guint64      emitted;
 };
 
-SkimSpotOut *skim_spot_out_new(SkimTciClient *tci, const char *rbn_host, guint16 rbn_port) {
+SkimSpotOut *skim_spot_out_new(SkimTciClient *tci) {
   SkimSpotOut *s = g_new0(SkimSpotOut, 1);
   s->tci       = tci;
-  s->rbn_host  = g_strdup(rbn_host); /* NULL-safe: g_strdup(NULL) == NULL */
-  s->rbn_port  = rbn_port;
   s->respot_s  = 180;
   s->qsy_hz    = 30.0;    /* re-spot as the frequency estimate converges —
                            * the label follows onto the true carrier         */
@@ -63,7 +60,6 @@ void skim_spot_out_free(SkimSpotOut *s) {
   if (!s)
     return;
   g_hash_table_destroy(s->memo);
-  g_free(s->rbn_host);
   g_free(s);
 }
 
@@ -80,7 +76,7 @@ void skim_spot_out_set_sink(SkimSpotOut *s, SkimSpotSink sink, gpointer user) {
 }
 
 gboolean skim_spot_out_emit(SkimSpotOut *s, const char *call, const char *mode,
-                            double freq_hz, double snr_db) {
+                            double freq_hz, double snr_db, double speed) {
   if (!call || !call[0])
     return FALSE;
   const gint64 now = g_get_monotonic_time();
@@ -112,7 +108,7 @@ gboolean skim_spot_out_emit(SkimSpotOut *s, const char *call, const char *mode,
     g_snprintf(text, sizeof(text), "%.0f dB", snr_db);
     skim_tci_client_spot(s->tci, call, mode, freq_hz, SPOT_ARGB, text);
   }
-  if (s->sink) { s->sink(call, mode, freq_hz, snr_db, s->sink_user); }
+  if (s->sink) { s->sink(call, mode, freq_hz, snr_db, speed, s->sink_user); }
   s->emitted++;
   return TRUE;
 }

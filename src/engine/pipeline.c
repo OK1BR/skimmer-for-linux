@@ -30,6 +30,13 @@
 #define QUEUE_MAX      64                     /* blocks in flight            */
 #define DRAIN_FRAMES   64                     /* per-channel read chunk      */
 #define PRUNE_EVERY_US (2 * G_USEC_PER_SEC)
+/* RBN policy: the network keeps its own history, so re-announce sparsely
+ * (the panadapter's 180 s is about keeping labels alive — not needed here)
+ * and only re-spot a move that is a real QSY, not estimate convergence. */
+#define RBN_MIN_SCORE_DEFAULT 0.85
+#define RBN_RESPOT_S          600
+#define RBN_QSY_HZ            100.0
+#define RBN_MAX_PER_S         5
 /* A station silent this long leaves the table (and its panadapter label is
  * SPOT_DELETEd). 120 s rides out one side of a QSO; the old 600 s kept a
  * contest band map full of stations long gone (Richard, 2026-07-15). */
@@ -62,6 +69,8 @@ struct _SkimPipeline {
 
   SkimStationTable *stations;
   SkimSpotOut      *spots;
+  SkimSpotOut      *rbn_spots;                 /* RBN policy → cfg.rbn feed  */
+  double            rbn_min;
 
   GArray           *hits;                      /* Hit — one block's decodes  */
   double           *lvl;                       /* per-channel level snapshot */
@@ -97,6 +106,12 @@ struct _SkimPipeline {
 
 static void station_gone_fwd(const SkimStation *st, gpointer user);
 
+/* RBN spot_out sink → the telnet feed (user = the borrowed SkimRbnFeed). */
+static void rbn_sink_fwd(const char *call, const char *mode, double freq_hz,
+                         double snr_db, double speed, gpointer user) {
+  skim_rbn_feed_spot(user, call, mode, freq_hz, snr_db, speed);
+}
+
 SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg) {
   SkimPipeline *p = g_new0(SkimPipeline, 1);
   p->cfg = *cfg;
@@ -108,6 +123,16 @@ SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg) {
   skim_station_table_set_gone_cb(p->stations, station_gone_fwd, p);
   p->queue    = g_async_queue_new();
   p->hits     = g_array_new(FALSE, FALSE, sizeof(Hit));
+  if (p->cfg.rbn) {
+    /* Lives for the pipeline's whole life (not per-connection like the TCI
+     * sink): the dedup memo rides out reconnects, no re-spot burst. */
+    p->rbn_spots = skim_spot_out_new(NULL);
+    skim_spot_out_set_policy(p->rbn_spots, RBN_RESPOT_S, RBN_QSY_HZ,
+                             RBN_MAX_PER_S);
+    skim_spot_out_set_sink(p->rbn_spots, rbn_sink_fwd, p->cfg.rbn);
+    p->rbn_min = p->cfg.rbn_min_score > 0 ? p->cfg.rbn_min_score
+                                          : RBN_MIN_SCORE_DEFAULT;
+  }
   if (p->cfg.dict_path) {
     GError *err = NULL;
     if (!skim_callsign_dict_load(p->cfg.dict_path, &err)) {
@@ -142,6 +167,7 @@ void skim_pipeline_free(SkimPipeline *p) {
   bank_teardown(p);
   skim_station_table_free(p->stations);
   g_clear_pointer(&p->spots, skim_spot_out_free);
+  g_clear_pointer(&p->rbn_spots, skim_spot_out_free);
   IqBlock *b;
   while ((b = g_async_queue_try_pop(p->queue)) != NULL) {
     g_free(b->iq);
@@ -170,6 +196,9 @@ void skim_pipeline_set_station_gone_cb(SkimPipeline *p,
 static void station_gone_fwd(const SkimStation *st, gpointer user) {
   SkimPipeline *p = user;
   if (p->spots) { skim_spot_out_delete(p->spots, st->call); }
+  /* No delete on the cluster wire — just forget the memo, so a comeback
+   * after the TTL re-spots to the RBN at once. */
+  if (p->rbn_spots) { skim_spot_out_delete(p->rbn_spots, st->call); }
   if (p->gone_cb) { p->gone_cb(st, p->gone_user); }
 }
 void skim_pipeline_set_text_cb(SkimPipeline *p, SkimPipelineTextCb cb, gpointer user) {
@@ -379,7 +408,14 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
       if (p->spots &&
           (!g_atomic_int_get(&p->cq_only) || merged->cq)) {
         skim_spot_out_emit(p->spots, merged->call, merged->mode,
-                           merged->freq_hz, merged->snr_db);
+                           merged->freq_hz, merged->snr_db, merged->speed);
+      }
+      /* RBN etiquette is stricter than the panadapter: only a CALLING
+       * station (regardless of the local CQ-only switch), and only once
+       * the best score seen clears the RBN threshold. */
+      if (p->rbn_spots && merged->cq && merged->score >= p->rbn_min) {
+        skim_spot_out_emit(p->rbn_spots, merged->call, merged->mode,
+                           merged->freq_hz, merged->snr_db, merged->speed);
       }
     }
   }
@@ -419,7 +455,7 @@ gboolean skim_pipeline_start(SkimPipeline *p, GError **error) {
     g_clear_pointer(&p->tci, skim_tci_client_free);
     return FALSE;
   }
-  p->spots = skim_spot_out_new(p->tci, NULL, 0);
+  p->spots = skim_spot_out_new(p->tci);
   if (p->dlog_path) {
     p->dlog = fopen(p->dlog_path, "a");
     if (p->dlog) {
@@ -518,6 +554,9 @@ void skim_pipeline_set_spot_cq_only(SkimPipeline *p, gboolean cq_only) {
 guint64 skim_pipeline_frames(const SkimPipeline *p) { return p->frames; }
 guint64 skim_pipeline_spots(const SkimPipeline *p) {
   return p->spots ? skim_spot_out_count(p->spots) : p->spots_total;
+}
+guint64 skim_pipeline_rbn_spots(const SkimPipeline *p) {
+  return p->rbn_spots ? skim_spot_out_count(p->rbn_spots) : 0;
 }
 guint skim_pipeline_stations(const SkimPipeline *p) {
   return skim_station_table_size(p->stations);

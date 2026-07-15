@@ -67,11 +67,19 @@ assembles the engine (TCI → bank → per-channel decoders/extractors → track
 GTK-free). Gate `skimmer-spot-test`: full chain over a real WebSocket vs a
 mock TCI server — spot frequencies exact to the Hz, zero bogus calls. Gates
 now 6 in `meson test` (tci, wdsp, chan, cw, call, spot-pipeline).
-Still pending live: **M1 orientation eyeball**, **M3 off-air A/B**, and the
-**M5 live gate** (spots on the real panadapter + click-to-tune — Richard).
-Next: **M6** — RBN telnet feed (rate-limited, deduped; local telnet sink gate,
-then a supervised live feed). MASTER.SCP can go to
+**M6 — RBN telnet feed (offline gate green 2026-07-15).** `rbn_feed.c` = a
+CW-Skimmer-dialect telnet SERVER (the RBN Aggregator connects to US and
+relays; default port 7300) on its own GMainContext thread; app-owned, so
+aggregator sessions survive TCI reconnects. RBN policy is a second
+`spot_out`: ALWAYS CQ-only + score ≥0.85 (stricter than the 0.70 panadapter
+gate), re-spot 600 s / QSY 100 Hz. Preferences → RBN feed (enable, operator
+call, port; `settings.ini [rbn]`). Gate `skimmer-rbn-test` (26 checks) —
+7 gates total in `meson test`.
+Still pending live: **M3 off-air A/B** and the **M6 supervised live feed**
+(Richard runs the RBN Aggregator against the app). MASTER.SCP can go to
 `~/.config/skimmer-for-linux/master.scp` (the app loads it if present).
+Next: **HMM/Viterbi CW decoder v2** (QSB mutations — the recorded "oper"
+sample is the corpus), RTTY/PSK backends.
 
 ## Layout
 

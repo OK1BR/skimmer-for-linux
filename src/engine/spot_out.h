@@ -1,8 +1,8 @@
-/* spot_out.h — spot output: TCI SPOT feed + RBN telnet feed.
+/* spot_out.h — spot output policy: dedup, rate limit, sinks.
  *
- * Takes validated (callsign, frequency, mode) spots and emits them back to
- * the sdr-for-linux panadapter over TCI (M5) and, as a goal, to the Reverse
- * Beacon Network over telnet (M6). De-duplicated (per call: re-spot only
+ * Takes validated (callsign, frequency, mode) spots and emits them to its
+ * sinks: the sdr-for-linux panadapter over TCI (M5) and/or a callback (the
+ * RBN telnet feed of M6, gates). De-duplicated (per call: re-spot only
  * after an interval or a real QSY) and globally rate-limited. Only validated
  * calls may ever reach this module — callsign.c gates it (M4 gates M6).
  *
@@ -18,23 +18,25 @@ G_BEGIN_DECLS
 
 typedef struct _SkimSpotOut SkimSpotOut;
 
-/* Spot sink. tci may be NULL (no radio feed); rbn_host NULL disables RBN. */
-SkimSpotOut *skim_spot_out_new(SkimTciClient *tci, const char *rbn_host, guint16 rbn_port);
+/* Spot sink policy instance. tci may be NULL (no radio feed). */
+SkimSpotOut *skim_spot_out_new(SkimTciClient *tci);
 void         skim_spot_out_free(SkimSpotOut *s);
 
-/* Dedup/rate policy (defaults: re-spot 180 s, QSY 150 Hz, ≤5 spots/s). */
+/* Dedup/rate policy (defaults: re-spot 180 s, QSY 30 Hz, ≤5 spots/s). */
 void  skim_spot_out_set_policy(SkimSpotOut *s, guint respot_s,
                                double qsy_hz, guint max_per_s);
 
-/* Optional extra sink (tests, M6 RBN): called for every emitted spot. */
+/* Optional extra sink (M6 RBN feed, gates): called for every emitted spot.
+ * speed is WPM for CW, baud for the digital modes. */
 typedef void (*SkimSpotSink)(const char *call, const char *mode,
-                             double freq_hz, double snr_db, gpointer user);
+                             double freq_hz, double snr_db, double speed,
+                             gpointer user);
 void  skim_spot_out_set_sink(SkimSpotOut *s, SkimSpotSink sink, gpointer user);
 
 /* Offer one validated spot; the policy decides whether it goes out.
  * Returns TRUE when actually emitted. */
 gboolean skim_spot_out_emit(SkimSpotOut *s, const char *call, const char *mode,
-                            double freq_hz, double snr_db);
+                            double freq_hz, double snr_db, double speed);
 
 /* The station is gone (TTL / takeover): pull its label off the panadapter
  * (SPOT_DELETE) and forget its dedup memo, so a comeback re-spots at once. */

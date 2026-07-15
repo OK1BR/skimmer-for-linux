@@ -323,8 +323,8 @@ static double spot_freq(const char *call) {
 
 static int  u_spots;
 static void u_sink(const char *call, const char *mode, double hz, double snr,
-                   gpointer user) {
-  (void)call; (void)mode; (void)hz; (void)snr; (void)user;
+                   double speed, gpointer user) {
+  (void)call; (void)mode; (void)hz; (void)snr; (void)speed; (void)user;
   u_spots++;
 }
 
@@ -368,21 +368,21 @@ int main(void) {
 
   /* -- spot policy units -------------------------------------------------------- */
   {
-    SkimSpotOut *so = skim_spot_out_new(NULL, NULL, 0);
+    SkimSpotOut *so = skim_spot_out_new(NULL);
     skim_spot_out_set_sink(so, u_sink, NULL);
     skim_spot_out_set_policy(so, 3600, 150.0, 100);
     check("first spot goes out",
-          skim_spot_out_emit(so, "OK1BR", "CW", 7032018, 25) && u_spots == 1);
+          skim_spot_out_emit(so, "OK1BR", "CW", 7032018, 25, 20) && u_spots == 1);
     check("immediate repeat is deduped",
-          !skim_spot_out_emit(so, "OK1BR", "CW", 7032020, 25) && u_spots == 1);
+          !skim_spot_out_emit(so, "OK1BR", "CW", 7032020, 25, 20) && u_spots == 1);
     check("a real QSY re-spots",
-          skim_spot_out_emit(so, "OK1BR", "CW", 7032300, 25) && u_spots == 2);
+          skim_spot_out_emit(so, "OK1BR", "CW", 7032300, 25, 20) && u_spots == 2);
     skim_spot_out_set_policy(so, 3600, 150.0, 2);   /* tiny rate budget      */
     int sent = 0;
     for (int i = 0; i < 10; i++) {
       char call[16];
       g_snprintf(call, sizeof(call), "DL%dAA", i);
-      if (skim_spot_out_emit(so, call, "CW", 7010000 + i * 1000, 10)) { sent++; }
+      if (skim_spot_out_emit(so, call, "CW", 7010000 + i * 1000, 10, 20)) { sent++; }
     }
     check("rate limiter caps a flood (≤3 of 10)", sent <= 3);
     check("emitted counter matches", skim_spot_out_count(so) == (guint64)(2 + sent));

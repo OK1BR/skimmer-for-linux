@@ -19,6 +19,7 @@ add_project_arguments('-DSKIMMER_VERSION="@0@"'.format(meson.project_version()),
 # the system (sdr-for-linux uses them) and the engine will reach for them soon.
 cc        = meson.get_compiler('c')
 glib_dep  = dependency('glib-2.0')            # headless engine
+gio_dep   = dependency('gio-2.0')             # M6: RBN telnet server sockets
 gtk_dep   = dependency('gtk4')                # app front-end
 adw_dep   = dependency('libadwaita-1')        # app control surface
 m_dep     = cc.find_library('m', required : false)
@@ -42,10 +43,11 @@ engine_sources = [
   'src/engine/decode_cw.c',    # M3: CW backend (implements decode.h)
   'src/engine/station.c',      # M5: per-frequency station tracker
   'src/engine/callsign.c',     # M4: extraction + validation
-  'src/engine/spot_out.c',     # M5/M6: TCI SPOT + RBN telnet feed
+  'src/engine/spot_out.c',     # M5/M6: spot policy — dedup, rate, sinks
+  'src/engine/rbn_feed.c',     # M6: RBN telnet server (CW Skimmer dialect)
   'src/engine/pipeline.c',     # M5: the engine assembled end to end
 ]
-engine_deps = [glib_dep, lws_dep, wdsp_dep, fftw3f_dep, m_dep]
+engine_deps = [glib_dep, gio_dep, lws_dep, wdsp_dep, fftw3f_dep, m_dep]
 
 engine_lib = static_library('skimmer-engine',
   engine_sources,
@@ -131,6 +133,17 @@ skimmer_spot_test = executable('skimmer-spot-test',
   link_with : engine_lib,
 )
 test('spot-pipeline', skimmer_spot_test, timeout : 120)
+
+# M6: offline gate — the RBN telnet feed: login handshake, cluster line
+# format, multi-client broadcast; then the OFFLINE pipeline against a local
+# telnet sink (CQ-only etiquette, dedup, exact kHz, no unvalidated calls).
+skimmer_rbn_test = executable('skimmer-rbn-test',
+  ['src/rbn_test.c'],
+  include_directories : include_directories('src'),
+  dependencies : engine_deps,
+  link_with : engine_lib,
+)
+test('rbn-feed', skimmer_rbn_test, timeout : 120)
 
 # --- Application ------------------------------------------------------------
 executable('skimmer-for-linux',
