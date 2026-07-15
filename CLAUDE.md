@@ -79,10 +79,20 @@ in `meson test`. **Richard decided 2026-07-15: NO feed to the RBN network**
 Wine here) and its protocol is undocumented. The server is a LOCAL cluster
 source for loggers (BRlog); the dialect stays Aggregator-compatible should
 that ever change.
-Still pending live: **M3 off-air A/B**. MASTER.SCP can go to
+**CW v2 — semi-Markov Viterbi decoder (offline-proven 2026-07-15).**
+`decode_cw_v2.c`: v1 plumbing + soft per-sample LLR (span discriminator
+follows QSB; noise-anchored Rayleigh term tells dropouts from spaces) →
+segment Viterbi with duration priors on the adaptive dit → lag-committed
+traceback. Solid channels ride out envelope-gate dips (µ_m/µ_s ratio).
+Replay A/B: "oper" corpus — v1 reads mutilated "9A1G", v2 the true
+9A170NT (121 reports); contest precision held, E/T noise down. **v1 stays
+the pipeline default — `SKIM_CW_V2=1` arms v2** (app + replay); flip the
+default after Richard's live session. Gate `skimmer-cw-test` runs BOTH
+backends + QSB/flutter cases (35 checks).
+Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
+**v2 live session**. MASTER.SCP can go to
 `~/.config/skimmer-for-linux/master.scp` (the app loads it if present).
-Next: **HMM/Viterbi CW decoder v2** (QSB mutations — the recorded "oper"
-sample is the corpus), RTTY/PSK backends.
+Next: RTTY/PSK backends; v2 default flip.
 
 ## Layout
 

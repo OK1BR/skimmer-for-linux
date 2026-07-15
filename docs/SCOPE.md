@@ -244,6 +244,23 @@ where relevant, a live check against a running `sdr-for-linux`.
   synthesized three-station band — the two CQ callers arrive at the exact
   kHz ONCE each (dedup across two band passes), the S&P answerer is tracked
   locally but NEVER hits the wire, zero unvalidated lines.
+- **CW decoder v2 — soft-decision semi-Markov Viterbi. IMPLEMENTED
+  (offline 2026-07-15; opt-in `SKIM_CW_V2=1` until live A/B flips the
+  default).** v1's plumbing (envelope, trackers, squelch, tone offset)
+  carries a new decision layer: per-sample mark/space log-likelihoods (a
+  span discriminator that FOLLOWS QSB + a noise-anchored Rayleigh term
+  that tells a −18 dB in-dash dropout from a real space) feed a Viterbi
+  over {dit, dah} × {element/char/word space} segments with log-normal
+  duration priors tied to the adaptive dit; lag-committed traceback emits
+  chars live. Solid channels ride out envelope-gate dips (the µ_m/µ_s
+  ratio knows a fade from silence — v1's gate tears "9A170NT" apart at
+  exactly that point). Gate: the M3 suite runs for BOTH backends, plus two
+  v2-only cases — element-eating QSB (16 dB @ 0.31 Hz: v1 dist 14, v2
+  dist 1) and sub-dit flutter notches (v1 dist 5, v2 dist 0). Replay A/B
+  on the recorded corpus: "oper" — v1 tables the mutilated "9A1G" (21
+  reports), v2 the true **9A170NT** (121 reports, 0.90, CQ); contest A/B —
+  same core stations, lone-E/T noise 15.6 → 11.6 %, 3 extra weak-signal
+  calls each, ~60× realtime (v1 ~90×).
 - **Later — RTTY backend** (FSK 45.45 bd, Baudot/ITA2), **PSK backend**
   (BPSK31 + BPSK63, Costas loop, varicode), and an optional **own-panorama
   waterfall** (port `waterfall.c`).

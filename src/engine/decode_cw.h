@@ -15,6 +15,11 @@ G_BEGIN_DECLS
 /* Returns the CW backend singleton (static vtable). */
 const SkimDecodeBackend *skim_decode_cw(void);
 
+/* v2: soft-decision semi-Markov Viterbi over the same plumbing — built for
+ * QSB (a faded element is weak evidence, not no evidence). Selected in the
+ * pipeline with SKIM_CW_V2=1 until the replay A/B flips the default. */
+const SkimDecodeBackend *skim_decode_cw_v2(void);
+
 G_END_DECLS
 
 #endif /* SKIMMER_DECODE_CW_H */

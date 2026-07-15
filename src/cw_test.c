@@ -125,13 +125,16 @@ static double gauss(GRand *rng) {
   return sqrt(-2.0 * log(u1)) * cos(2.0 * G_PI * u2);
 }
 
+/* The backend under test — the whole suite runs once per backend. */
+static const SkimDecodeBackend *g_cw;
+
 /* Run an envelope through the decoder as IQ: tone at `foff` Hz, amplitude
  * 0.5·env, complex AWGN for `snr_db` (per-component σ), optional QSB.
  * Returns the concatenated decoded text; fills last decode info. */
 static char *run_decoder(GArray *env, double foff, double snr_db,
                          double qsb_hz, double qsb_depth_db, GRand *rng,
                          SkimDecode *last) {
-  const SkimDecodeBackend *cw = skim_decode_cw();
+  const SkimDecodeBackend *cw = g_cw;
   gpointer st = cw->channel_new(RATE);
   GString *txt = g_string_new(NULL);
   const double A = 0.5;
@@ -190,8 +193,10 @@ static void show(const char *label, const char *got) {
   printf("       %-14s \"%s\"\n", label, got);
 }
 
-int main(void) {
-  printf("=== CW decode gate (offline, synthetic) ===\n");
+/* The whole classic suite, parametrized by backend. */
+static void run_suite(const SkimDecodeBackend *cw) {
+  g_cw = cw;
+  printf("--- backend: %s ---\n", cw->name);
   GRand *rng = g_rand_new_with_seed(20260715);         /* deterministic */
   SkimDecode last;
 
@@ -208,6 +213,9 @@ int main(void) {
     check(what, d == 0);
     if (SPEEDS[s] == 20) {
       check("WPM estimate ≈ 20 (±2)", fabs(last.speed - 20.0) < 2.0);
+      if (last.snr_db <= 20.0) {
+        printf("       (snr_db = %.1f)\n", last.snr_db);
+      }
       check("SNR estimate > 20 dB on a clean trace", last.snr_db > 20.0);
       check("tone offset ≈ +18 Hz (±5)", fabs(last.freq_offset_hz - 18.0) < 5.0);
       check("confidence high on clean keying", last.confidence > 0.7);
@@ -247,6 +255,7 @@ int main(void) {
     g_array_append_vals(a, b->data, b->len);
     got = run_decoder(a, 18.0, 30.0, 0, 0, rng, &last);
     show("18→28 WPM:", got);
+    printf("       (final speed %.1f WPM)\n", last.speed);
     /* Both payload copies must be present; the second proves the re-lock. */
     check("re-locks after a mid-stream 18 → 28 WPM change",
           fuzzy_dist(got, "DE OK1BR") <= 1 &&
@@ -273,7 +282,6 @@ int main(void) {
   /* -- integration: through the real channelizer ------------------------------- */
   {
     SkimChannelizer *bank = skim_channelizer_new(48000.0, 125.0);
-    const SkimDecodeBackend *cw = skim_decode_cw();
     gpointer st_hit  = cw->channel_new(skim_channelizer_out_rate(bank));
     gpointer st_miss = cw->channel_new(skim_channelizer_out_rate(bank));
     GString *hit = g_string_new(NULL), *miss = g_string_new(NULL);
@@ -320,8 +328,76 @@ int main(void) {
   }
 
   g_rand_free(rng);
+}
+
+int main(void) {
+  printf("=== CW decode gate (offline, synthetic) ===\n");
+  run_suite(skim_decode_cw());
+  run_suite(skim_decode_cw_v2());
+
+  /* -- QSB mutation cases: what v2 exists for ------------------------------------
+   * Deep slow QSB eats the weak elements of a character — the live-caught
+   * 9A170NT case ("7" --... losing its trailing dits to a fade → "G" --.).
+   * v1's binary threshold drops the faded dits outright; v2's soft Viterbi
+   * must carry them. v1 runs uncounted here, printed for comparison. */
+  {
+    GRand *rng = g_rand_new_with_seed(20260715);
+    const char *PAYLOAD = "CQ TEST 9A170NT 9A170NT K";
+    SkimDecode last;
+
+    GArray *env = gen_env(PAYLOAD, 25, RATE, 0.0, rng);
+    g_cw = skim_decode_cw();
+    char *v1 = run_decoder(env, 18.0, 30.0, 0.31, 16.0, rng, &last);
+    if (g_getenv("QSB_TRACE")) { g_setenv("SKIM_CW2_TRACE", "1", TRUE); }
+    g_cw = skim_decode_cw_v2();
+    char *v2 = run_decoder(env, 18.0, 30.0, 0.31, 16.0, rng, &last);
+    g_unsetenv("SKIM_CW2_TRACE");
+    printf("--- QSB mutation: 16 dB @ 0.31 Hz, 25 WPM ---\n");
+    show("v1 (info):", v1);
+    show("v2:", v2);
+    printf("       v1 dist %d, v2 dist %d\n",
+           fuzzy_dist(v1, PAYLOAD), fuzzy_dist(v2, PAYLOAD));
+    check("v2 copies through element-eating QSB (≤2 errors)",
+          fuzzy_dist(v2, PAYLOAD) <= 2);
+    check("v2 is not worse than v1 on the QSB trace",
+          fuzzy_dist(v2, PAYLOAD) <= fuzzy_dist(v1, PAYLOAD));
+    g_free(v1);
+    g_free(v2);
+    g_array_free(env, TRUE);
+
+    /* Sub-dit flutter dropouts — the in-dash notch that splits a dash in
+     * two (v1's admitted limit). 35 ms at −18 dB every 700 ms: shorter
+     * than any real inter-element space, so a decoder CAN tell it apart.
+     * (A dropout a full dit long is amplitude-indistinguishable from real
+     * keying — no envelope decoder recovers that.) */
+    env = gen_env(PAYLOAD, 22, RATE, 0.0, rng);
+    for (guint at = 0; at < env->len; at++) {
+      double tsec = (double)at / RATE;
+      double ph = fmod(tsec, 0.7);
+      if (ph < 0.035) {
+        float *v = &g_array_index(env, float, at);
+        *v *= 0.126f;                          /* −18 dB notch               */
+      }
+    }
+    g_cw = skim_decode_cw();
+    v1 = run_decoder(env, 18.0, 30.0, 0, 0, rng, &last);
+    g_cw = skim_decode_cw_v2();
+    v2 = run_decoder(env, 18.0, 30.0, 0, 0, rng, &last);
+    printf("--- flutter notches: 35 ms / -18 dB every 0.7 s, 22 WPM ---\n");
+    show("v1 (info):", v1);
+    show("v2:", v2);
+    printf("       v1 dist %d, v2 dist %d\n",
+           fuzzy_dist(v1, PAYLOAD), fuzzy_dist(v2, PAYLOAD));
+    check("v2 copies through in-dash dropout notches (≤2 errors)",
+          fuzzy_dist(v2, PAYLOAD) <= 2);
+    g_free(v1);
+    g_free(v2);
+    g_array_free(env, TRUE);
+    g_rand_free(rng);
+  }
+
   printf("\n=== %d checks, %d failures ===\n%s\n", checks, fails,
-         fails ? "FAIL" : "PASS — the CW backend copies, adapts and stays "
-                          "quiet on noise.");
+         fails ? "FAIL" : "PASS — both CW backends copy, adapt and stay "
+                          "quiet on noise; v2 rides out QSB.");
   return fails ? 1 : 0;
 }

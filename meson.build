@@ -41,6 +41,7 @@ engine_sources = [
   'src/engine/tci_client.c',   # M1: WS client, IQ ingest, conjugate, outgoing SPOT
   'src/engine/channelizer.c',  # M2: polyphase filter bank → complex channels
   'src/engine/decode_cw.c',    # M3: CW backend (implements decode.h)
+  'src/engine/decode_cw_v2.c', # CW v2: semi-Markov Viterbi (QSB-proof)
   'src/engine/station.c',      # M5: per-frequency station tracker
   'src/engine/callsign.c',     # M4: extraction + validation
   'src/engine/spot_out.c',     # M5/M6: spot policy — dedup, rate, sinks

@@ -104,6 +104,13 @@ struct _SkimPipeline {
 
 /* ---- construction ------------------------------------------------------------ */
 
+/* CW decoder pick: v1 (classical, live-proven) stays the default; the
+ * Viterbi v2 arms with SKIM_CW_V2=1 until the replay A/B flips it. One
+ * process = one backend (per-channel states are not mixable). */
+static const SkimDecodeBackend *cw_backend(void) {
+  return g_getenv("SKIM_CW_V2") ? skim_decode_cw_v2() : skim_decode_cw();
+}
+
 static void station_gone_fwd(const SkimStation *st, gpointer user);
 
 /* RBN spot_out sink → the telnet feed (user = the borrowed SkimRbnFeed). */
@@ -145,7 +152,7 @@ SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg) {
 }
 
 static void bank_teardown(SkimPipeline *p) {
-  const SkimDecodeBackend *cw = skim_decode_cw();
+  const SkimDecodeBackend *cw = cw_backend();
   for (guint c = 0; c < p->nchan; c++) {
     if (p->dec) { cw->channel_free(p->dec[c]); }
     if (p->ext) { skim_callsign_extractor_free(p->ext[c]); }
@@ -260,7 +267,7 @@ static void bank_build(SkimPipeline *p, double rate) {
   p->dec = g_new0(gpointer, p->nchan);
   p->ext = g_new0(SkimCallsignExtractor *, p->nchan);
   p->lvl = g_new0(double, p->nchan);
-  const SkimDecodeBackend *cw = skim_decode_cw();
+  const SkimDecodeBackend *cw = cw_backend();
   const double out_rate = skim_channelizer_out_rate(p->bank);
   for (guint c = 0; c < p->nchan; c++) {
     p->dec[c] = cw->channel_new(out_rate);
@@ -285,7 +292,7 @@ static void bank_build(SkimPipeline *p, double rate) {
  * channel away from a big gun. */
 static gboolean ghost_suppressed(SkimPipeline *p, const double *lvl, guint c,
                                  const SkimDecode *d) {
-  const SkimDecodeBackend *cw = skim_decode_cw();
+  const SkimDecodeBackend *cw = cw_backend();
   const gint M = (gint)p->nchan;
   const gint k = (c <= p->nchan / 2) ? (gint)c : (gint)c - M;
   const double mine = lvl[c];
@@ -329,7 +336,7 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
   skim_channelizer_push(p->bank, b->iq, b->nframes);
   p->frames += b->nframes;
 
-  const SkimDecodeBackend *cw = skim_decode_cw();
+  const SkimDecodeBackend *cw = cw_backend();
   float buf[DRAIN_FRAMES * 2];
   SkimDecode d;
 
