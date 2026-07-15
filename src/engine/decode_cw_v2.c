@@ -91,8 +91,13 @@ enum { K_MARK, K_SPACE, K_EITHER };
 /* Observation model: llr = K·(m − mid)/(µm − µs), clamped. */
 #define LLR_K        5.0
 #define LLR_MAX      2.5
-/* Commit lag, dits: boundaries older than this are stable. */
-#define LAG_DITS     8.0
+/* Commit lag, dits: boundaries older than this are stable. The full lag
+ * matters in a fade — evidence that rescues a drowned element trickles in
+ * late. On a healthy signal the lattice never revises that far back, so a
+ * short lag cuts the text latency roughly in half (Richard, 2026-07-15:
+ * "the decode trails the audio"). */
+#define LAG_DITS       8.0
+#define LAG_DITS_FAST  4.0
 #define BOOT_MARKS   8
 #define BREAK_DITS   16.0
 #define BREAK_MARK   "\xC2\xB7 "        /* "· " over separator (v1)           */
@@ -704,7 +709,13 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
     lattice_step(st);
 
     if ((st->t & 7) == 0) {                    /* lagged commit, every 8     */
-      lattice_commit(st, LAG_DITS, out, &pos);
+      /* Healthy signal (discriminator riding near the envelope peak, clock
+       * trusted) → short lag; a fade or a re-lock keeps the full window. */
+      const double lag =
+          (st->mu_m > 0.6 * st->env_hi && st->elem_err < 0.20)
+              ? LAG_DITS_FAST
+              : LAG_DITS;
+      lattice_commit(st, lag, out, &pos);
 
       /* Live emission (v1's rule, model-driven): once the best path says
        * "a space has been running since commit_t" — everything before it
