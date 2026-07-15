@@ -599,8 +599,11 @@ static void on_list_toggled(GtkToggleButton *btn, gpointer user) {
   }
 }
 
-/* The decode pane's font size rides a CSS provider — reloading the rule
- * restyles the view live. */
+/* The decode pane's font rides a CSS provider — reloading the rule restyles
+ * the view live. The family stack picks a SANS monospace explicitly: the
+ * bare "monospace" alias resolves through fontconfig to a Courier clone
+ * (FreeMono/Nimbus) on a stock install — serifs in a decode stream read
+ * terribly (Richard, 2026-07-15). */
 static void decode_font_apply(App *app) {
   if (!app->css) {
     app->css = gtk_css_provider_new();
@@ -608,8 +611,12 @@ static void decode_font_apply(App *app) {
         gdk_display_get_default(), GTK_STYLE_PROVIDER(app->css),
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
   }
-  char rule[96];
-  g_snprintf(rule, sizeof(rule), "textview.decode-pane { font-size: %dpt; }",
+  char rule[256];
+  g_snprintf(rule, sizeof(rule),
+             "textview.decode-pane { "
+             "font-family: \"Iosevka Nerd Font Mono\", \"Adwaita Mono\", "
+             "\"JetBrains Mono\", \"Liberation Mono\", monospace; "
+             "font-size: %dpt; }",
              app->decode_font);
   gtk_css_provider_load_from_string(app->css, rule);
 }
