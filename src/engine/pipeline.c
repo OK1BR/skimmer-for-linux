@@ -79,6 +79,7 @@ struct _SkimPipeline {
   SkimTciClient    *tci;
   SkimChannelizer  *bank;
   double            bank_rate;
+  double            center_hz;                 /* last block's dds centre    */
   gpointer         *dec;                       /* per-channel decoder state  */
   SkimCallsignExtractor **ext;
   guint             nchan;
@@ -287,6 +288,7 @@ static void bank_build(SkimPipeline *p, double rate) {
   p->ext = g_new0(SkimCallsignExtractor *, p->nchan);
   p->lvl = g_new0(double, p->nchan);
   p->flock = g_new0(FreqLock, p->nchan);
+  p->center_hz = 0;                            /* fresh states — no flush    */
   const SkimDecodeBackend *cw = cw_backend();
   const double out_rate = skim_channelizer_out_rate(p->bank);
   for (guint c = 0; c < p->nchan; c++) {
@@ -353,6 +355,29 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
   if (!p->bank || p->bank_rate != b->rate) { bank_build(p, b->rate); }
   if (!p->bank)
     return;
+
+  /* A dds/centre change (band switch, panadapter re-centre) invalidates
+   * every channel's ABSOLUTE meaning: the decoders' trackers describe
+   * signals that are no longer there, the extractors still hold the OLD
+   * band's callsign candidates — they age by TRAFFIC, not time, so the
+   * first decodes on the new band re-announced 20 m calls and the QSY
+   * logic teleported their spots onto 40 m (live-caught 2026-07-15).
+   * Flush all per-channel state; the station table keeps the old band's
+   * records (really heard — they age out via their own TTL). */
+  if (b->center_hz != p->center_hz) {
+    if (p->center_hz != 0) {
+      const SkimDecodeBackend *cwf = cw_backend();
+      const double out_rate = skim_channelizer_out_rate(p->bank);
+      for (guint c = 0; c < p->nchan; c++) {
+        cwf->channel_free(p->dec[c]);
+        p->dec[c] = cwf->channel_new(out_rate);
+        skim_callsign_extractor_reset(p->ext[c]);
+      }
+      memset(p->flock, 0, p->nchan * sizeof(FreqLock));
+    }
+    p->center_hz = b->center_hz;
+  }
+
   skim_channelizer_push(p->bank, b->iq, b->nframes);
   p->frames += b->nframes;
 

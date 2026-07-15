@@ -22,9 +22,14 @@
 #define SKIMMER_VERSION "0.0.0"
 #endif
 
-/* Traffic within this many Hz belongs to one frequency slot (the station
- * tracker's merge radius, so a slot follows "its" station). */
+/* Matching the radio's TUNED frequency to a station/slot needs slack (the
+ * radio tunes on its 100 Hz step, the station sits on its exact carrier). */
 #define TUNED_WINDOW_HZ   SKIM_STATION_MERGE_HZ
+/* ROUTING decode text into a history slot must be TIGHT: the engine pins
+ * each signal's frequency now, so a slot is one signal — a ±300 Hz routing
+ * window let neighbouring stations interleave into one another's history
+ * (live-caught 2026-07-15: the decode pane "resyncing" between stations). */
+#define FREQLOG_ROUTE_HZ  75.0
 #define FREQLOG_MAX       256      /* LRU cap on remembered frequency slots  */
 #define FREQLOG_CAP_CHARS 20000    /* per-slot history cap                   */
 
@@ -63,6 +68,11 @@ typedef struct {
   GtkCssProvider *css;           /* carries the decode pane font rule         */
   gboolean        probing;       /* port probe / handshake in flight          */
   double          vfo_hz;        /* the radio's tuned frequency (vfo:0,0)     */
+  char            tuned_call[16]; /* the station the pane is FIXED on — set
+                                  * on retune, held while it lives; header
+                                  * and text feed both key off it, so they
+                                  * can never disagree                        */
+  double          tuned_slot_hz; /* its pinned frequency (slot key)           */
   GListStore     *stations;      /* of SkimRow                                */
   GtkSortListModel *sorted;
   GtkTextBuffer  *tuned;         /* decode text at the tuned frequency        */
@@ -109,11 +119,11 @@ static void freqlog_free(gpointer data) {
   g_free(fl);
 }
 
-static FreqLog *freqlog_find(App *app, double freq_hz) {
+static FreqLog *freqlog_find(App *app, double freq_hz, double window_hz) {
   FreqLog *best = NULL;
   for (guint i = 0; i < app->freq_logs->len; i++) {
     FreqLog *fl = g_ptr_array_index(app->freq_logs, i);
-    if (ABS(fl->freq_hz - freq_hz) <= TUNED_WINDOW_HZ &&
+    if (ABS(fl->freq_hz - freq_hz) <= window_hz &&
         (!best || ABS(fl->freq_hz - freq_hz) < ABS(best->freq_hz - freq_hz))) {
       best = fl;
     }
@@ -122,7 +132,7 @@ static FreqLog *freqlog_find(App *app, double freq_hz) {
 }
 
 static FreqLog *freqlog_get(App *app, double freq_hz) {
-  FreqLog *fl = freqlog_find(app, freq_hz);
+  FreqLog *fl = freqlog_find(app, freq_hz, FREQLOG_ROUTE_HZ);
   if (fl) { return fl; }
   if (app->freq_logs->len >= FREQLOG_MAX) {  /* drop the least recent slot   */
     guint victim = 0;
@@ -140,26 +150,52 @@ static FreqLog *freqlog_get(App *app, double freq_hz) {
   return fl;
 }
 
-/* Re-resolve which known station sits on the tuned frequency. When two
- * records overlap the window (frequency changing hands), the FRESHEST one
- * wins — updating from every incoming event made the label flicker between
- * the old and the new occupant. */
-static void tuned_station_refresh(App *app) {
+/* Re-resolve which station the pane is FIXED on. Sticky: while the fixed
+ * station lives and stays within the tuned window, it KEEPS the pane —
+ * freshest-wins re-resolving flipped the header (and the text feed) between
+ * co-channel stations on every report. Only when there is no fixation (a
+ * retune cleared it) or the fixed station left does the freshest station
+ * within the window take over. Returns TRUE when the fixation CHANGED —
+ * the caller then reloads the pane from the new station's history. */
+static gboolean tuned_station_refresh(App *app) {
+  char before[16];
+  g_strlcpy(before, app->tuned_call, sizeof(before));
   SkimStation hit;
   gboolean have = FALSE;
   if (app->vfo_hz > 0) {
     guint n = g_list_model_get_n_items(G_LIST_MODEL(app->stations));
-    for (guint i = 0; i < n; i++) {
-      SkimRow *r = g_list_model_get_item(G_LIST_MODEL(app->stations), i);
-      if (ABS(r->st.freq_hz - app->vfo_hz) <= TUNED_WINDOW_HZ &&
-          (!have || r->st.last_heard > hit.last_heard)) {
-        hit  = r->st;
-        have = TRUE;
+    if (app->tuned_call[0]) {                  /* sticky: keep the fixed one */
+      for (guint i = 0; i < n && !have; i++) {
+        SkimRow *r = g_list_model_get_item(G_LIST_MODEL(app->stations), i);
+        if (g_strcmp0(r->st.call, app->tuned_call) == 0 &&
+            ABS(r->st.freq_hz - app->vfo_hz) <= TUNED_WINDOW_HZ) {
+          hit  = r->st;
+          have = TRUE;
+        }
+        g_object_unref(r);
       }
-      g_object_unref(r);
+    }
+    if (!have) {                               /* else: freshest in window   */
+      for (guint i = 0; i < n; i++) {
+        SkimRow *r = g_list_model_get_item(G_LIST_MODEL(app->stations), i);
+        if (ABS(r->st.freq_hz - app->vfo_hz) <= TUNED_WINDOW_HZ &&
+            (!have || r->st.last_heard > hit.last_heard)) {
+          hit  = r->st;
+          have = TRUE;
+        }
+        g_object_unref(r);
+      }
     }
   }
+  if (have) {
+    g_strlcpy(app->tuned_call, hit.call, sizeof(app->tuned_call));
+    app->tuned_slot_hz = hit.freq_hz;          /* the pinned slot key        */
+  } else {
+    app->tuned_call[0] = '\0';
+    app->tuned_slot_hz = 0;
+  }
   tuned_label_update(app, have ? &hit : NULL);
+  return g_strcmp0(before, app->tuned_call) != 0;
 }
 
 /* Append at the tail of a monitor-style buffer (needs a "tail" mark): insert,
@@ -178,6 +214,21 @@ static void tail_append(GtkTextView *view, GtkTextBuffer *buf, const char *text)
   GtkTextMark *mark = gtk_text_buffer_get_mark(buf, "tail");
   gtk_text_buffer_move_mark(buf, mark, &end);
   gtk_text_view_scroll_mark_onscreen(view, mark);
+}
+
+/* Swap the pane to the fixed station's history (or, with nothing fixed,
+ * to whatever history sits near the VFO). */
+static void tuned_pane_reload(App *app) {
+  gtk_text_buffer_set_text(app->tuned, "", -1);
+  FreqLog *fl = NULL;
+  if (app->tuned_call[0]) {
+    fl = freqlog_find(app, app->tuned_slot_hz, FREQLOG_ROUTE_HZ);
+  } else if (app->vfo_hz > 0) {
+    fl = freqlog_find(app, app->vfo_hz, TUNED_WINDOW_HZ);
+  }
+  if (fl && fl->text->len) {
+    tail_append(app->tuned_view, app->tuned, fl->text->str);
+  }
 }
 
 /* --- marshalled engine events ------------------------------------------------------ */
@@ -204,9 +255,11 @@ static gboolean on_station_idle(gpointer data) {
   }
   g_list_store_append(app->stations, skim_row_new(&ev->st));
   /* Keep the tuned pane's header fresh if this touches the tuned window —
-   * via the freshest-record resolver, never straight from the event. */
+   * via the sticky resolver, never straight from the event. When the
+   * fixation resolves to a (new) station, pull in its history: the first
+   * seconds after a retune decoded before the station validated. */
   if (app->vfo_hz > 0 && ABS(ev->st.freq_hz - app->vfo_hz) <= TUNED_WINDOW_HZ) {
-    tuned_station_refresh(app);
+    if (tuned_station_refresh(app)) { tuned_pane_reload(app); }
   }
   g_free(ev);
   return G_SOURCE_REMOVE;
@@ -231,7 +284,10 @@ static gboolean on_gone_idle(gpointer data) {
       break;
     }
   }
-  tuned_station_refresh(app);
+  if (g_strcmp0(ev->st.call, app->tuned_call) == 0) {
+    app->tuned_call[0] = '\0';                 /* the fixed station left     */
+  }
+  if (tuned_station_refresh(app)) { tuned_pane_reload(app); }
   g_free(ev);
   return G_SOURCE_REMOVE;
 }
@@ -254,8 +310,12 @@ static gboolean on_text_idle(gpointer data) {
     g_string_erase(fl->text, 0,
                    (gssize)(fl->text->len - FREQLOG_CAP_CHARS + 2000));
   }
-  /* ...and live-follow in the pane when the radio sits on this frequency. */
-  if (app->vfo_hz > 0 && ABS(ev->freq_hz - app->vfo_hz) <= TUNED_WINDOW_HZ) {
+  /* ...and live-follow in the pane. The pane belongs to the FIXED station's
+   * slot — never to "anything near the VFO", which interleaved a neighbour
+   * within the window into the tuned station's text. Before a station is
+   * resolved (fresh retune to a quiet spot), follow the VFO tightly. */
+  const double key = app->tuned_call[0] ? app->tuned_slot_hz : app->vfo_hz;
+  if (key > 0 && ABS(ev->freq_hz - key) <= FREQLOG_ROUTE_HZ) {
     tail_append(app->tuned_view, app->tuned, ev->text);
   }
   g_free(ev->text);
@@ -273,13 +333,33 @@ static gboolean on_vfo_idle(gpointer data) {
   App *app = ev->app;
   if (ev->vfo_hz != app->vfo_hz) {
     app->vfo_hz = ev->vfo_hz;
-    tuned_station_refresh(app);
-    /* Swap the pane to THIS frequency's history — one frequency, no mixing. */
-    gtk_text_buffer_set_text(app->tuned, "", -1);
-    FreqLog *fl = freqlog_find(app, app->vfo_hz);
-    if (fl && fl->text->len) {
-      tail_append(app->tuned_view, app->tuned, fl->text->str);
+    /* The sticky resolver keeps the fixed station across small retunes
+     * (our own click-tune rounds on the radio's step). But when the new
+     * frequency clearly points at a DIFFERENT known station — a spot
+     * click on a neighbour within the window — break the fixation, or
+     * the pane would keep showing the previous station's header + text
+     * (live-caught 2026-07-15). */
+    if (app->tuned_call[0]) {
+      double fixed_d = 1e12, best_d = 1e12;
+      char best_call[16] = "";
+      guint n = g_list_model_get_n_items(G_LIST_MODEL(app->stations));
+      for (guint i = 0; i < n; i++) {
+        SkimRow *r = g_list_model_get_item(G_LIST_MODEL(app->stations), i);
+        const double dist = ABS(r->st.freq_hz - app->vfo_hz);
+        if (g_strcmp0(r->st.call, app->tuned_call) == 0) { fixed_d = dist; }
+        if (dist < best_d) {
+          best_d = dist;
+          g_strlcpy(best_call, r->st.call, sizeof(best_call));
+        }
+        g_object_unref(r);
+      }
+      if (best_call[0] && g_strcmp0(best_call, app->tuned_call) != 0 &&
+          best_d + 20.0 < fixed_d) {
+        app->tuned_call[0] = '\0';
+      }
     }
+    tuned_station_refresh(app);
+    tuned_pane_reload(app);
   }
   g_free(ev);
   return G_SOURCE_REMOVE;
@@ -302,6 +382,8 @@ static gboolean on_state_idle(gpointer data) {
     skim_pipeline_stop(app->pipeline);
     g_clear_pointer(&app->pipeline, skim_pipeline_free);
     app->vfo_hz = 0;
+    app->tuned_call[0] = '\0';
+    app->tuned_slot_hz = 0;
     tuned_label_update(app, NULL);
     adw_window_title_set_subtitle(app->title, "connection lost — searching…");
   }
@@ -691,6 +773,8 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
       skim_pipeline_stop(app->pipeline);
       g_clear_pointer(&app->pipeline, skim_pipeline_free);
       app->vfo_hz = 0;
+      app->tuned_call[0] = '\0';
+      app->tuned_slot_hz = 0;
       tuned_label_update(app, NULL);
     }
     scan_tick(app);
@@ -847,6 +931,13 @@ static void on_row_activated(GtkColumnView *view, guint position, gpointer user)
   SkimRow *r = g_list_model_get_item(G_LIST_MODEL(app->sorted), position);
   if (r) {
     if (app->pipeline) { skim_pipeline_tune(app->pipeline, r->st.freq_hz); }
+    /* Fix the pane on the CLICKED station right away — the user said which
+     * one they want; the vfo broadcast confirms the retune later and the
+     * sticky resolver keeps this choice. */
+    g_strlcpy(app->tuned_call, r->st.call, sizeof(app->tuned_call));
+    app->tuned_slot_hz = r->st.freq_hz;
+    tuned_label_update(app, &r->st);
+    tuned_pane_reload(app);
     g_object_unref(r);
   }
 }
