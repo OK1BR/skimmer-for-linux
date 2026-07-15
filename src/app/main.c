@@ -358,7 +358,7 @@ static gboolean status_tick(gpointer data) {
   App *app = data;
   char rbn[64] = "";
   if (app->rbn) {
-    g_snprintf(rbn, sizeof(rbn), " · RBN :%u (%u)",
+    g_snprintf(rbn, sizeof(rbn), " · feed :%u (%u)",
                skim_rbn_feed_port(app->rbn), skim_rbn_feed_clients(app->rbn));
   }
   if (app->pipeline) {
@@ -727,10 +727,11 @@ static void prefs_open(GtkButton *btn, gpointer user) {
                            ADW_PREFERENCES_GROUP(sgrp));
 
   GtkWidget *rgrp = adw_preferences_group_new();
-  adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(rgrp), "RBN feed");
+  adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(rgrp),
+                                  "Telnet spot feed");
   adw_preferences_group_set_description(ADW_PREFERENCES_GROUP(rgrp),
-      "CW-Skimmer-compatible telnet server — point the RBN Aggregator "
-      "(or any cluster client) at this port");
+      "Cluster-dialect telnet server — point a logger (BRlog) or any "
+      "cluster client at this port");
   GtkWidget *rsw = adw_switch_row_new();
   adw_preferences_row_set_title(ADW_PREFERENCES_ROW(rsw), "Enable");
   adw_action_row_set_subtitle(ADW_ACTION_ROW(rsw),

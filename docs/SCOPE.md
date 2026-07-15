@@ -220,11 +220,14 @@ where relevant, a live check against a running `sdr-for-linux`.
   two-station 48 kHz band, the pipeline spots BACK, and the mock asserts both
   calls at ±30 Hz absolute (measured: exact to the Hz), zero bogus calls
   (RBN precision end to end), zero dropped blocks.
-- **M6 — RBN telnet feed. IMPLEMENTED (offline gate 2026-07-15; the
-  supervised live feed through the RBN Aggregator awaits Richard).** The RBN
-  does not take spots from a skimmer directly — the Aggregator connects TO
-  the skimmer's telnet server (the CW Skimmer convention, default port 7300)
-  and relays. `rbn_feed.c` is that server: a GLib/GIO GSocketService on its
+- **M6 — telnet spot feed. IMPLEMENTED (gate 2026-07-15); LOCAL-ONLY by
+  decision.** The RBN does not take spots from a skimmer directly — the
+  Aggregator (closed, Windows-only .NET, undocumented uplink protocol)
+  connects TO the skimmer's telnet server (the CW Skimmer convention,
+  default port 7300) and relays. Richard decided 2026-07-15 NOT to feed the
+  RBN network (no Aggregator under Wine); the server instead serves LOCAL
+  cluster clients — loggers like BRlog — while staying
+  Aggregator-compatible in dialect. `rbn_feed.c` is that server: a GLib/GIO GSocketService on its
   own GMainContext thread (login handshake, any number of clients,
   non-blocking writes — a stalled client is dropped, the Aggregator
   reconnects), broadcasting classic cluster lines
