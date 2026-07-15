@@ -9,9 +9,11 @@
  *     device-global rate explicitly),
  *   - binary Stream type=0 blocks are reassembled across WS fragmentation
  *     (16448-byte blocks vs. an 8192-byte rx buffer),
- *   - ORIENTATION: the mock puts a DDC +12 kHz tone on the wire the ExpertSDR
- *     way (conjugated → −12 kHz); after ingest it must sit at +12 kHz with the
- *     −12 kHz image down > 40 dB — the M1 wire-convention check codified,
+ *   - ORIENTATION: the mock puts a +12 kHz tone on the wire in TRUE orientation
+ *     (the real server conjugates its RF-inverted DDC feed on send, so the wire
+ *     is already true); after pass-through ingest it must still sit at +12 kHz
+ *     with the −12 kHz image down > 40 dB — the M1 wire-convention check
+ *     codified (live-caught 2026-07-15: a client-side conjugate mirrors),
  *   - dds retune broadcasts update center_hz live,
  *   - spot() emits a well-formed spot: command with reserved chars scrubbed,
  *   - stop() sends iq_stop:0; and no IQ callback fires afterwards.
@@ -56,9 +58,10 @@ static void srv_queue_text(const char *txt) {
   g_mutex_unlock(&s_lock);
 }
 
-/* One Stream block carrying the wire-convention tone: the DDC sees the signal
- * at +12 kHz, ExpertSDR ships the CONJUGATE, so the wire sample spins at
- * −12 kHz. Blocks are 512 whole cycles, so per-block phase restarts at 0. */
+/* One Stream block carrying the wire-convention tone: a station +12 kHz above
+ * the centre arrives at +12 kHz on the wire (true orientation — the server has
+ * already conjugated its RF-inverted DDC feed on send). Blocks are 512 whole
+ * cycles, so per-block phase restarts at 0. */
 static void srv_queue_iq_block(void) {
   Msg *m = g_new0(Msg, 1);
   m->len    = 64 + BLK * 2 * sizeof(float);
@@ -69,7 +72,7 @@ static void srv_queue_iq_block(void) {
   memcpy(m->data, h, sizeof(h));
   float *iq = (float *)(void *)(m->data + 64);
   for (int i = 0; i < BLK; i++) {
-    double a = -2.0 * G_PI * TONE_HZ * (double)i / (double)RATE;
+    double a = 2.0 * G_PI * TONE_HZ * (double)i / (double)RATE;
     iq[2 * i]     = 0.5f * (float)cos(a);
     iq[2 * i + 1] = 0.5f * (float)sin(a);
   }
@@ -300,8 +303,8 @@ int main(void) {
   check("IQ callback carries the dds centre", center == 7020000.0);
 
   if (have) {
-    /* Correlate the ingested block against e^{±j2π·12k·t}: after the client's
-     * conjugation the DDC +12 kHz tone must be back at +12 kHz (true
+    /* Correlate the ingested block against e^{±j2π·12k·t}: ingest is
+     * pass-through, so the wire +12 kHz tone must still be at +12 kHz (true
      * orientation), the −12 kHz image at the noise floor. */
     double pr = 0, pi = 0, nr = 0, ni = 0;
     g_mutex_lock(&c_lock);
@@ -316,7 +319,7 @@ int main(void) {
     g_mutex_unlock(&c_lock);
     double pos = sqrt(pr * pr + pi * pi) / BLK;
     double neg = sqrt(nr * nr + ni * ni) / BLK;
-    check("conjugate ingest: DDC +12 kHz tone recovered at +12 kHz, amp ~0.5",
+    check("pass-through ingest: wire +12 kHz tone stays at +12 kHz, amp ~0.5",
           pos > 0.4 && pos < 0.6);
     check("−12 kHz image suppressed > 40 dB", neg < pos * 0.01);
   } else {
@@ -357,7 +360,7 @@ int main(void) {
     printf("FAIL\n");
     return 1;
   }
-  printf("PASS — handshake, IQ reassembly, conjugate orientation and spot "
+  printf("PASS — handshake, IQ reassembly, true-orientation ingest and spot "
          "plumbing all behave.\n");
   return 0;
 }

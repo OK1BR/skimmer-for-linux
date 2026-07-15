@@ -7,10 +7,11 @@
  * accumulated as a byte stream and drained one Stream block at a time — the
  * 64-byte header carries the payload length, so WS fragmentation is invisible.
  *
- * Wire orientation: ExpertSDR IQ is the complex CONJUGATE of the DDC feed
- * (sdr-for-linux docs/TCI-SCOPE.md F6d-2d, live-verified with SDC/CW Skimmer).
- * Q is negated on ingest, so the IQ callback sees the true spectrum: a signal
- * above the DDC centre lands at a positive offset.
+ * Wire orientation: the wire already carries the TRUE spectrum — the server
+ * conjugates its RF-inverted raw DDC feed on send (the ExpertSDR convention
+ * SDC/CW Skimmer consume as-is; sdr-for-linux docs/TCI-SCOPE.md F6d-2d).
+ * Ingest is pass-through: a signal above the DDC centre lands at a positive
+ * offset. Do NOT conjugate here — live-caught 2026-07-15 mirroring the band.
  *
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
@@ -37,6 +38,10 @@ struct _SkimTciClient {
 
   SkimTciIqCb iq_cb;
   gpointer    iq_cb_data;
+  SkimTciVfoCb    vfo_cb;       /* fires on the LWS thread                     */
+  gpointer        vfo_cb_data;
+  SkimTciClosedCb closed_cb;    /* fires on the LWS thread                     */
+  gpointer        closed_cb_data;
 
   struct lws_context *ctx;
   struct lws         *wsi;    /* LWS thread only (except on_writable kick)   */
@@ -49,6 +54,7 @@ struct _SkimTciClient {
   gboolean failed;            /* connection error                            */
   GQueue   out;               /* outgoing text commands (char*)              */
   double   center_hz;         /* dds:0,<hz>                                  */
+  double   vfo_hz;            /* vfo:0,0,<hz> — the tuned frequency          */
   guint    iq_rate;           /* iq_samplerate announced/echoed              */
   char     device[64];
   char     protocol[64];
@@ -80,6 +86,10 @@ static void handle_command(SkimTciClient *c, char *cmd) {
   if (args) { *args++ = '\0'; }
   for (char *p = cmd; *p; p++) { *p = (char)g_ascii_tolower(*p); }
 
+  SkimTciVfoCb vfo_cb = NULL;
+  gpointer     vfo_user = NULL;
+  double       vfo_hz = 0;
+
   g_mutex_lock(&c->lock);
   if (strcmp(cmd, "ready") == 0) {
     c->ready = TRUE;
@@ -95,11 +105,26 @@ static void handle_command(SkimTciClient *c, char *cmd) {
       double hz = g_ascii_strtod(comma + 1, NULL);
       if (hz > 0) { c->center_hz = hz; }
     }
+  } else if (strcmp(cmd, "vfo") == 0 && args) {
+    /* vfo:<rx>,<ch>,<hz> — the tuned frequency; we track rx 0 channel A. */
+    char *c1 = strchr(args, ',');
+    char *c2 = c1 ? strchr(c1 + 1, ',') : NULL;
+    if (c2 && strtol(args, NULL, 10) == 0 && strtol(c1 + 1, NULL, 10) == 0) {
+      double hz = g_ascii_strtod(c2 + 1, NULL);
+      if (hz > 0 && hz != c->vfo_hz) {
+        c->vfo_hz = hz;
+        vfo_cb   = c->vfo_cb;        /* fire outside the lock */
+        vfo_user = c->vfo_cb_data;
+        vfo_hz   = hz;
+      }
+    }
   } else if (strcmp(cmd, "iq_samplerate") == 0 && args) {
     long r = strtol(args, NULL, 10);
     if (r > 0) { c->iq_rate = (guint)r; }
   }
   g_mutex_unlock(&c->lock);
+
+  if (vfo_cb) { vfo_cb(vfo_hz, vfo_user); }
 }
 
 static void drain_text(SkimTciClient *c) {
@@ -139,8 +164,11 @@ static void drain_binary(SkimTciClient *c) {
       } else {
         float *iq = (float *)(void *)(c->bin->data + STREAM_HDR_BYTES);
         const guint nframes = samples / 2;
-        /* ExpertSDR wire = conjugated DDC feed — undo it to true orientation. */
-        for (guint i = 0; i < nframes; i++) { iq[2 * i + 1] = -iq[2 * i + 1]; }
+        /* The wire is already TRUE spectrum orientation — sdr-for-linux
+         * conjugates its RF-inverted raw DDC feed on send (the ExpertSDR
+         * convention SDC/CW Skimmer consume as-is). Do NOT conjugate here:
+         * that mirrors every frequency around the DDC centre (live-caught
+         * 2026-07-15, spots landed out of band). */
         if (c->iq_cb) {
           g_mutex_lock(&c->lock);
           const double center = c->center_hz;
@@ -209,6 +237,10 @@ static int client_cb(struct lws *wsi, enum lws_callback_reasons reason,
     c->wsi = NULL;
     g_cond_broadcast(&c->cond);
     g_mutex_unlock(&c->lock);
+    /* Unexpected loss (run still set = nobody called stop): tell the owner. */
+    if (g_atomic_int_get(&c->run) && c->closed_cb) {
+      c->closed_cb(c->closed_cb_data);
+    }
     return 0;
 
   default:
@@ -266,6 +298,17 @@ void skim_tci_client_free(SkimTciClient *c) {
 void skim_tci_client_set_iq_cb(SkimTciClient *c, SkimTciIqCb cb, gpointer user_data) {
   c->iq_cb      = cb;
   c->iq_cb_data = user_data;
+}
+
+void skim_tci_client_set_vfo_cb(SkimTciClient *c, SkimTciVfoCb cb, gpointer user_data) {
+  c->vfo_cb      = cb;
+  c->vfo_cb_data = user_data;
+}
+
+void skim_tci_client_set_closed_cb(SkimTciClient *c, SkimTciClosedCb cb,
+                                   gpointer user_data) {
+  c->closed_cb      = cb;
+  c->closed_cb_data = user_data;
 }
 
 gboolean skim_tci_client_start(SkimTciClient *c, guint iq_samplerate, GError **error) {
@@ -379,9 +422,22 @@ void skim_tci_client_spot(SkimTciClient *c, const char *call, const char *mode,
   g_free(t);
 }
 
+void skim_tci_client_tune(SkimTciClient *c, double freq_hz) {
+  if (!c->thread || freq_hz <= 0)
+    return;
+  cli_queue(c, g_strdup_printf("vfo:0,0,%lld;", (long long)(freq_hz + 0.5)));
+}
+
 double skim_tci_client_center_hz(SkimTciClient *c) {
   g_mutex_lock(&c->lock);
   double hz = c->center_hz;
+  g_mutex_unlock(&c->lock);
+  return hz;
+}
+
+double skim_tci_client_vfo_hz(SkimTciClient *c) {
+  g_mutex_lock(&c->lock);
+  double hz = c->vfo_hz;
   g_mutex_unlock(&c->lock);
   return hz;
 }

@@ -15,8 +15,15 @@
 
 G_BEGIN_DECLS
 
-/* Reports of one call within this many Hz are the same station. */
+/* Traffic within this many Hz belongs to one frequency slot (UI text
+ * routing, tuned-pane matching). */
 #define SKIM_STATION_MERGE_HZ 300.0
+
+/* Reports of one call within this many Hz are the SAME station (one
+ * transmitter): a strong signal ghost-decodes several channels away, so the
+ * same-call fold must reach far beyond one channel. The strongest (most
+ * readable) report positions the station on its peak. */
+#define SKIM_STATION_SAMECALL_HZ 2500.0
 
 typedef struct {
   char    call[16];
@@ -36,8 +43,8 @@ SkimStationTable *skim_station_table_new(void);
 void              skim_station_table_free(SkimStationTable *t);
 
 /* Insert or update. Ghost rule: an existing record with the same call within
- * SKIM_STATION_MERGE_HZ absorbs the report; the frequency/SNR of the STRONGER
- * report wins. Returns the merged record (owned by the table). */
+ * SKIM_STATION_SAMECALL_HZ absorbs the report; the frequency/SNR of the
+ * STRONGER report wins. Returns the merged record (owned by the table). */
 const SkimStation *skim_station_table_report(SkimStationTable *t,
                                              const SkimStation *st);
 

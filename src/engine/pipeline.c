@@ -17,6 +17,7 @@
  */
 #include "pipeline.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "callsign.h"
@@ -56,12 +57,17 @@ struct _SkimPipeline {
   volatile gint     run;
   gint64            last_prune;
 
+  char             *dlog_path;                 /* decode log (engine thread) */
+  FILE             *dlog;
+
   SkimPipelineStationCb station_cb;
   gpointer              station_user;
   SkimPipelineTextCb    text_cb;
   gpointer              text_user;
   SkimPipelineStateCb   state_cb;
   gpointer              state_user;
+  SkimPipelineVfoCb     vfo_cb;
+  gpointer              vfo_user;
 
   volatile guint64 frames;
   volatile guint64 dropped;
@@ -75,6 +81,7 @@ SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg) {
   p->cfg = *cfg;
   p->host = g_strdup(cfg->host ? cfg->host : "127.0.0.1");
   p->cfg.host = p->host;
+  p->dlog_path = g_strdup(cfg->decode_log_path);
   if (p->cfg.chan_bw_hz <= 0) { p->cfg.chan_bw_hz = 125.0; }
   p->stations = skim_station_table_new();
   p->queue    = g_async_queue_new();
@@ -117,6 +124,7 @@ void skim_pipeline_free(SkimPipeline *p) {
   }
   g_async_queue_unref(p->queue);
   g_free(p->host);
+  g_free(p->dlog_path);
   g_free(p);
 }
 
@@ -131,6 +139,24 @@ void skim_pipeline_set_text_cb(SkimPipeline *p, SkimPipelineTextCb cb, gpointer 
 void skim_pipeline_set_state_cb(SkimPipeline *p, SkimPipelineStateCb cb, gpointer user) {
   p->state_cb = cb;
   p->state_user = user;
+}
+void skim_pipeline_set_vfo_cb(SkimPipeline *p, SkimPipelineVfoCb cb, gpointer user) {
+  p->vfo_cb = cb;
+  p->vfo_user = user;
+}
+
+/* ---- network-thread side: retune + connection loss ---------------------------- */
+
+static void vfo_fwd_cb(double vfo_hz, gpointer user) {
+  SkimPipeline *p = user;
+  if (p->vfo_cb) { p->vfo_cb(vfo_hz, p->vfo_user); }
+}
+
+static void closed_cb(gpointer user) {
+  SkimPipeline *p = user;
+  /* The owner reacts (stops the pipeline from ITS thread — never from here:
+   * stop() joins threads and would deadlock inside the LWS callback). */
+  if (p->state_cb) { p->state_cb(FALSE, "connection lost", p->state_user); }
 }
 
 /* ---- LWS-thread side: queue the block ---------------------------------------- */
@@ -196,6 +222,17 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
       const double chan_hz =
           b->center_hz + skim_channelizer_offset_hz(p->bank, c);
       const double sig_hz = chan_hz + d.freq_offset_hz;
+      if (p->dlog) {
+        GDateTime *now = g_date_time_new_now_local();
+        char *ts = g_date_time_format(now, "%H:%M:%S");
+        char khz[G_ASCII_DTOSTR_BUF_SIZE];   /* C locale — parseable dot     */
+        g_ascii_formatd(khz, sizeof(khz), "%.2f", sig_hz / 1000.0);
+        fprintf(p->dlog, "%s %9s %2.0fwpm %3.0fdB |%s|\n",
+                ts, khz, d.speed, d.snr_db, d.text);
+        fflush(p->dlog);
+        g_free(ts);
+        g_date_time_unref(now);
+      }
       if (p->text_cb) { p->text_cb(sig_hz, d.text, p->text_user); }
 
       skim_callsign_extractor_feed(p->ext[c], d.text);
@@ -251,11 +288,27 @@ gboolean skim_pipeline_start(SkimPipeline *p, GError **error) {
   }
   p->tci = skim_tci_client_new(p->cfg.host, p->cfg.port);
   skim_tci_client_set_iq_cb(p->tci, iq_cb, p);
+  skim_tci_client_set_vfo_cb(p->tci, vfo_fwd_cb, p);
+  skim_tci_client_set_closed_cb(p->tci, closed_cb, p);
   if (!skim_tci_client_start(p->tci, p->cfg.iq_rate, error)) {
     g_clear_pointer(&p->tci, skim_tci_client_free);
     return FALSE;
   }
   p->spots = skim_spot_out_new(p->tci, NULL, 0);
+  if (p->dlog_path) {
+    p->dlog = fopen(p->dlog_path, "a");
+    if (p->dlog) {
+      GDateTime *now = g_date_time_new_now_local();
+      char *ts = g_date_time_format(now, "%Y-%m-%d %H:%M:%S");
+      fprintf(p->dlog, "--- session %s — %s, dds %.0f Hz ---\n", ts,
+              skim_tci_client_device(p->tci), skim_tci_client_center_hz(p->tci));
+      fflush(p->dlog);
+      g_free(ts);
+      g_date_time_unref(now);
+    } else {
+      g_warning("pipeline: decode log %s not writable", p->dlog_path);
+    }
+  }
   g_atomic_int_set(&p->run, 1);
   p->last_prune = g_get_monotonic_time();
   p->thread = g_thread_new("skim-engine", engine_thread, p);
@@ -278,10 +331,22 @@ void skim_pipeline_stop(SkimPipeline *p) {
   if (p->spots) { p->spots_total = skim_spot_out_count(p->spots); }
   g_clear_pointer(&p->tci, skim_tci_client_free);
   g_clear_pointer(&p->spots, skim_spot_out_free);
+  if (p->dlog) {                    /* engine thread is joined — safe here   */
+    fclose(p->dlog);
+    p->dlog = NULL;
+  }
   if (p->state_cb) { p->state_cb(FALSE, "disconnected", p->state_user); }
 }
 
 /* ---- counters -------------------------------------------------------------------- */
+
+double skim_pipeline_vfo_hz(const SkimPipeline *p) {
+  return p->tci ? skim_tci_client_vfo_hz(p->tci) : 0;
+}
+
+void skim_pipeline_tune(SkimPipeline *p, double freq_hz) {
+  if (p->tci) { skim_tci_client_tune(p->tci, freq_hz); }
+}
 
 guint64 skim_pipeline_frames(const SkimPipeline *p) { return p->frames; }
 guint64 skim_pipeline_spots(const SkimPipeline *p) {

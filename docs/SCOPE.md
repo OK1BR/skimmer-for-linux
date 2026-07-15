@@ -26,10 +26,13 @@ the other half: the decoder and the spot pipeline.
   (`src/tci_server.c`, milestone F6d-2).
 - **IQ stream** (F6d-2d, LIVE-VERIFIED with SDC + CW Skimmer): `iq_samplerate`
   `{48,96,192,384}k`, `iq_start:0` / `iq_stop:0`. Binary Stream frames, header
-  `type=0` (IQ), float32, 2 ch, `length = frames×2`. **Orientation is the
-  ExpertSDR convention = complex CONJUGATE of the HPSDR DDC feed** (a +12 kHz DDC
-  tone appears at −12 kHz on the wire). `iq_samplerate` is device-global radio
-  state announced in the init block.
+  `type=0` (IQ), float32, 2 ch, `length = frames×2`. **The wire carries TRUE
+  spectrum orientation** — the server conjugates its RF-inverted raw HPSDR DDC
+  feed on send (the ExpertSDR convention; "a +12 kHz DDC tone appears at −12 kHz
+  on the wire" is relative to the raw DDC feed, *not* to RF). Clients must NOT
+  conjugate on ingest — that mirrors the band around the DDC centre (live-caught
+  2026-07-15). `iq_samplerate` is device-global radio state announced in the
+  init block.
 - **Spots** (F6d-2e): `SPOT:call,mode,freq,ARGB,text;` / `SPOT_DELETE:call` /
   `SPOT_CLEAR` render callsign labels on the panadapter; a click issues
   `rx_clicked_on_spot:0,0,call,hz` and tunes the radio. 192-entry store, dedup by
@@ -42,9 +45,7 @@ light native UI.
 ## Architecture
 
 ```
- TCI WS client ──► IQ block (192/384k float32, complex conjugate)
-    │
-    ├─► conjugate/normalise to true spectrum orientation
+ TCI WS client ──► IQ block (192/384k float32, true orientation as received)
     │
     ├─► polyphase channelizer ──► N narrow COMPLEX baseband channels (~50–500 Hz)
     │        (complex, phase-preserving — RTTY/PSK need phase, not just magnitude)
@@ -117,20 +118,22 @@ where relevant, a live check against a running `sdr-for-linux`.
 - **M0 — scaffold.** `meson` project, GPLv3, docs, engine skeleton (GLib-only,
   headless) + a minimal GTK4/libadwaita window. Gate: `meson compile` is clean;
   the empty app launches.
-- **M1 — TCI client + IQ ingest. IMPLEMENTED (offline-verified 2026-07-15;
-  live probe run the same evening against a real SDR-for-Linux on 80 m:
-  handshake + 192 kHz stream ok, effective rate −0.02 %; the eyeball
-  orientation check against the panadapter awaits Richard's verdict).** WebSocket client (libwebsockets),
+- **M1 — TCI client + IQ ingest. IMPLEMENTED; orientation LIVE-VERIFIED
+  2026-07-15 the hard way:** the first live run decoded real stations mirrored
+  around the DDC centre (out-of-band CW spots) — the client was conjugating a
+  wire that already carries true orientation (see the TCI facts above). Fixed:
+  ingest is pass-through. WebSocket client (libwebsockets),
   handshake (`protocol:ExpertSDR3,…` → `ready;` → `start;`), `iq_samplerate` +
-  `iq_start:0`, reassemble binary Stream `type=0` blocks, **verify the conjugate
-  orientation** (codify the wire convention: a +12 kHz DDC tone must land at
-  −12 kHz; conjugate to recover true spectrum), print IQ stats / a raw spectrum.
+  `iq_start:0`, reassemble binary Stream `type=0` blocks, **verify the wire
+  orientation** (codified: a station +12 kHz above centre arrives at +12 kHz on
+  the wire; no client-side conjugate), print IQ stats / a raw spectrum.
   Reuse: libwebsockets, piHPSDR `tci.c` reference. Done as
   `src/engine/tci_client.c` (own LWS service thread, text split on `;`,
-  byte-stream Stream reassembly so WS fragmentation is invisible, Q negated on
-  ingest, dds tracked live, outgoing text queue that M5's spot() already rides).
+  byte-stream Stream reassembly so WS fragmentation is invisible, IQ passed
+  through as received, dds tracked live, outgoing text queue that M5's spot()
+  already rides).
   Offline gate: `skimmer-tci-test` — mock TCI server, 16 checks incl. the
-  orientation correlation (+12 kHz recovered, image < −40 dB) and the spot
+  orientation correlation (+12 kHz stays +12 kHz, image < −40 dB) and the spot
   format. Live gate: `skimmer-tci-probe [host] [port] [rate] [secs]` — prints
   handshake, IQ stats (effective vs. nominal rate), top spectrum peaks + an
   ASCII panorama in true orientation; the eyeball check against the panadapter
@@ -226,7 +229,9 @@ where relevant, a live check against a running `sdr-for-linux`.
 
 ## Safety / etiquette
 
-Read-only against the radio: the skimmer only *consumes* IQ and *sends spots*; it
-never keys or changes radio state (no TRX/TUNE/CW/DDS from here). The RBN feed
-must never emit unvalidated callsigns — M4 gates M6. Richard's global rule
+Read-only against the radio, with one deliberate exception: the skimmer
+*consumes* IQ, *sends spots*, and — only when the user activates a station row —
+*tunes* (`vfo:0,0,<hz>`; added 2026-07-15 at Richard's request). It never keys
+and never changes radio state on its own (no TRX/TUNE/CW from here). The RBN
+feed must never emit unvalidated callsigns — M4 gates M6. Richard's global rule
 applies: consent before any major/irreversible step.

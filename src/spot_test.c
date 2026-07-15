@@ -167,9 +167,9 @@ static void srv_queue_iq_block(void) {
   float *iq = (float *)(void *)(m->data + 64);
   for (guint i = 0; i < BLK; i++) {
     guint src = (s_pos + i) % g_band_frames;
-    /* ExpertSDR wire = conjugate of the DDC feed. */
+    /* The wire carries TRUE orientation (server conjugates its DDC feed). */
     iq[2 * i]     = g_band[2 * src];
-    iq[2 * i + 1] = -g_band[2 * src + 1];
+    iq[2 * i + 1] = g_band[2 * src + 1];
   }
   s_pos = (s_pos + BLK) % g_band_frames;
   g_mutex_lock(&s_lock);

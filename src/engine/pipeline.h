@@ -22,14 +22,19 @@ typedef struct {
   guint       iq_rate;        /* 48/96/192/384 kHz; 0 = keep device rate     */
   double      chan_bw_hz;     /* channel spacing (default 125 Hz)            */
   const char *dict_path;      /* optional MASTER.SCP; NULL = none            */
+  const char *decode_log_path; /* append raw decodes here; NULL = no log     */
 } SkimPipelineConfig;
 
 typedef struct _SkimPipeline SkimPipeline;
 
-/* All callbacks fire on the ENGINE thread. */
+/* Station/text callbacks fire on the ENGINE thread; state/vfo callbacks may
+ * also fire on the network thread (connection loss, radio retune) or the
+ * caller's thread (start/stop). Marshal accordingly. */
 typedef void (*SkimPipelineStationCb)(const SkimStation *st, gpointer user);
 typedef void (*SkimPipelineTextCb)(double freq_hz, const char *text, gpointer user);
 typedef void (*SkimPipelineStateCb)(gboolean connected, const char *detail, gpointer user);
+/* The radio's tuned frequency (vfo:0,0) changed. */
+typedef void (*SkimPipelineVfoCb)(double vfo_hz, gpointer user);
 
 SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg);
 void          skim_pipeline_free(SkimPipeline *p);
@@ -37,10 +42,18 @@ void          skim_pipeline_free(SkimPipeline *p);
 void skim_pipeline_set_station_cb(SkimPipeline *p, SkimPipelineStationCb cb, gpointer user);
 void skim_pipeline_set_text_cb(SkimPipeline *p, SkimPipelineTextCb cb, gpointer user);
 void skim_pipeline_set_state_cb(SkimPipeline *p, SkimPipelineStateCb cb, gpointer user);
+void skim_pipeline_set_vfo_cb(SkimPipeline *p, SkimPipelineVfoCb cb, gpointer user);
 
 /* Connect + start decoding. Blocks for the TCI handshake. */
 gboolean skim_pipeline_start(SkimPipeline *p, GError **error);
 void     skim_pipeline_stop(SkimPipeline *p);
+
+/* The radio's tuned frequency (0 until the first vfo broadcast lands). */
+double skim_pipeline_vfo_hz(const SkimPipeline *p);
+
+/* Tune the radio to freq_hz — only ever on an explicit user action (a no-op
+ * while disconnected). The vfo broadcast confirms the retune. */
+void   skim_pipeline_tune(SkimPipeline *p, double freq_hz);
 
 /* Counters for the status line / gates. */
 guint64 skim_pipeline_frames(const SkimPipeline *p);

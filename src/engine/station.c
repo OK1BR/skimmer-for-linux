@@ -2,10 +2,12 @@
  *
  * Storage: call → GSList of records (a call on two truly different
  * frequencies stays two stations). A report merges into the first record of
- * the same call within SKIM_STATION_MERGE_HZ; the stronger report's
+ * the same call within SKIM_STATION_SAMECALL_HZ; the stronger report's
  * frequency and SNR win — that is what folds the adjacent-channel ghosts of
- * a strong station (its splatter decodes 1–2 channels away with a much
- * weaker SNR) back into one spot at the right frequency.
+ * a strong station (its splatter decodes several channels away with a much
+ * weaker SNR) back into one spot at the right frequency, on the peak of the
+ * most readable decode (live-tuned 2026-07-15: 300 Hz was too narrow, one
+ * call showed up 5× across the splatter).
  *
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
@@ -45,7 +47,7 @@ const SkimStation *skim_station_table_report(SkimStationTable *t,
   GSList *list = g_hash_table_lookup(t->by_call, st->call);
   for (GSList *l = list; l; l = l->next) {
     SkimStation *e = l->data;
-    if (fabs(e->freq_hz - st->freq_hz) <= SKIM_STATION_MERGE_HZ) {
+    if (fabs(e->freq_hz - st->freq_hz) <= SKIM_STATION_SAMECALL_HZ) {
       /* Merge: the stronger report positions the station. */
       if (st->snr_db >= e->snr_db) {
         e->freq_hz = st->freq_hz;

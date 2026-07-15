@@ -26,8 +26,10 @@ back to the radio panadapter and to the RBN. The full plan is in
   in `src/app/`.
 - **The channelizer is complex/phase-preserving and mode-agnostic** from the
   start (RTTY/PSK need phase). Decode backends implement the `decode.h` interface.
-- **Read-only to the radio.** The skimmer consumes IQ and sends spots only — it
-  never keys or changes radio state.
+- **Read-only to the radio — except an explicit user tune.** The skimmer
+  consumes IQ and sends spots; it never keys and never changes radio state on
+  its own. The single deliberate write is `vfo:0,0,<hz>` when the USER
+  activates a station row (added 2026-07-15 at Richard's request).
 - **RBN feed must never emit unvalidated callsigns** — M4 (validation) gates M6
   (RBN).
 
@@ -36,8 +38,12 @@ back to the radio panadapter and to the RBN. The full plan is in
 - Server: `ws://<host>:40001`, `PROTOCOL:ExpertSDR3,1.9`.
 - IQ: `iq_samplerate:{48,96,192,384};` + `iq_start:0;`. Binary Stream header
   `type=0`, float32, 2 ch, `length = frames×2`.
-- **Orientation = complex CONJUGATE of the DDC feed** (a +12 kHz DDC tone lands
-  at −12 kHz on the wire) — conjugate on ingest.
+- **The wire carries TRUE spectrum orientation — do NOT conjugate on ingest.**
+  The server conjugates its RF-inverted raw HPSDR DDC feed on send (that is the
+  ExpertSDR convention SDC/CW Skimmer consume as-is). The TCI-SCOPE line
+  "a +12 kHz DDC tone lands at −12 kHz on the wire" is relative to the raw DDC
+  feed, *not* to RF. A client-side conjugate mirrors every frequency around the
+  DDC centre — live-caught 2026-07-15 (spots landed out of band).
 - `iq_samplerate` is device-global radio state, announced in the init block.
 - Spots back: `SPOT:call,mode,freq,ARGB,text;` / `SPOT_DELETE:call` /
   `SPOT_CLEAR`. A click on the radio issues `rx_clicked_on_spot:0,0,call,hz`.
@@ -71,7 +77,7 @@ then a supervised live feed). MASTER.SCP can go to
 
 ```
 src/engine/   headless, GLib-only:
-  tci_client   WS client, IQ ingest, conjugate, outgoing SPOT
+  tci_client   WS client, IQ ingest (true orientation), outgoing SPOT
   channelizer  polyphase filter bank → complex baseband per channel
   decode.h     backend interface: channel → { text, confidence, freq, wpm/baud }
   decode_cw    CW backend (phase 1); later decode_rtty, decode_psk

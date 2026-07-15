@@ -1,20 +1,25 @@
 /*
  * skimmer-tci-probe — M1 live gate against a running sdr-for-linux TCI server.
  *
- *   skimmer-tci-probe [host] [port] [rate] [seconds]
+ *   skimmer-tci-probe [host] [port] [rate] [seconds] [dump.cf32]
  *     host     TCI server (default 127.0.0.1)
  *     port     WebSocket port (default 40001)
  *     rate     IQ rate in Hz or kHz: 48/96/192/384[000] (default 192000)
  *     seconds  capture length (default 10)
+ *     dump     optional: append raw IQ (float32 interleaved, true
+ *              orientation as received) to this file; a <dump>.meta text
+ *              sidecar records start time, centre, rate and frame count —
+ *              the M3 off-air A/B corpus recorder
  *
  * Connects, prints the handshake (protocol, device, dds centre, granted IQ
  * rate), ingests IQ for N seconds and reports: block/frame counts, effective
  * vs. nominal sample rate, RMS/peak/DC, and an 8192-point spectrum (top peaks
- * + a one-line ASCII panorama) in TRUE orientation — the client conjugates the
- * ExpertSDR wire convention on ingest, so a station ABOVE the DDC centre must
- * show at a POSITIVE offset here. Compare peaks against the panadapter: that
- * eyeball check *is* the M1 orientation gate (we cannot key a reference tone —
- * the skimmer is read-only by design).
+ * + a one-line ASCII panorama) in TRUE orientation — the wire already carries
+ * it (the server conjugates its RF-inverted DDC feed on send; ingest is
+ * pass-through), so a station ABOVE the DDC centre must show at a POSITIVE
+ * offset here. Compare peaks against the panadapter: that eyeball check *is*
+ * the M1 orientation gate (we cannot key a reference tone — the skimmer is
+ * read-only by design).
  *
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
@@ -41,11 +46,13 @@ static double        p_sum_i, p_sum_q, p_sum_p2;  /* DC + power accumulators   *
 static float         p_peak;
 static float         p_fft_buf[FFT_N * 2];
 static guint         p_fft_fill;            /* frames captured into p_fft_buf  */
+static FILE         *p_dump;                /* raw IQ dump (set before start)  */
 
 static void iq_cb(const float *iq, guint nframes, double rate, double center,
                   gpointer user) {
   (void)center; (void)user;
   gint64 now = g_get_monotonic_time();
+  if (p_dump) { fwrite(iq, 2 * sizeof(float), nframes, p_dump); }
   g_mutex_lock(&p_lock);
   if (!p_blocks) { p_t_first = now; }
   p_t_last   = now;
@@ -110,10 +117,21 @@ int main(int argc, char **argv) {
   guint16     port = argc > 2 ? (guint16)atoi(argv[2]) : 40001;
   guint       rate = argc > 3 ? (guint)atoi(argv[3]) : 192000;
   int         secs = argc > 4 ? atoi(argv[4]) : 10;
+  const char *dump = argc > 5 ? argv[5] : NULL;
   if (rate < 1000) { rate *= 1000; }              /* 192 → 192000              */
 
   printf("=== skimmer-tci-probe — ws://%s:%u, %u Hz IQ, %d s ===\n",
          host, port, rate, secs);
+  if (dump) {
+    p_dump = fopen(dump, "ab");
+    if (!p_dump) {
+      printf("FAIL — cannot open dump file %s\n", dump);
+      return 1;
+    }
+    printf("dumping raw IQ (cf32 interleaved) to %s\n", dump);
+  }
+
+  GDateTime *t_start = g_date_time_new_now_local();
 
   SkimTciClient *c = skim_tci_client_new(host, port);
   skim_tci_client_set_iq_cb(c, iq_cb, NULL);
@@ -175,6 +193,29 @@ int main(int argc, char **argv) {
   printf("  RMS %.1f dBFS, peak %.3f, DC offset I %+.5f Q %+.5f\n",
          rms > 0 ? 20.0 * log10(rms) : -999.0, peak, dc_i, dc_q);
 
+  if (p_dump) {
+    fclose(p_dump);
+    p_dump = NULL;
+    char *meta_path = g_strdup_printf("%s.meta", dump);
+    FILE *meta = fopen(meta_path, "a");
+    if (meta) {
+      char *ts = g_date_time_format(t_start, "%Y-%m-%d %H:%M:%S %z");
+      fprintf(meta,
+              "file: %s\nstart: %s\nsource: ws://%s:%u\n"
+              "format: cf32 interleaved I,Q — TRUE spectrum orientation "
+              "(as on the wire, no conjugation)\n"
+              "center_hz: %.0f\nrate_hz: %.0f\nframes: %" G_GUINT64_FORMAT
+              "\nduration_s: %.1f\n---\n",
+              dump, ts, host, port, center, hdrrate, frames, span_s);
+      fclose(meta);
+      g_free(ts);
+      printf("  dump closed, sidecar %s written\n", meta_path);
+    } else {
+      printf("  WARNING: sidecar %s not writable\n", meta_path);
+    }
+    g_free(meta_path);
+  }
+
   if (ffill == FFT_N) {
     static double re[FFT_N], im[FFT_N], db[FFT_N];
     for (int i = 0; i < FFT_N; i++) {           /* Hann window                */
@@ -192,7 +233,7 @@ int main(int argc, char **argv) {
     for (int k = 0; k < FFT_N; k++) { db[k] -= maxdb; }
 
     /* Top peaks: strongest bins, ≥ 8 bins apart, within 60 dB of the max. */
-    printf("\nspectrum peaks (TRUE orientation — wire conjugated on ingest):\n");
+    printf("\nspectrum peaks (TRUE orientation — as received on the wire):\n");
     printf("  %-12s %-14s %s\n", "offset", "absolute", "rel");
     gboolean used[FFT_N] = { FALSE };
     for (int p = 0; p < 8; p++) {
