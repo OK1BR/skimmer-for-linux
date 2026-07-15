@@ -42,13 +42,114 @@ static SkimRow *skim_row_new(const SkimStation *st) {
 typedef struct {
   SkimPipeline   *pipeline;
   GListStore     *stations;      /* of SkimRow                                */
+  GtkSortListModel *sorted;
   GtkTextBuffer  *log;
   GtkTextView    *log_view;
   GtkEntry       *host_entry;
   GtkToggleButton *connect_btn;
   AdwWindowTitle *title;
   GtkLabel       *status;
+  GPtrArray      *monitors;      /* open per-frequency traffic windows        */
 } App;
+
+/* --- per-frequency traffic monitor -------------------------------------------------- */
+
+/* Traffic within this many Hz of the monitor belongs to it (matches the
+ * station tracker's merge radius, so a monitor follows "its" station). */
+#define MONITOR_WINDOW_HZ SKIM_STATION_MERGE_HZ
+
+typedef struct {
+  App            *app;
+  double          freq_hz;
+  char            call[16];
+  GtkWindow      *win;
+  GtkTextBuffer  *buf;
+  GtkTextView    *view;
+  AdwWindowTitle *title;
+} Monitor;
+
+static gboolean monitor_closed(GtkWindow *win, gpointer user) {
+  Monitor *m = user;
+  g_ptr_array_remove(m->app->monitors, m);   /* frees m via the free func    */
+  (void)win;
+  return FALSE;                              /* proceed with the close       */
+}
+
+static void monitor_subtitle(Monitor *m, const SkimStation *st) {
+  char s[96];
+  if (st) {
+    g_snprintf(s, sizeof(s), "%.1f kHz · %.0f WPM · %.0f dB · %u×",
+               m->freq_hz / 1000.0, st->speed, st->snr_db, st->reports);
+  } else {
+    g_snprintf(s, sizeof(s), "%.1f kHz", m->freq_hz / 1000.0);
+  }
+  adw_window_title_set_subtitle(m->title, s);
+}
+
+static void monitor_open(App *app, const SkimStation *st) {
+  /* One monitor per station — re-activate raises the existing window. */
+  for (guint i = 0; i < app->monitors->len; i++) {
+    Monitor *m = g_ptr_array_index(app->monitors, i);
+    if (g_strcmp0(m->call, st->call) == 0 &&
+        ABS(m->freq_hz - st->freq_hz) <= MONITOR_WINDOW_HZ) {
+      gtk_window_present(m->win);
+      return;
+    }
+  }
+  Monitor *m = g_new0(Monitor, 1);
+  m->app     = app;
+  m->freq_hz = st->freq_hz;
+  g_strlcpy(m->call, st->call, sizeof(m->call));
+
+  GtkWidget *win = adw_window_new();
+  m->win = GTK_WINDOW(win);
+  gtk_window_set_default_size(m->win, 520, 300);
+  m->title = ADW_WINDOW_TITLE(adw_window_title_new(st->call, NULL));
+  monitor_subtitle(m, st);
+  GtkWidget *header = adw_header_bar_new();
+  adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), GTK_WIDGET(m->title));
+
+  m->buf = gtk_text_buffer_new(NULL);
+  GtkTextIter end;
+  gtk_text_buffer_get_end_iter(m->buf, &end);
+  gtk_text_buffer_create_mark(m->buf, "tail", &end, FALSE);
+  GtkWidget *view = gtk_text_view_new_with_buffer(m->buf);
+  m->view = GTK_TEXT_VIEW(view);
+  gtk_text_view_set_editable(m->view, FALSE);
+  gtk_text_view_set_monospace(m->view, TRUE);
+  gtk_text_view_set_cursor_visible(m->view, FALSE);
+  gtk_text_view_set_wrap_mode(m->view, GTK_WRAP_WORD_CHAR);
+  gtk_text_view_set_left_margin(m->view, 8);
+  gtk_text_view_set_top_margin(m->view, 8);
+  GtkWidget *scroll = gtk_scrolled_window_new();
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), view);
+  gtk_widget_set_vexpand(scroll, TRUE);
+
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  gtk_box_append(GTK_BOX(box), header);
+  gtk_box_append(GTK_BOX(box), scroll);
+  adw_window_set_content(ADW_WINDOW(win), box);
+
+  g_signal_connect(win, "close-request", G_CALLBACK(monitor_closed), m);
+  g_ptr_array_add(app->monitors, m);
+  gtk_window_present(m->win);
+}
+
+static void monitor_append(Monitor *m, const char *text) {
+  GtkTextIter end;
+  gtk_text_buffer_get_end_iter(m->buf, &end);
+  gtk_text_buffer_insert(m->buf, &end, text, -1);
+  if (gtk_text_buffer_get_char_count(m->buf) > 20000) {
+    GtkTextIter s, e;
+    gtk_text_buffer_get_start_iter(m->buf, &s);
+    gtk_text_buffer_get_iter_at_offset(m->buf, &e, 2000);
+    gtk_text_buffer_delete(m->buf, &s, &e);
+  }
+  gtk_text_buffer_get_end_iter(m->buf, &end);
+  GtkTextMark *mark = gtk_text_buffer_get_mark(m->buf, "tail");
+  gtk_text_buffer_move_mark(m->buf, mark, &end);
+  gtk_text_view_scroll_mark_onscreen(m->view, mark);
+}
 
 /* --- marshalled engine events ------------------------------------------------------ */
 
@@ -73,6 +174,15 @@ static gboolean on_station_idle(gpointer data) {
     }
   }
   g_list_store_append(app->stations, skim_row_new(&ev->st));
+  /* Keep any open traffic monitor's header stats fresh. */
+  for (guint i = 0; i < app->monitors->len; i++) {
+    Monitor *m = g_ptr_array_index(app->monitors, i);
+    if (g_strcmp0(m->call, ev->st.call) == 0 &&
+        ABS(m->freq_hz - ev->st.freq_hz) <= MONITOR_WINDOW_HZ) {
+      m->freq_hz = ev->st.freq_hz;             /* follow small drift         */
+      monitor_subtitle(m, &ev->st);
+    }
+  }
   g_free(ev);
   return G_SOURCE_REMOVE;
 }
@@ -85,6 +195,13 @@ typedef struct {
 
 static gboolean on_text_idle(gpointer data) {
   TextEvent *ev = data;
+  /* Route the channel's text into any monitor watching that frequency. */
+  for (guint i = 0; i < ev->app->monitors->len; i++) {
+    Monitor *m = g_ptr_array_index(ev->app->monitors, i);
+    if (ABS(m->freq_hz - ev->freq_hz) <= MONITOR_WINDOW_HZ) {
+      monitor_append(m, ev->text);
+    }
+  }
   GtkTextBuffer *buf = ev->app->log;
   GtkTextIter end;
   gtk_text_buffer_get_end_iter(buf, &end);
@@ -257,6 +374,17 @@ static int freq_cmp(gconstpointer a, gconstpointer b, gpointer u) {
   return (ra->st.freq_hz > rb->st.freq_hz) - (ra->st.freq_hz < rb->st.freq_hz);
 }
 
+/* Row activated (double-click / Enter) → open the traffic monitor. */
+static void on_row_activated(GtkColumnView *view, guint position, gpointer user) {
+  (void)view;
+  App *app = user;
+  SkimRow *r = g_list_model_get_item(G_LIST_MODEL(app->sorted), position);
+  if (r) {
+    monitor_open(app, &r->st);
+    g_object_unref(r);
+  }
+}
+
 /* --- activate ----------------------------------------------------------------------------- */
 
 static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
@@ -283,13 +411,17 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   g_signal_connect(app->connect_btn, "toggled", G_CALLBACK(on_connect_toggled), app);
   adw_header_bar_pack_end(ADW_HEADER_BAR(header), GTK_WIDGET(app->connect_btn));
 
-  /* Station list, sorted by frequency — a text band map. */
+  /* Station list, sorted by frequency — a text band map. Activate a row
+   * (double-click / Enter) to open its traffic monitor. */
+  app->monitors = g_ptr_array_new_with_free_func(g_free);
   app->stations = g_list_store_new(SKIM_TYPE_ROW);
   GtkSorter *sorter = GTK_SORTER(gtk_custom_sorter_new(freq_cmp, NULL, NULL));
-  GtkSortListModel *sorted =
-      gtk_sort_list_model_new(G_LIST_MODEL(app->stations), sorter);
-  GtkNoSelection *sel = gtk_no_selection_new(G_LIST_MODEL(sorted));
+  app->sorted = gtk_sort_list_model_new(G_LIST_MODEL(app->stations), sorter);
+  g_object_ref(app->sorted);
+  GtkSingleSelection *sel = gtk_single_selection_new(G_LIST_MODEL(app->sorted));
   GtkWidget *view = gtk_column_view_new(GTK_SELECTION_MODEL(sel));
+  gtk_column_view_set_single_click_activate(GTK_COLUMN_VIEW(view), FALSE);
+  g_signal_connect(view, "activate", G_CALLBACK(on_row_activated), app);
   add_column(GTK_COLUMN_VIEW(view), "Call", fmt_call, TRUE);
   add_column(GTK_COLUMN_VIEW(view), "kHz", fmt_freq, FALSE);
   add_column(GTK_COLUMN_VIEW(view), "WPM", fmt_wpm, FALSE);
