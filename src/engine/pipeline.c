@@ -41,6 +41,22 @@
  * SPOT_DELETEd). 120 s rides out one side of a QSO; the old 600 s kept a
  * contest band map full of stations long gone (Richard, 2026-07-15). */
 #define STATION_TTL_US (120u * G_USEC_PER_SEC)
+/* Per-signal frequency lock. The per-decode tone estimate breathes (noise
+ * pulls a band-edge estimate toward the channel centre, arbitration swaps
+ * between overlapped channels) and every consumer downstream — decode log,
+ * traffic-monitor windows, tracker, spots — saw the wobble (live-caught
+ * 2026-07-15: "decodes keep sliding by an IQ offset"). A dispatched channel
+ * LOCKS its frequency: estimates within the window only nudge it (slow
+ * convergence onto the true carrier), and a neighbouring channel that takes
+ * over arbitration ADOPTS the existing lock — one signal, one frequency. */
+#define FLOCK_TTL_US   (30 * G_USEC_PER_SEC)  /* quiet this long → unlock    */
+#define FLOCK_WIN_HZ   40.0                    /* same signal within this     */
+#define FLOCK_ADOPT_HZ 60.0                    /* neighbour lock, same tone   */
+
+typedef struct {
+  double hz;                                   /* 0 = unlocked                */
+  gint64 at;                                   /* last decode using the lock  */
+} FreqLock;
 
 typedef struct {
   float  *iq;
@@ -74,6 +90,7 @@ struct _SkimPipeline {
 
   GArray           *hits;                      /* Hit — one block's decodes  */
   double           *lvl;                       /* per-channel level snapshot */
+  FreqLock         *flock;                     /* per-channel frequency lock */
   guint64           ghosts;                    /* decodes suppressed         */
 
   GAsyncQueue      *queue;                     /* IqBlock*                   */
@@ -160,9 +177,11 @@ static void bank_teardown(SkimPipeline *p) {
   g_free(p->dec);
   g_free(p->ext);
   g_free(p->lvl);
+  g_free(p->flock);
   p->dec = NULL;
   p->ext = NULL;
   p->lvl = NULL;
+  p->flock = NULL;
   p->nchan = 0;
   g_clear_pointer(&p->bank, skim_channelizer_free);
 }
@@ -267,6 +286,7 @@ static void bank_build(SkimPipeline *p, double rate) {
   p->dec = g_new0(gpointer, p->nchan);
   p->ext = g_new0(SkimCallsignExtractor *, p->nchan);
   p->lvl = g_new0(double, p->nchan);
+  p->flock = g_new0(FreqLock, p->nchan);
   const SkimDecodeBackend *cw = cw_backend();
   const double out_rate = skim_channelizer_out_rate(p->bank);
   for (guint c = 0; c < p->nchan; c++) {
@@ -366,7 +386,33 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
     {
       const double chan_hz =
           b->center_hz + skim_channelizer_offset_hz(p->bank, c);
-      const double sig_hz = chan_hz + d.freq_offset_hz;
+      const double raw_hz = chan_hz + d.freq_offset_hz;
+
+      /* Frequency lock (see FLOCK_* above): pin the signal, follow the
+       * carrier only slowly, adopt a neighbour's lock on a channel swap. */
+      FreqLock *L = &p->flock[c];
+      const gint64 tnow = g_get_monotonic_time();
+      if (L->hz > 0 && tnow - L->at > FLOCK_TTL_US) { L->hz = 0; }
+      if (L->hz > 0 && fabs(raw_hz - L->hz) <= FLOCK_WIN_HZ) {
+        L->hz += 0.1 * (raw_hz - L->hz);
+      } else {
+        L->hz = raw_hz;
+        const gint M = (gint)p->nchan;
+        const gint k = (c <= p->nchan / 2) ? (gint)c : (gint)c - M;
+        for (gint s = -2; s <= 2; s++) {
+          if (s == 0)
+            continue;
+          const guint cn = (guint)(((k + s) % M + M) % M);
+          const FreqLock *N = &p->flock[cn];
+          if (N->hz > 0 && tnow - N->at <= FLOCK_TTL_US &&
+              fabs(N->hz - raw_hz) <= FLOCK_ADOPT_HZ) {
+            L->hz = N->hz;                     /* same tone, keep its pin    */
+            break;
+          }
+        }
+      }
+      L->at = tnow;
+      const double sig_hz = L->hz;
       if (p->dlog) {
         char tbuf[24];
         if (p->offline) {                    /* stream time — deterministic  */

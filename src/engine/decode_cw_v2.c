@@ -560,11 +560,15 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
       if (st->dit > 0) { lattice_start(st); }
     }
 
-    /* Tone offset from the phase slope, mark samples only. */
+    /* Tone offset from the phase slope, SOLID mark samples only — the 0.55
+     * bar matches v1's Schmitt ON level. A softer bar (the discriminator
+     * midpoint) let borderline samples in, and their noisy phase slope
+     * dragged the estimate toward the channel centre — the reported
+     * frequency kept sliding with signal strength (live 2026-07-15). */
     const double mid_now =
         st->active || st->carrier
-            ? 0.5 * (st->mu_m + st->mu_s)
-            : st->env_lo + 0.45 * (st->env_hi - st->env_lo);
+            ? st->mu_s + 0.55 * (st->mu_m - st->mu_s)
+            : st->env_lo + 0.55 * (st->env_hi - st->env_lo);
     if (m > mid_now && mag > st->env_lo * 3.0) {
       const double dr = (double)i * st->prev_i + (double)q * st->prev_q;
       const double di = (double)q * st->prev_i - (double)i * st->prev_q;
