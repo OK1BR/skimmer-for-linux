@@ -52,17 +52,20 @@ blip-folding run classifier → adaptive dit → Morse LUT; layered squelch
 `skimmer-cw-test` (+ `skimmer-chan-test`, `skimmer-wdsp-smoke`, tci) all in
 `meson test`. `vendor/wdsp` is a **SUBSET** — read `vendor/wdsp/VENDOR.md`
 before touching it.
-**M4 — callsign validation, gate green 2026-07-15.** `callsign.c`: structural
-parser + ITU allocation tables (the letter+digit prefix table kills "T1BR"),
-stateful extractor with DE/CQ context, repetition and MASTER.SCP dictionary;
-spot threshold 0.70 — a lone valid token never spots. Corpus precision 1.0.
-Gates now 5 in `meson test` (tci, wdsp, chan, cw, call).
-Still pending live: **M1 orientation eyeball check** (panadapter vs
-`skimmer-tci-probe` — Richard) and the **M3 off-air A/B** vs fldigi/CW Skimmer
-(needs a recorded IQ capture).
-Next: **M5** — spot feeder + light UI (station tracker with cross-channel
-ghost dedup, SPOT over TCI, station-list window + decode log; live gate
-against the radio panadapter).
+**M5 — the skimmer skims (offline-verified 2026-07-15).** `pipeline.c`
+assembles the engine (TCI → bank → per-channel decoders/extractors → tracker
+→ spots) on its own thread; `station.c` merges same-call reports within
+300 Hz (stronger SNR positions — ghost dedup); `spot_out.c` dedups (180 s /
+150 Hz QSY) + token-bucket rate limit. GTK app = station list + decode log
++ connect toggle (engine events marshalled by g_idle_add; engine stays
+GTK-free). Gate `skimmer-spot-test`: full chain over a real WebSocket vs a
+mock TCI server — spot frequencies exact to the Hz, zero bogus calls. Gates
+now 6 in `meson test` (tci, wdsp, chan, cw, call, spot-pipeline).
+Still pending live: **M1 orientation eyeball**, **M3 off-air A/B**, and the
+**M5 live gate** (spots on the real panadapter + click-to-tune — Richard).
+Next: **M6** — RBN telnet feed (rate-limited, deduped; local telnet sink gate,
+then a supervised live feed). MASTER.SCP can go to
+`~/.config/skimmer-for-linux/master.scp` (the app loads it if present).
 
 ## Layout
 

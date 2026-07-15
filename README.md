@@ -11,14 +11,15 @@ into hundreds of narrow channels, and decodes them in parallel. Valid callsigns
 are pushed back as **spots** onto the `sdr-for-linux` panadapter (click to tune)
 and, as a goal, out to the **Reverse Beacon Network**.
 
-> **Status: M4 — RBN-grade callsign validation.** The chain works end-to-end
-> on synthetic signals: TCI client (M1, live-verified) → polyphase channelizer
-> (M2: −109 dBc isolation, ~1 % of a core per 192 kHz segment) → CW decoder
-> (M3: exact copy 15–35 WPM, copies at 12 dB SNR, through QSB and a ragged
-> fist, silent on noise) → callsign extraction (M4: ITU-allocation parser,
-> DE/CQ context, repetition + dictionary scoring; corpus precision 1.0, fuzz
-> zero false spots). Everything gated offline (`meson test`, 5 gates).
-> Next: M5 — the spot feeder + station list UI, live against the radio.
+> **Status: M5 — the skimmer skims.** The whole chain runs end to end: TCI
+> client (M1, live-verified) → polyphase channelizer (M2: −109 dBc isolation,
+> ~1 % of a core per 192 kHz segment) → CW decoder (M3: exact copy 15–35 WPM,
+> copies at 12 dB SNR, silent on noise) → RBN-grade callsign validation (M4:
+> corpus precision 1.0) → station tracker with ghost dedup + spot feeder back
+> over TCI + a station-list/decode-log UI (M5). The offline pipeline gate
+> decodes a synthesized two-station band over a real WebSocket and spots both
+> calls back exact to the Hz, with zero bogus calls. Everything gated offline
+> (`meson test`, 6 gates). Next: M6 — the RBN telnet feed.
 > See [`docs/SCOPE.md`](docs/SCOPE.md) for the full plan.
 
 ## How it works

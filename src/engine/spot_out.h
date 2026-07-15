@@ -1,8 +1,10 @@
 /* spot_out.h — spot output: TCI SPOT feed + RBN telnet feed.
  *
- * Takes validated (callsign, frequency, mode) spots and emits them back to the
- * sdr-for-linux panadapter over TCI (M5) and, as a goal, to the Reverse Beacon
- * Network over telnet (M6). Rate-limited and de-duplicated.
+ * Takes validated (callsign, frequency, mode) spots and emits them back to
+ * the sdr-for-linux panadapter over TCI (M5) and, as a goal, to the Reverse
+ * Beacon Network over telnet (M6). De-duplicated (per call: re-spot only
+ * after an interval or a real QSY) and globally rate-limited. Only validated
+ * calls may ever reach this module — callsign.c gates it (M4 gates M6).
  *
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
@@ -20,9 +22,22 @@ typedef struct _SkimSpotOut SkimSpotOut;
 SkimSpotOut *skim_spot_out_new(SkimTciClient *tci, const char *rbn_host, guint16 rbn_port);
 void         skim_spot_out_free(SkimSpotOut *s);
 
-/* Emit one validated spot (deduped + rate-limited downstream). M5/M6. */
-void  skim_spot_out_emit(SkimSpotOut *s, const char *call, const char *mode,
-                        double freq_hz, double snr_db);
+/* Dedup/rate policy (defaults: re-spot 180 s, QSY 150 Hz, ≤5 spots/s). */
+void  skim_spot_out_set_policy(SkimSpotOut *s, guint respot_s,
+                               double qsy_hz, guint max_per_s);
+
+/* Optional extra sink (tests, M6 RBN): called for every emitted spot. */
+typedef void (*SkimSpotSink)(const char *call, const char *mode,
+                             double freq_hz, double snr_db, gpointer user);
+void  skim_spot_out_set_sink(SkimSpotOut *s, SkimSpotSink sink, gpointer user);
+
+/* Offer one validated spot; the policy decides whether it goes out.
+ * Returns TRUE when actually emitted. */
+gboolean skim_spot_out_emit(SkimSpotOut *s, const char *call, const char *mode,
+                            double freq_hz, double snr_db);
+
+/* Spots actually emitted since creation. */
+guint64 skim_spot_out_count(const SkimSpotOut *s);
 
 G_END_DECLS
 

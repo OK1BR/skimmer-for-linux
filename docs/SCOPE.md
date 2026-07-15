@@ -195,10 +195,28 @@ where relevant, a live check against a running `sdr-for-linux`.
   18 garbage shapes rejected, labelled corpus at precision 1.0 / recall 1.0,
   token continuity across fragmented feeds, dictionary boost, and 2×4000-token
   fuzz (E/T noise babble; random alnum single mentions) with zero spots.
-- **M5 — spot feeder + light UI.** Valid call on a frequency → `SPOT:…` back over
-  TCI (renders on the `sdr-for-linux` panadapter, click tunes) + the station-list
-  window + decode log. Gate: live — spots appear on the radio panadapter and a
-  click tunes correctly.
+- **M5 — spot feeder + light UI. IMPLEMENTED (offline pipeline gate
+  2026-07-15; the live panadapter check awaits Richard at the radio).** Valid
+  call on a frequency → `SPOT:…` back over TCI (renders on the `sdr-for-linux`
+  panadapter, click tunes) + the station-list window + decode log. Gate: live —
+  spots appear on the radio panadapter and a click tunes correctly.
+  Done in three layers. `station.c`: tracker keyed by call with the ghost rule
+  — the same call within 300 Hz merges and the STRONGER report positions the
+  station (adjacent-channel splatter of a big signal folds back into one spot).
+  `spot_out.c`: per-call dedup (re-spot after 180 s or a >150 Hz QSY), global
+  token-bucket rate limit, sinks = TCI client + callback (gates now, RBN M6).
+  `pipeline.c`: the engine assembled — the TCI client's LWS thread queues IQ
+  blocks (bounded, drops counted), the engine thread channelizes, walks every
+  channel through decoder + extractor, folds into the tracker and offers to
+  the spot feeder; the bank (and per-channel state) rebuilds if the device IQ
+  rate changes mid-run. The GTK app is the light UI: host + connect toggle,
+  frequency-sorted station list (call/kHz/WPM/SNR/heard), tailing decode log,
+  1 Hz status line; engine events marshalled via g_idle_add. Offline gate
+  `skimmer-spot-test` (20 checks): tracker + policy units, then the WHOLE
+  chain over a real WebSocket — a mock TCI server streams a synthesized
+  two-station 48 kHz band, the pipeline spots BACK, and the mock asserts both
+  calls at ±30 Hz absolute (measured: exact to the Hz), zero bogus calls
+  (RBN precision end to end), zero dropped blocks.
 - **M6 — RBN telnet feed.** Emit validated spots to the Reverse Beacon Network
   (telnet spot format), rate-limited and de-duplicated. Gate: local telnet sink
   captures well-formed, deduped spots; then a supervised live RBN feed.

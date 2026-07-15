@@ -1,35 +1,332 @@
-/* main.c — skimmer-for-linux GTK4/libadwaita front-end. M0: an empty window
- * with a placeholder status page. The station list + decode log land in M5
- * (docs/SCOPE.md); the engine under src/engine/ stays headless and GLib-only.
+/* main.c — skimmer-for-linux GTK4/libadwaita front-end (M5).
+ *
+ * A light station list + decode log over the headless engine pipeline:
+ * header bar with host + connect toggle, a sorted GtkColumnView of stations
+ * (call / freq / WPM / SNR / heard count) and a tailing decode log. Engine
+ * callbacks fire on the engine thread and are marshalled here with
+ * g_idle_add — the engine stays GLib-only (src/engine/ has no GTK).
  *
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
 #include <adwaita.h>
 
+#include "pipeline.h"
+
 #ifndef SKIMMER_VERSION
 #define SKIMMER_VERSION "0.0.0"
 #endif
 
-static void on_activate(GtkApplication *app, gpointer user_data) {
+#define LOG_MAX_LINES 2000
+
+/* --- station row object --------------------------------------------------------- */
+
+#define SKIM_TYPE_ROW (skim_row_get_type())
+G_DECLARE_FINAL_TYPE(SkimRow, skim_row, SKIM, ROW, GObject)
+
+struct _SkimRow {
+  GObject parent_instance;
+  SkimStation st;
+};
+G_DEFINE_TYPE(SkimRow, skim_row, G_TYPE_OBJECT)
+static void skim_row_class_init(SkimRowClass *k) { (void)k; }
+static void skim_row_init(SkimRow *r) { (void)r; }
+
+static SkimRow *skim_row_new(const SkimStation *st) {
+  SkimRow *r = g_object_new(SKIM_TYPE_ROW, NULL);
+  r->st = *st;
+  return r;
+}
+
+/* --- app state -------------------------------------------------------------------- */
+
+typedef struct {
+  SkimPipeline   *pipeline;
+  GListStore     *stations;      /* of SkimRow                                */
+  GtkTextBuffer  *log;
+  GtkTextView    *log_view;
+  GtkEntry       *host_entry;
+  GtkToggleButton *connect_btn;
+  AdwWindowTitle *title;
+  GtkLabel       *status;
+} App;
+
+/* --- marshalled engine events ------------------------------------------------------ */
+
+typedef struct {
+  App        *app;
+  SkimStation st;
+} StationEvent;
+
+static gboolean on_station_idle(gpointer data) {
+  StationEvent *ev = data;
+  App *app = ev->app;
+  guint n = g_list_model_get_n_items(G_LIST_MODEL(app->stations));
+  for (guint i = 0; i < n; i++) {
+    SkimRow *r = g_list_model_get_item(G_LIST_MODEL(app->stations), i);
+    gboolean same = g_strcmp0(r->st.call, ev->st.call) == 0 &&
+                    ABS(r->st.freq_hz - ev->st.freq_hz) <= SKIM_STATION_MERGE_HZ;
+    g_object_unref(r);
+    if (same) {
+      /* Rows carry no notify — replace to refresh the bound labels. */
+      g_list_store_remove(app->stations, i);
+      break;
+    }
+  }
+  g_list_store_append(app->stations, skim_row_new(&ev->st));
+  g_free(ev);
+  return G_SOURCE_REMOVE;
+}
+
+typedef struct {
+  App   *app;
+  double freq_hz;
+  char  *text;
+} TextEvent;
+
+static gboolean on_text_idle(gpointer data) {
+  TextEvent *ev = data;
+  GtkTextBuffer *buf = ev->app->log;
+  GtkTextIter end;
+  gtk_text_buffer_get_end_iter(buf, &end);
+  char line[160];
+  g_snprintf(line, sizeof(line), "%10.1f  %s\n", ev->freq_hz / 1000.0, ev->text);
+  gtk_text_buffer_insert(buf, &end, line, -1);
+  int over = gtk_text_buffer_get_line_count(buf) - LOG_MAX_LINES;
+  if (over > 0) {
+    GtkTextIter s, e;
+    gtk_text_buffer_get_start_iter(buf, &s);
+    gtk_text_buffer_get_iter_at_line(buf, &e, over);
+    gtk_text_buffer_delete(buf, &s, &e);
+  }
+  gtk_text_buffer_get_end_iter(buf, &end);
+  GtkTextMark *mark = gtk_text_buffer_get_mark(buf, "tail");
+  gtk_text_buffer_move_mark(buf, mark, &end);
+  gtk_text_view_scroll_mark_onscreen(ev->app->log_view, mark);
+  g_free(ev->text);
+  g_free(ev);
+  return G_SOURCE_REMOVE;
+}
+
+typedef struct {
+  App     *app;
+  gboolean connected;
+  char    *detail;
+} StateEvent;
+
+static gboolean on_state_idle(gpointer data) {
+  StateEvent *ev = data;
+  adw_window_title_set_subtitle(ev->app->title, ev->detail);
+  g_free(ev->detail);
+  g_free(ev);
+  return G_SOURCE_REMOVE;
+}
+
+/* Engine-thread callbacks: copy + hop to the main loop. */
+static void pipe_station_cb(const SkimStation *st, gpointer user) {
+  StationEvent *ev = g_new0(StationEvent, 1);
+  ev->app = user;
+  ev->st  = *st;
+  g_idle_add(on_station_idle, ev);
+}
+static void pipe_text_cb(double freq_hz, const char *text, gpointer user) {
+  TextEvent *ev = g_new0(TextEvent, 1);
+  ev->app     = user;
+  ev->freq_hz = freq_hz;
+  ev->text    = g_strdup(text);
+  g_idle_add(on_text_idle, ev);
+}
+static void pipe_state_cb(gboolean connected, const char *detail, gpointer user) {
+  StateEvent *ev = g_new0(StateEvent, 1);
+  ev->app       = user;
+  ev->connected = connected;
+  ev->detail    = g_strdup(detail);
+  g_idle_add(on_state_idle, ev);
+}
+
+/* --- status line -------------------------------------------------------------------- */
+
+static gboolean status_tick(gpointer data) {
+  App *app = data;
+  if (app->pipeline) {
+    char s[128];
+    g_snprintf(s, sizeof(s),
+               "%u stations · %" G_GUINT64_FORMAT " spots · %" G_GUINT64_FORMAT
+               " Mframes",
+               skim_pipeline_stations(app->pipeline),
+               skim_pipeline_spots(app->pipeline),
+               skim_pipeline_frames(app->pipeline) / 1000000);
+    gtk_label_set_text(app->status, s);
+  } else {
+    gtk_label_set_text(app->status, "not connected");
+  }
+  return G_SOURCE_CONTINUE;
+}
+
+/* --- connect toggle ------------------------------------------------------------------- */
+
+static void on_connect_toggled(GtkToggleButton *btn, gpointer user) {
+  App *app = user;
+  if (gtk_toggle_button_get_active(btn)) {
+    const char *host = gtk_editable_get_text(GTK_EDITABLE(app->host_entry));
+    char *dict = g_build_filename(g_get_user_config_dir(), "skimmer-for-linux",
+                                  "master.scp", NULL);
+    SkimPipelineConfig cfg = {
+      .host = (host && host[0]) ? host : "127.0.0.1",
+      .port = 40001,
+      .iq_rate = 192000,
+      .chan_bw_hz = 125.0,
+      .dict_path = g_file_test(dict, G_FILE_TEST_EXISTS) ? dict : NULL,
+    };
+    app->pipeline = skim_pipeline_new(&cfg);
+    g_free(dict);
+    skim_pipeline_set_station_cb(app->pipeline, pipe_station_cb, app);
+    skim_pipeline_set_text_cb(app->pipeline, pipe_text_cb, app);
+    skim_pipeline_set_state_cb(app->pipeline, pipe_state_cb, app);
+    GError *err = NULL;
+    if (!skim_pipeline_start(app->pipeline, &err)) {
+      adw_window_title_set_subtitle(app->title,
+                                    err ? err->message : "connect failed");
+      g_clear_error(&err);
+      g_clear_pointer(&app->pipeline, skim_pipeline_free);
+      gtk_toggle_button_set_active(btn, FALSE);
+      gtk_button_set_label(GTK_BUTTON(btn), "Connect");
+      return;
+    }
+    gtk_button_set_label(GTK_BUTTON(btn), "Disconnect");
+  } else {
+    if (app->pipeline) {
+      skim_pipeline_stop(app->pipeline);
+      g_clear_pointer(&app->pipeline, skim_pipeline_free);
+    }
+    adw_window_title_set_subtitle(app->title, "disconnected");
+    gtk_button_set_label(GTK_BUTTON(btn), "Connect");
+  }
+}
+
+/* --- column helpers -------------------------------------------------------------------- */
+
+typedef void (*RowToText)(const SkimStation *st, char *out, gsize n);
+
+static void cell_setup(GtkSignalListItemFactory *f, GtkListItem *item, gpointer u) {
+  (void)f; (void)u;
+  GtkWidget *label = gtk_label_new(NULL);
+  gtk_label_set_xalign(GTK_LABEL(label), 0.0);
+  gtk_widget_add_css_class(label, "numeric");
+  gtk_list_item_set_child(item, label);
+}
+
+static void cell_bind(GtkSignalListItemFactory *f, GtkListItem *item, gpointer u) {
+  (void)f;
+  RowToText fmt = (RowToText)u;
+  SkimRow *r = gtk_list_item_get_item(item);
+  char text[64];
+  fmt(&r->st, text, sizeof(text));
+  gtk_label_set_text(GTK_LABEL(gtk_list_item_get_child(item)), text);
+}
+
+static void fmt_call(const SkimStation *st, char *o, gsize n) {
+  g_strlcpy(o, st->call, n);
+}
+static void fmt_freq(const SkimStation *st, char *o, gsize n) {
+  g_snprintf(o, n, "%.1f", st->freq_hz / 1000.0);
+}
+static void fmt_wpm(const SkimStation *st, char *o, gsize n) {
+  g_snprintf(o, n, "%.0f", st->speed);
+}
+static void fmt_snr(const SkimStation *st, char *o, gsize n) {
+  g_snprintf(o, n, "%.0f dB", st->snr_db);
+}
+static void fmt_heard(const SkimStation *st, char *o, gsize n) {
+  g_snprintf(o, n, "%u×", st->reports);
+}
+
+static void add_column(GtkColumnView *view, const char *title, RowToText fmt,
+                       gboolean expand) {
+  GtkListItemFactory *f = gtk_signal_list_item_factory_new();
+  g_signal_connect(f, "setup", G_CALLBACK(cell_setup), NULL);
+  g_signal_connect(f, "bind", G_CALLBACK(cell_bind), (gpointer)fmt);
+  GtkColumnViewColumn *col = gtk_column_view_column_new(title, f);
+  gtk_column_view_column_set_expand(col, expand);
+  gtk_column_view_append_column(view, col);
+  g_object_unref(col);
+}
+
+static int freq_cmp(gconstpointer a, gconstpointer b, gpointer u) {
+  (void)u;
+  const SkimRow *ra = a, *rb = b;
+  return (ra->st.freq_hz > rb->st.freq_hz) - (ra->st.freq_hz < rb->st.freq_hz);
+}
+
+/* --- activate ----------------------------------------------------------------------------- */
+
+static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   (void)user_data;
+  App *app = g_new0(App, 1);
 
-  GtkWidget *window = adw_application_window_new(app);
+  GtkWidget *window = adw_application_window_new(gtk_app);
   gtk_window_set_title(GTK_WINDOW(window), "Skimmer for Linux");
-  gtk_window_set_default_size(GTK_WINDOW(window), 900, 600);
+  gtk_window_set_default_size(GTK_WINDOW(window), 900, 640);
 
+  app->title = ADW_WINDOW_TITLE(adw_window_title_new("Skimmer for Linux",
+                                                     "disconnected"));
   GtkWidget *header = adw_header_bar_new();
+  adw_header_bar_set_title_widget(ADW_HEADER_BAR(header),
+                                  GTK_WIDGET(app->title));
 
-  AdwStatusPage *status = ADW_STATUS_PAGE(adw_status_page_new());
-  adw_status_page_set_icon_name(status, "network-wireless-symbolic");
-  adw_status_page_set_title(status, "Skimmer for Linux");
-  adw_status_page_set_description(
-      status, "M0 scaffold — TCI client, channelizer and CW decode land next.\n"
-               "See docs/SCOPE.md.");
+  app->host_entry = GTK_ENTRY(gtk_entry_new());
+  gtk_entry_set_placeholder_text(app->host_entry, "127.0.0.1");
+  gtk_editable_set_width_chars(GTK_EDITABLE(app->host_entry), 14);
+  adw_header_bar_pack_start(ADW_HEADER_BAR(header), GTK_WIDGET(app->host_entry));
+
+  app->connect_btn = GTK_TOGGLE_BUTTON(gtk_toggle_button_new_with_label("Connect"));
+  gtk_widget_add_css_class(GTK_WIDGET(app->connect_btn), "suggested-action");
+  g_signal_connect(app->connect_btn, "toggled", G_CALLBACK(on_connect_toggled), app);
+  adw_header_bar_pack_end(ADW_HEADER_BAR(header), GTK_WIDGET(app->connect_btn));
+
+  /* Station list, sorted by frequency — a text band map. */
+  app->stations = g_list_store_new(SKIM_TYPE_ROW);
+  GtkSorter *sorter = GTK_SORTER(gtk_custom_sorter_new(freq_cmp, NULL, NULL));
+  GtkSortListModel *sorted =
+      gtk_sort_list_model_new(G_LIST_MODEL(app->stations), sorter);
+  GtkNoSelection *sel = gtk_no_selection_new(G_LIST_MODEL(sorted));
+  GtkWidget *view = gtk_column_view_new(GTK_SELECTION_MODEL(sel));
+  add_column(GTK_COLUMN_VIEW(view), "Call", fmt_call, TRUE);
+  add_column(GTK_COLUMN_VIEW(view), "kHz", fmt_freq, FALSE);
+  add_column(GTK_COLUMN_VIEW(view), "WPM", fmt_wpm, FALSE);
+  add_column(GTK_COLUMN_VIEW(view), "SNR", fmt_snr, FALSE);
+  add_column(GTK_COLUMN_VIEW(view), "Heard", fmt_heard, FALSE);
+  GtkWidget *list_scroll = gtk_scrolled_window_new();
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(list_scroll), view);
+  gtk_widget_set_vexpand(list_scroll, TRUE);
+
+  /* Decode log. */
+  app->log = gtk_text_buffer_new(NULL);
+  GtkTextIter end;
+  gtk_text_buffer_get_end_iter(app->log, &end);
+  gtk_text_buffer_create_mark(app->log, "tail", &end, FALSE);
+  GtkWidget *log_view = gtk_text_view_new_with_buffer(app->log);
+  app->log_view = GTK_TEXT_VIEW(log_view);
+  gtk_text_view_set_editable(GTK_TEXT_VIEW(log_view), FALSE);
+  gtk_text_view_set_monospace(GTK_TEXT_VIEW(log_view), TRUE);
+  gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(log_view), FALSE);
+  GtkWidget *log_scroll = gtk_scrolled_window_new();
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(log_scroll), log_view);
+  gtk_widget_set_size_request(log_scroll, -1, 160);
+
+  app->status = GTK_LABEL(gtk_label_new("not connected"));
+  gtk_label_set_xalign(app->status, 0.0);
+  gtk_widget_add_css_class(GTK_WIDGET(app->status), "dim-label");
+  gtk_widget_set_margin_start(GTK_WIDGET(app->status), 12);
+  gtk_widget_set_margin_top(GTK_WIDGET(app->status), 4);
+  gtk_widget_set_margin_bottom(GTK_WIDGET(app->status), 4);
+  g_timeout_add_seconds(1, status_tick, app);
 
   GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_box_append(GTK_BOX(box), header);
-  gtk_box_append(GTK_BOX(box), GTK_WIDGET(status));
-  gtk_widget_set_vexpand(GTK_WIDGET(status), TRUE);
+  gtk_box_append(GTK_BOX(box), list_scroll);
+  gtk_box_append(GTK_BOX(box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+  gtk_box_append(GTK_BOX(box), log_scroll);
+  gtk_box_append(GTK_BOX(box), GTK_WIDGET(app->status));
 
   adw_application_window_set_content(ADW_APPLICATION_WINDOW(window), box);
   gtk_window_present(GTK_WINDOW(window));

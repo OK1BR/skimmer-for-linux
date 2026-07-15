@@ -43,6 +43,7 @@ engine_sources = [
   'src/engine/station.c',      # M5: per-frequency station tracker
   'src/engine/callsign.c',     # M4: extraction + validation
   'src/engine/spot_out.c',     # M5/M6: TCI SPOT + RBN telnet feed
+  'src/engine/pipeline.c',     # M5: the engine assembled end to end
 ]
 engine_deps = [glib_dep, lws_dep, wdsp_dep, fftw3f_dep, m_dep]
 
@@ -111,6 +112,16 @@ skimmer_call_test = executable('skimmer-call-test',
   link_with : engine_lib,
 )
 test('callsign', skimmer_call_test, timeout : 60)
+
+# M5: offline gate — station tracker units, spot policy units, and the WHOLE
+# pipeline over a real WebSocket against a mock TCI server (spots come back).
+skimmer_spot_test = executable('skimmer-spot-test',
+  ['src/spot_test.c'],
+  include_directories : include_directories('src'),
+  dependencies : engine_deps,
+  link_with : engine_lib,
+)
+test('spot-pipeline', skimmer_spot_test, timeout : 120)
 
 # --- Application ------------------------------------------------------------
 executable('skimmer-for-linux',
