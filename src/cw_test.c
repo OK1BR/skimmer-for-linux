@@ -66,9 +66,12 @@ static void key_run(GArray *env, double samps, float on, double jitter,
 }
 
 /* text → keyed envelope at `rate`, dit = 1.2/wpm s. Leading "VVV " warms up
- * the decoder's dit bootstrap; trailing 1.5 s of silence flushes the tail. */
-static GArray *gen_env(const char *payload, double wpm, double rate,
-                       double jitter, GRand *rng) {
+ * the decoder's dit bootstrap; trailing 1.5 s of silence flushes the tail.
+ * csp_dits/wsp_dits set the operator's char/word spacing (ITU: 3/7 — real
+ * fists stretch and squeeze them, which is what the fist model is for). */
+static GArray *gen_env_fist(const char *payload, double wpm, double rate,
+                            double jitter, GRand *rng, double csp_dits,
+                            double wsp_dits) {
   GArray *env = g_array_new(FALSE, FALSE, sizeof(float));
   char   *text = g_strdup_printf("VVV %s", payload);
   double  dit = 1.2 / wpm * rate;
@@ -77,7 +80,7 @@ static GArray *gen_env(const char *payload, double wpm, double rate,
   key_run(env, 3 * dit, OFF, 0, rng);
   for (const char *p = text; *p; p++) {
     if (*p == ' ') {
-      key_run(env, 7 * dit, OFF, jitter, rng);
+      key_run(env, wsp_dits * dit, OFF, jitter, rng);
       continue;
     }
     const char *m = morse_of(*p);
@@ -86,11 +89,16 @@ static GArray *gen_env(const char *payload, double wpm, double rate,
       key_run(env, *e == '-' ? 3 * dit : dit, ON, jitter, rng);
       if (e[1]) { key_run(env, dit, OFF, jitter, rng); }
     }
-    key_run(env, 3 * dit, OFF, jitter, rng);
+    key_run(env, csp_dits * dit, OFF, jitter, rng);
   }
   key_run(env, 1.5 * rate, OFF, 0, rng);
   g_free(text);
   return env;
+}
+
+static GArray *gen_env(const char *payload, double wpm, double rate,
+                       double jitter, GRand *rng) {
+  return gen_env_fist(payload, wpm, rate, jitter, rng, 3.0, 7.0);
 }
 
 /* 5 ms raised-cosine keying edges: convolve the rectangular envelope with a
@@ -396,8 +404,53 @@ int main(void) {
     g_rand_free(rng);
   }
 
+  /* -- fist model: spacing is personal ---------------------------------------------
+   * EA1EYL (live 2026-07-16) stretches his char gaps to ~5 dits when
+   * calling CQ — the fixed 3/7-dit priors filed the C–Q gap as a WORD
+   * space, "C Q" matched no marker and the spot never fired. v2 must learn
+   * the operator's own two space centres and put "CQ" back together; the
+   * counter-case guards the other direction (a tight runner's 5-dit word
+   * gaps must NOT collapse into char gaps once the model adapts). v1 keeps
+   * its fixed 5.5-dit boundary and is printed for info only. */
+  {
+    GRand *rng = g_rand_new_with_seed(20260716);
+    SkimDecode last;
+
+    const char *CALL = "CQ CQ DE EA1EYL EA1EYL K";
+    char *loop = g_strdup_printf("%s %s %s", CALL, CALL, CALL);
+    GArray *env = gen_env_fist(loop, 24, RATE, 0.05, rng, 5.1, 9.8);
+    g_cw = skim_decode_cw();
+    char *v1 = run_decoder(env, 12.0, 25.0, 0, 0, rng, &last);
+    g_cw = skim_decode_cw_v2();
+    char *v2 = run_decoder(env, 12.0, 25.0, 0, 0, rng, &last);
+    printf("--- stretched fist: char gaps 5.1 dits, word gaps 9.8 (24 WPM) ---\n");
+    show("v1 (info):", v1);
+    show("v2:", v2);
+    printf("       v1 dist %d, v2 dist %d\n",
+           fuzzy_dist(v1, CALL), fuzzy_dist(v2, CALL));
+    check("v2 learns the stretched fist — a call copies with CQ intact",
+          fuzzy_dist(v2, CALL) <= 1);
+    g_free(v1);
+    g_free(v2);
+    g_array_free(env, TRUE);
+    g_free(loop);
+
+    const char *RUN = "TEST OK1BR OK1BR TEST OK1BR OK1BR NR 5";
+    env = gen_env_fist(RUN, 28, RATE, 0.05, rng, 3.0, 5.0);
+    g_cw = skim_decode_cw_v2();
+    v2 = run_decoder(env, 12.0, 25.0, 0, 0, rng, &last);
+    printf("--- tight runner: word gaps squeezed to 5.0 dits (28 WPM) ---\n");
+    show("v2:", v2);
+    check("tight runner's 5-dit word gaps stay WORDS (no merges)",
+          fuzzy_dist(v2, RUN) <= 1);
+    g_free(v2);
+    g_array_free(env, TRUE);
+    g_rand_free(rng);
+  }
+
   printf("\n=== %d checks, %d failures ===\n%s\n", checks, fails,
          fails ? "FAIL" : "PASS — both CW backends copy, adapt and stay "
-                          "quiet on noise; v2 rides out QSB.");
+                          "quiet on noise; v2 rides out QSB and learns the "
+                          "operator's fist.");
   return fails ? 1 : 0;
 }

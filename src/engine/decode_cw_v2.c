@@ -102,6 +102,33 @@ enum { K_MARK, K_SPACE, K_EITHER };
 #define BREAK_DITS   16.0
 #define BREAK_MARK   "\xC2\xB7 "        /* "· " over separator (v1)           */
 
+/* Fist model: keying is the rigid part of a fist, SPACING is the sloppy
+ * one — real operators run char gaps anywhere from 2.5 to 5+ dits and word
+ * gaps 5–11, so any fixed char/word boundary misreads somebody (live
+ * 2026-07-16: EA1EYL's stretched CQ filed as "C Q" — two words, the CQ
+ * marker never matched, the spot never fired). The decoder learns the
+ * operator's OWN two space centres from the last FIST_RING committed gaps:
+ * 2-means in the log domain, seeded from the ring's QUANTILES — seeding
+ * from the model's own labels would self-reinforce (a stretched char gap
+ * filed as word space teaches the word centre DOWN, never the char centre
+ * up; raw-duration quantiles are label-free). An accepted fit (both
+ * clusters populated, separation ≥ FIST_SEP) blends into the centres,
+ * which move the duration priors, the lattice search windows and the
+ * live-emission clocks together. The centres reset with the dit clock —
+ * fist forgotten, spacing forgotten. */
+#define FIST_RING    24
+#define FIST_MIN_D   1.6                /* below: element space, not a gap    */
+#define FIST_REFIT   4                  /* refit every this many new gaps     */
+#define FIST_MIN_FIT 10                 /* ring entries before the first fit  */
+#define FIST_SEP     1.55               /* min wsp/csp ratio to accept a fit  */
+#define FIST_CSP_LO  2.4
+#define FIST_CSP_HI  4.8
+#define FIST_WSP_LO  5.0
+#define FIST_WSP_HI  11.0
+#define FIST_GAIN    0.25               /* blend of an accepted fit           */
+#define FIST_CSP0    3.0                /* seeds = the ITU ideals             */
+#define FIST_WSP0    7.0
+
 typedef struct {
   double rate;
 
@@ -165,6 +192,11 @@ typedef struct {
   gboolean char_live, word_live, live_had_char;
   guint64  live_t;
 
+  /* --- fist model (see FIST_* above) ------------------------------------------ */
+  double fist_csp, fist_wsp;            /* learned char/word gap centres, dits */
+  float  gaps[FIST_RING];               /* recent gaps ≥ FIST_MIN_D, ln(dits)  */
+  guint  ngaps, gap_head, gap_fresh;
+
   /* --- estimates -------------------------------------------------------------- */
   double prev_i, prev_q;
   double foff_hz;
@@ -186,6 +218,8 @@ static gpointer cw2_channel_new(double sample_rate) {
   st->k_s      = 1.0 - exp(-1.0 / (st->rate * 0.25));
   st->env_hi = st->env_lo = -1.0;
   st->elem_err = 0.2;
+  st->fist_csp = FIST_CSP0;
+  st->fist_wsp = FIST_WSP0;
   return st;
 }
 
@@ -249,10 +283,66 @@ static void lattice_start(Cw2State *st) {
   st->live_had_char = FALSE;
 }
 
-/* Duration prior in the log domain. */
-static inline double dur_pen(int type, double d, double dit) {
-  double r = log(d / (SEG_IDEAL[type] * dit));
+/* Duration prior in the log domain. CSP/WSP ideals ride the fist model. */
+static inline double dur_pen(const Cw2State *st, int type, double d) {
+  const double ideal = type == SEG_CSP   ? st->fist_csp
+                       : type == SEG_WSP ? st->fist_wsp
+                                         : SEG_IDEAL[type];
+  double r = log(d / (ideal * st->dit));
   return -SEG_ALPHA[type] * r * r - SEG_COST;
+}
+
+static int fist_cmp(const void *a, const void *b) {
+  const float d = *(const float *)a - *(const float *)b;
+  return d > 0 ? 1 : d < 0 ? -1 : 0;
+}
+
+/* Feed one committed gap and, periodically, refit the two space centres —
+ * see the FIST_* block for the why and the self-reinforcement trap. */
+static void fist_learn(Cw2State *st, double d_dits) {
+  if (d_dits < FIST_MIN_D)
+    return;
+  st->gaps[st->gap_head] = (float)log(d_dits);
+  st->gap_head = (st->gap_head + 1) % FIST_RING;
+  if (st->ngaps < FIST_RING) { st->ngaps++; }
+  if (++st->gap_fresh < FIST_REFIT || st->ngaps < FIST_MIN_FIT)
+    return;
+  st->gap_fresh = 0;
+
+  float s[FIST_RING];
+  memcpy(s, st->gaps, st->ngaps * sizeof(float));
+  qsort(s, st->ngaps, sizeof(float), fist_cmp);
+  double c1 = s[st->ngaps / 4];         /* label-free quantile seeds          */
+  double c2 = s[(3 * st->ngaps) / 4];
+  if (c2 - c1 < 1e-6)
+    return;                             /* unimodal pile — nothing to learn   */
+  guint n1 = 0, n2 = 0;
+  for (int it = 0; it < 3; it++) {
+    double s1 = 0.0, s2 = 0.0;
+    n1 = n2 = 0;
+    for (guint i = 0; i < st->ngaps; i++) {
+      if (fabs(s[i] - c1) <= fabs(s[i] - c2)) {
+        s1 += s[i];
+        n1++;
+      } else {
+        s2 += s[i];
+        n2++;
+      }
+    }
+    if (!n1 || !n2)
+      return;
+    c1 = s1 / n1;
+    c2 = s2 / n2;
+  }
+  if (exp(c2 - c1) < FIST_SEP || n1 < 3 || n2 < 3)
+    return;                             /* clusters not credibly two          */
+  const double csp = CLAMP(exp(c1), FIST_CSP_LO, FIST_CSP_HI);
+  st->fist_csp += FIST_GAIN * (csp - st->fist_csp);
+  const double wlo = MAX(FIST_WSP_LO, 1.6 * st->fist_csp);
+  const double wsp = CLAMP(exp(c2), wlo, FIST_WSP_HI);
+  st->fist_wsp += FIST_GAIN * (wsp - st->fist_wsp);
+  CW2_DBG("[fist csp=%.2f wsp=%.2f (fit %.2f/%.2f, %u+%u gaps)]\n",
+          st->fist_csp, st->fist_wsp, exp(c1), exp(c2), n1, n2);
 }
 
 /* One Viterbi step for the sample at st->t (llr already in the ring). */
@@ -285,7 +375,7 @@ static void lattice_step(Cw2State *st) {
       if (prev <= NEG_INF)
         continue;
       double ev = ct - L->cum[(t - d) & WMASK];
-      float  sc = prev + (float)(ev + dur_pen(MTYPES[k], d, T));
+      float  sc = prev + (float)(ev + dur_pen(st, MTYPES[k], d));
       if (sc > best_m) {
         best_m = sc;
         bd = (guint16)d;
@@ -313,7 +403,11 @@ static void lattice_step(Cw2State *st) {
    * The loose floor lets it re-lock; steady copy restores the strict one. */
   const double esp_lo = st->elem_err > 0.20 ? 0.50 : 0.70;
   static const int STYPES[3] = { SEG_ESP, SEG_CSP, SEG_WSP };
-  static const double SLO[3] = { 0.70, 1.6, 4.0 }, SHI[3] = { 2.6, 5.5, 17.0 };
+  /* CSP/WSP windows ride the fist centres (seeds reproduce the old fixed
+   * 1.6–5.5 / 4.0–17: 1.833·3 = 5.5, 0.571·7 = 4.0). The overlap between
+   * CSP hi and WSP lo survives any centre pair — the priors decide there. */
+  const double SLO[3] = { 0.70, 1.6, 0.571 * st->fist_wsp };
+  const double SHI[3] = { 2.6, 1.833 * st->fist_csp, 17.0 };
   for (int k = 0; k < 3; k++) {
     int dlo = MAX(2, (int)((k == 0 ? esp_lo : SLO[k]) * T + 0.5));
     int dhi = MIN((int)(SHI[k] * T + 0.5), W / 2);
@@ -326,7 +420,7 @@ static void lattice_step(Cw2State *st) {
       if (prev <= NEG_INF)
         continue;
       double ev = -(ct - L->cum[(t - d) & WMASK]);
-      float  sc = prev + (float)(ev + dur_pen(STYPES[k], d, T));
+      float  sc = prev + (float)(ev + dur_pen(st, STYPES[k], d));
       if (sc > best_s) {
         best_s = sc;
         bd = (guint16)d;
@@ -440,10 +534,12 @@ static void lattice_commit(Cw2State *st, double lag_dits, SkimDecode *out,
       st->esp = st->esp > 0 ? st->esp + 0.2 * (d - st->esp) : d;
       break;
     case SEG_CSP:
+      fist_learn(st, d / st->dit);
       if (!lived) { emit_code(st, out, pos); }
       st->char_live = st->word_live = FALSE;
       break;
     case SEG_WSP:
+      fist_learn(st, d / st->dit);
       if (!lived) {
         emit_code(st, out, pos);
         emit(out, pos, ' ');
@@ -551,6 +647,9 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
           st->nboot = 0;
           st->marks_ok = 0;
           st->paused = FALSE;
+          st->fist_csp = FIST_CSP0;            /* spacing style goes with it */
+          st->fist_wsp = FIST_WSP0;
+          st->ngaps = st->gap_head = st->gap_fresh = 0;
         }
       }
       st->key = FALSE;
@@ -727,14 +826,18 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
       lattice_head(st, &tau, &space_running);
       if (space_running && tau == st->commit_t) {
         const double sp = (double)(st->t - tau);
-        if (!st->char_live && sp > 2.6 * st->dit) {
+        /* Live clocks ride the fist centres: char fires at 0.867·csp (the
+         * old 2.6 dits at the 3.0 seed), word at 1.2·√(csp·wsp) (the old
+         * 5.5 at the 3/7 seeds) — a stretched fist gets slower live text
+         * instead of premature word splits. */
+        if (!st->char_live && sp > 0.867 * st->fist_csp * st->dit) {
           st->char_live     = TRUE;
           st->live_t        = tau;
           st->live_had_char = st->nelem > 0;
           emit_code(st, out, &pos);
         }
         if (st->char_live && st->live_had_char && !st->word_live &&
-            sp > 5.5 * st->dit) {
+            sp > 1.2 * sqrt(st->fist_csp * st->fist_wsp) * st->dit) {
           st->word_live = TRUE;
           emit(out, &pos, ' ');
         }
