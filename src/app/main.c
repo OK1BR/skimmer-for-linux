@@ -600,11 +600,11 @@ static void on_list_toggled(GtkToggleButton *btn, gpointer user) {
 }
 
 /* The decode pane's font rides a CSS provider — reloading the rule restyles
- * the view live. The family stack picks a SANS monospace explicitly: the
- * bare "monospace" alias resolves through fontconfig to a Courier clone
- * (FreeMono/Nimbus) on a stock install — serifs in a decode stream read
- * terribly (Richard, 2026-07-15). Adwaita Mono leads: Iosevka's condensed
- * width strains a long history (Richard, 2026-07-16). */
+ * the view live. Decoded CW is prose, not columns: no alignment to keep, so
+ * the pane uses the same face as the window title (the UI sans) — every
+ * mono tried read worse in a long history (serif Nimbus via the bare alias,
+ * condensed Iosevka, Adwaita Mono; Richard picked the title face live,
+ * 2026-07-16). */
 static void decode_font_apply(App *app) {
   if (!app->css) {
     app->css = gtk_css_provider_new();
@@ -615,8 +615,7 @@ static void decode_font_apply(App *app) {
   char rule[256];
   g_snprintf(rule, sizeof(rule),
              "textview.decode-pane { "
-             "font-family: \"Adwaita Mono\", \"JetBrains Mono\", "
-             "\"Liberation Mono\", \"Iosevka Nerd Font Mono\", monospace; "
+             "font-family: \"Adwaita Sans\", \"Cantarell\", sans-serif; "
              "font-size: %dpt; }",
              app->decode_font);
   gtk_css_provider_load_from_string(app->css, rule);
@@ -1012,7 +1011,9 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   gtk_widget_add_css_class(GTK_WIDGET(app->tuned_label), "heading");
   gtk_widget_set_margin_start(GTK_WIDGET(app->tuned_label), 12);
   gtk_widget_set_margin_top(GTK_WIDGET(app->tuned_label), 8);
-  gtk_widget_set_margin_bottom(GTK_WIDGET(app->tuned_label), 4);
+  /* Breathing room under the header — station line and decode stream must
+   * not read as one block (Richard, 2026-07-16). */
+  gtk_widget_set_margin_bottom(GTK_WIDGET(app->tuned_label), 10);
 
   app->tuned = gtk_text_buffer_new(NULL);
   GtkTextIter end;
@@ -1021,10 +1022,12 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   GtkWidget *tuned_view = gtk_text_view_new_with_buffer(app->tuned);
   app->tuned_view = GTK_TEXT_VIEW(tuned_view);
   gtk_text_view_set_editable(app->tuned_view, FALSE);
-  gtk_text_view_set_monospace(app->tuned_view, TRUE);
+  /* No set_monospace: its .monospace theme class fights the .decode-pane
+   * font-family rule — the pane's face comes from the CSS provider alone. */
   gtk_text_view_set_cursor_visible(app->tuned_view, FALSE);
   gtk_text_view_set_wrap_mode(app->tuned_view, GTK_WRAP_WORD_CHAR);
   gtk_text_view_set_left_margin(app->tuned_view, 12);
+  gtk_text_view_set_top_margin(app->tuned_view, 4);
   gtk_widget_add_css_class(tuned_view, "decode-pane");
   decode_font_apply(app);
   GtkWidget *tuned_scroll = gtk_scrolled_window_new();
