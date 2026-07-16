@@ -264,19 +264,16 @@ static FILE *rd_file(void) {
 }
 
 /* Shared reader instance — weights are read-only, the forward is stateless,
- * and every decoder lives on the one engine thread. Armed by SKIM_CW_READER
- * (path) or ~/.config/skimmer-for-linux/cw-reader.bin when present. */
+ * and every decoder lives on the one engine thread. Armed ONLY by an
+ * explicit SKIM_CW_READER=<blob> — the operator checks the pane against his
+ * EAR, and injected re-read lines break that flow (Richard, 2026-07-16), so
+ * a plain app launch must never arm it. The offline replay analyses set the
+ * env var. */
 static SkimCwReader *rr_reader(void) {
   static SkimCwReader *r;
   static gsize once;
   if (g_once_init_enter(&once)) {
     const char *path = g_getenv("SKIM_CW_READER");
-    char *cfg = NULL;
-    if (!path) {
-      cfg = g_build_filename(g_get_user_config_dir(), "skimmer-for-linux",
-                             "cw-reader.bin", NULL);
-      if (g_file_test(cfg, G_FILE_TEST_EXISTS)) { path = cfg; }
-    }
     if (path) {
       GError *err = NULL;
       r = skim_cw_reader_load(path, &err);
@@ -287,7 +284,6 @@ static SkimCwReader *rr_reader(void) {
         g_clear_error(&err);
       }
     }
-    g_free(cfg);
     g_once_init_leave(&once, TRUE);
   }
   return r;

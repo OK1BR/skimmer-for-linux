@@ -113,6 +113,20 @@ path fails — machine keying untouched (oper corpus station table +
 decode log bit-identical pre/post). Binec replay: EA1EYL 0.70/no-CQ →
 1.00/CQ; 2sq replay (14009.45): CQ flag from the torn form too.
 Gate `skimmer-call-test` 23 checks.
+**Neural CW reader — prototype (offline-proven 2026-07-16 late, opt-in).**
+`cw_reader.c` + `ml/`: a ~310k-param dilated-TCN+CTC net over SYMBOLIC
+run durations re-reads a finished over with bidirectional context — for
+STRONG hand-keyed stations whose timing chaos (torn/fused gaps, speed
+changes, bug fists) defeats per-element decoding (EA3BP live case).
+Trained offline on synthetic fists (ml/fist_synth.py, torch in
+/var/tmp/skimmer-cw-ml); C inference is dependency-free, blob carries a
+torch test vector the gate verifies against (plus an independent hand
+reference). PANE ONLY — never feeds extractor/spots (hallucination
+guard). Armed by SKIM_CW_READER=<blob> or config-dir cw-reader.bin;
+re-read stands on its own pane line (no bracket wrapper — Richard). Real A/B: EA3BP CER 0.13→0.06 (calls
+exact), EA1EYL torn CQ reads clean. Gate `skimmer-reader-test` — 9
+gates total. Caveats: over ending at capture EOF never flushes (replay
+artifact); reader text is chunked into 64-byte decode events.
 Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
 **v2 live session**, **tone splitter live session** (run the app with
 `SKIM_CW_V2=1 SKIM_TONE_SPLIT=1`). MASTER.SCP can go to
