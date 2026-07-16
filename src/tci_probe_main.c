@@ -147,6 +147,7 @@ int main(int argc, char **argv) {
          skim_tci_client_protocol(c), skim_tci_client_device(c));
   printf("           dds centre %.0f Hz, device iq rate at connect %u\n",
          skim_tci_client_center_hz(c), skim_tci_client_iq_rate(c));
+  printf("           vfo %.0f Hz\n", skim_tci_client_vfo_hz(c));
 
   for (int s = 0; s < secs; s++) {
     g_usleep(G_USEC_PER_SEC);
