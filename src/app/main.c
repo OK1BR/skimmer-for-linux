@@ -34,7 +34,8 @@
  * EA1EYL vs the beat stream 20 Hz up). Locks are stable to a few Hz, so
  * ±25 keeps a signal's own wobble and excludes the neighbour's. */
 #define FREQLOG_ROUTE_HZ  25.0
-#define FREQLOG_MAX       256      /* LRU cap on remembered frequency slots  */
+#define FREQLOG_MAX       1024     /* cap on remembered frequency slots      */
+#define FREQLOG_BABBLE    512      /* below this many chars a slot is babble */
 #define FREQLOG_CAP_CHARS 20000    /* per-slot history cap                   */
 
 /* --- station row object --------------------------------------------------------- */
@@ -138,12 +139,21 @@ static FreqLog *freqlog_find(App *app, double freq_hz, double window_hz) {
 static FreqLog *freqlog_get(App *app, double freq_hz) {
   FreqLog *fl = freqlog_find(app, freq_hz, FREQLOG_ROUTE_HZ);
   if (fl) { return fl; }
-  if (app->freq_logs->len >= FREQLOG_MAX) {  /* drop the least recent slot   */
+  if (app->freq_logs->len >= FREQLOG_MAX) {
+    /* Evict BABBLE first: noise channels mint a slot for every E/T burst
+     * and pure LRU let them crowd out real histories — a station quiet for
+     * a few minutes came back to a wiped pane (Richard, 2026-07-16). A few
+     * chars of babble are worth less than any real history regardless of
+     * age; among peers the least recent goes. */
     guint victim = 0;
     for (guint i = 1; i < app->freq_logs->len; i++) {
       FreqLog *a = g_ptr_array_index(app->freq_logs, i);
       FreqLog *v = g_ptr_array_index(app->freq_logs, victim);
-      if (a->last_seen < v->last_seen) { victim = i; }
+      const gboolean ab = a->text->len < FREQLOG_BABBLE;
+      const gboolean vb = v->text->len < FREQLOG_BABBLE;
+      if ((ab && !vb) || (ab == vb && a->last_seen < v->last_seen)) {
+        victim = i;
+      }
     }
     g_ptr_array_remove_index_fast(app->freq_logs, victim);
   }

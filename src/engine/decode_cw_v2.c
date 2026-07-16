@@ -321,10 +321,12 @@ static void rr_flush_over(Cw2State *st) {
     }
     char *txt = skim_cw_reader_read(rr_reader(), key, dur, n);
     if (txt[0]) {
+      /* The re-read stands on its OWN LINE in the pane — no bracket noise
+       * (Richard, 2026-07-16), the line break is the whole distinction. */
       if (!st->rr_out) { st->rr_out = g_string_new(NULL); }
-      g_string_append(st->rr_out, "<<");
+      g_string_append_c(st->rr_out, '\n');
       g_string_append(st->rr_out, txt);
-      g_string_append(st->rr_out, ">> ");
+      g_string_append_c(st->rr_out, '\n');
     }
     g_free(txt);
     g_free(key);
