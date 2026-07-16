@@ -42,6 +42,7 @@ engine_sources = [
   'src/engine/channelizer.c',  # M2: polyphase filter bank → complex channels
   'src/engine/decode_cw.c',    # M3: CW backend (implements decode.h)
   'src/engine/decode_cw_v2.c', # CW v2: semi-Markov Viterbi (QSB-proof)
+  'src/engine/cw_reader.c',    # neural over re-reader (TCN+CTC, pane-only)
   'src/engine/tone_split.c',   # per-channel carrier splitter (multi-signal)
   'src/engine/station.c',      # M5: per-frequency station tracker
   'src/engine/callsign.c',     # M4: extraction + validation
@@ -136,6 +137,16 @@ skimmer_call_test = executable('skimmer-call-test',
   link_with : engine_lib,
 )
 test('callsign', skimmer_call_test, timeout : 60)
+
+# Neural CW reader: C forward pass vs an independent reference (and, with
+# SKIM_READER_BLOB set, vs a real torch export's baked-in test vector).
+skimmer_reader_test = executable('skimmer-reader-test',
+  ['src/reader_test.c'],
+  include_directories : include_directories('src'),
+  dependencies : engine_deps,
+  link_with : engine_lib,
+)
+test('cw-reader', skimmer_reader_test, timeout : 60)
 
 # M5: offline gate — station tracker units, spot policy units, and the WHOLE
 # pipeline over a real WebSocket against a mock TCI server (spots come back).

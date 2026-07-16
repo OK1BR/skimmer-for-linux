@@ -26,6 +26,8 @@
  */
 #include "decode_cw.h"
 
+#include "cw_reader.h"
+
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -203,7 +205,29 @@ typedef struct {
   double snr_latch;                     /* SNR at the last mark commit — the
                                          * peak tracker has decayed by the
                                          * time a trailing break emits      */
+
+  /* --- run dump (SKIM_CW_DUMP_RUNS — offline ML corpus) ------------------------
+   * An independent v1-style Schmitt keyer with the bootstrap's 3-sample
+   * glitch fold, running on every sample regardless of gate/pause state.
+   * Diagnostics only: the decode path never reads any of this. */
+  gboolean rd_on;
+  double   freq_hz;                     /* absolute label from the pipeline   */
+  gboolean rd_key, rd_pend_key, rd_pend_valid;
+  double   rd_run, rd_pend_len;
+
+  /* --- neural over re-reader (SKIM_CW_READER / cw-reader.bin) ------------------
+   * The same Schmitt run stream, buffered per over; at the over break the
+   * TCN+CTC reader (cw_reader.h) re-reads the WHOLE over with bidirectional
+   * context and the re-read goes to the pane as "<<text>> ". Pane only —
+   * the extractor/spot path never sees it (hallucination guard). */
+  gboolean rr_arm;
+  GArray  *rr_runs;                     /* RrRun ring of the current over     */
+  GString *rr_out;                      /* pending re-read text to drain      */
 } Cw2State;
+
+typedef struct { guint8 key; float dur_ms; } RrRun;
+
+static SkimCwReader *rr_reader(void);
 
 static gpointer cw2_channel_new(double sample_rate) {
   morse_init();
@@ -220,13 +244,114 @@ static gpointer cw2_channel_new(double sample_rate) {
   st->elem_err = 0.2;
   st->fist_csp = FIST_CSP0;
   st->fist_wsp = FIST_WSP0;
+  st->rd_on    = g_getenv("SKIM_CW_DUMP_RUNS") != NULL;
+  st->rr_arm   = rr_reader() != NULL;
   return st;
+}
+
+/* --- run dump --------------------------------------------------------------------
+ * One line per completed run: "freq_hz t_ms key dur_ms" (C locale). Opened
+ * lazily on first use; engine-thread only like the rest of the backend. */
+static FILE *rd_file(void) {
+  static FILE *f;
+  static gsize once;
+  if (g_once_init_enter(&once)) {
+    const char *path = g_getenv("SKIM_CW_DUMP_RUNS");
+    if (path) { f = fopen(path, "w"); }
+    g_once_init_leave(&once, TRUE);
+  }
+  return f;
+}
+
+/* Shared reader instance — weights are read-only, the forward is stateless,
+ * and every decoder lives on the one engine thread. Armed by SKIM_CW_READER
+ * (path) or ~/.config/skimmer-for-linux/cw-reader.bin when present. */
+static SkimCwReader *rr_reader(void) {
+  static SkimCwReader *r;
+  static gsize once;
+  if (g_once_init_enter(&once)) {
+    const char *path = g_getenv("SKIM_CW_READER");
+    char *cfg = NULL;
+    if (!path) {
+      cfg = g_build_filename(g_get_user_config_dir(), "skimmer-for-linux",
+                             "cw-reader.bin", NULL);
+      if (g_file_test(cfg, G_FILE_TEST_EXISTS)) { path = cfg; }
+    }
+    if (path) {
+      GError *err = NULL;
+      r = skim_cw_reader_load(path, &err);
+      if (r) {
+        g_message("cw2: neural reader armed (%s)", path);
+      } else {
+        g_warning("cw2: reader blob %s: %s", path, err->message);
+        g_clear_error(&err);
+      }
+    }
+    g_free(cfg);
+    g_once_init_leave(&once, TRUE);
+  }
+  return r;
+}
+
+/* Over break: re-read the buffered runs and queue the text for the pane.
+ * Gated on a SOLID channel (learned dit, enough committed marks) — noise
+ * channels break "overs" constantly, and a band's worth of them would
+ * drown the engine thread in forward passes. */
+static void rr_flush_over(Cw2State *st) {
+  if (!st->rr_runs)
+    return;
+  if (st->dit <= 0 || st->marks_ok < 8 || st->snr_latch < 12.0) {
+    /* The reader is for STRONG hand-keyed stations (the ear-readable ones).
+     * A weak channel's runs are Schmitt noise — the net would faithfully
+     * read garbage; the classical path serves those better. */
+    g_array_set_size(st->rr_runs, 0);
+    return;
+  }
+  guint a = 0, b = st->rr_runs->len;
+  const RrRun *v = (const RrRun *)st->rr_runs->data;
+  while (a < b && !v[a].key) { a++; }             /* an over starts and      */
+  while (b > a && !v[b - 1].key) { b--; }         /* ends on a mark          */
+  if (b - a >= 40) {                              /* ~8 chars — skip blips   */
+    const guint n = b - a;
+    gboolean *key = g_new(gboolean, n);
+    double   *dur = g_new(double, n);
+    for (guint i = 0; i < n; i++) {
+      key[i] = v[a + i].key;
+      dur[i] = v[a + i].dur_ms;
+    }
+    char *txt = skim_cw_reader_read(rr_reader(), key, dur, n);
+    if (txt[0]) {
+      if (!st->rr_out) { st->rr_out = g_string_new(NULL); }
+      g_string_append(st->rr_out, "<<");
+      g_string_append(st->rr_out, txt);
+      g_string_append(st->rr_out, ">> ");
+    }
+    g_free(txt);
+    g_free(key);
+    g_free(dur);
+  }
+  g_array_set_size(st->rr_runs, 0);
+}
+
+static void rd_emit(const Cw2State *st, gboolean key, double len) {
+  FILE *f = rd_file();
+  if (!f)
+    return;
+  char hz[G_ASCII_DTOSTR_BUF_SIZE];
+  char tms[G_ASCII_DTOSTR_BUF_SIZE];
+  char dur[G_ASCII_DTOSTR_BUF_SIZE];
+  g_ascii_formatd(hz, sizeof(hz), "%.1f", st->freq_hz);
+  g_ascii_formatd(tms, sizeof(tms), "%.1f", (double)st->t * 1000.0 / st->rate);
+  g_ascii_formatd(dur, sizeof(dur), "%.1f", len * 1000.0 / st->rate);
+  fprintf(f, "%s %s %d %s\n", hz, tms, key ? 1 : 0, dur);
 }
 
 static void cw2_channel_free(gpointer state) {
   Cw2State *st = state;
   if (!st)
     return;
+  if (st->rr_runs) { g_array_free(st->rr_runs, TRUE); }
+  if (st->rr_out) { g_string_free(st->rr_out, TRUE); }
   g_free(st->lat);
   g_free(st);
 }
@@ -584,6 +709,18 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
   guint pos = 0;
   out->text[0] = '\0';
 
+  /* Drain a queued over re-read first — it precedes this block's decodes
+   * chronologically (the over it re-reads already broke). Chunked by the
+   * 64-byte event; the rest follows next block. ASCII only (the pane events
+   * must stay valid UTF-8 across chunk boundaries). */
+  if (st->rr_out && st->rr_out->len) {
+    guint take = 0;
+    while (pos + 1 < SKIM_DECODE_TEXT_MAX && take < st->rr_out->len) {
+      emit(out, &pos, st->rr_out->str[take++]);
+    }
+    g_string_erase(st->rr_out, 0, take);
+  }
+
   for (guint n = 0; n < nframes; n++) {
     const float i = iq[2 * n], q = iq[2 * n + 1];
     const float mag = sqrtf(i * i + q * q);
@@ -614,6 +751,43 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
       st->keying = FALSE;
     }
 
+    if (st->rd_on || st->rr_arm) {
+      /* Run keyer: sees EVERY sample (before gate/pause early-exits), so the
+       * corpus/reader keeps what the decode path may throw away. */
+      const double rspan = st->env_hi - st->env_lo;
+      const gboolean want =
+          m > st->env_lo + (st->rd_key ? 0.30 : 0.55) * rspan;
+      if (want != st->rd_key) {
+        if (st->rd_pend_valid) {
+          st->rd_run += st->rd_pend_len;         /* glitch — fold it back    */
+          st->rd_key  = want;
+          st->rd_pend_valid = FALSE;
+        } else {
+          st->rd_pend_key   = st->rd_key;
+          st->rd_pend_len   = st->rd_run;
+          st->rd_pend_valid = TRUE;
+          st->rd_key = want;
+          st->rd_run = 0.0;
+        }
+      }
+      st->rd_run += 1.0;
+      if (st->rd_pend_valid && st->rd_run > 3.0) {
+        if (st->rd_on) { rd_emit(st, st->rd_pend_key, st->rd_pend_len); }
+        if (st->rr_arm) {
+          if (!st->rr_runs) {
+            st->rr_runs = g_array_new(FALSE, FALSE, sizeof(RrRun));
+          }
+          if (st->rr_runs->len >= 4096) {        /* runaway — start over     */
+            g_array_set_size(st->rr_runs, 0);
+          }
+          const RrRun rr = { st->rd_pend_key ? 1 : 0,
+                             (float)(st->rd_pend_len * 1000.0 / st->rate) };
+          g_array_append_val(st->rr_runs, rr);
+        }
+        st->rd_pend_valid = FALSE;
+      }
+    }
+
     const gboolean solid =
         st->dit > 0 && st->marks_ok >= 8 && st->elem_err < 0.35;
     /* Deep QSB pulls faded marks under the envelope midpoint, feeds them
@@ -636,6 +810,7 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
             st->brk_out = TRUE;
             emit_str(out, &pos, BREAK_MARK);
           }
+          rr_flush_over(st);
           st->code = 0;
           st->nelem = 0;
           st->paused = TRUE;
@@ -848,6 +1023,7 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
             st->brk_out = TRUE;
             emit_str(out, &pos, BREAK_MARK);
           }
+          rr_flush_over(st);
           lattice_start(st);
         }
       }
@@ -875,10 +1051,15 @@ static double cw2_tone_offset_hz(gpointer state) {
   return ((Cw2State *)state)->foff_hz;
 }
 
+static void cw2_set_freq(gpointer state, double freq_hz) {
+  ((Cw2State *)state)->freq_hz = freq_hz;
+}
+
 const SkimDecodeBackend *skim_decode_cw_v2(void) {
   static const SkimDecodeBackend backend = {
     .name           = "cw2",
     .channel_new    = cw2_channel_new,
+    .set_freq       = cw2_set_freq,
     .channel_free   = cw2_channel_free,
     .process        = cw2_process,
     .level          = cw2_level,

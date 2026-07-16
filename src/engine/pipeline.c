@@ -467,6 +467,9 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
   g_array_set_size(p->hits, 0);
   for (guint c = 0; c < p->nchan; c++) {
     SkimToneSplit *sp = p->split ? p->split[c] : NULL;
+    const double chan_hz = cw->set_freq
+        ? b->center_hz + skim_channelizer_offset_hz(p->bank, c) : 0.0;
+    if (cw->set_freq && !sp) { cw->set_freq(p->dec[SL(c, 0)], chan_hz); }
     guint n;
     while ((n = skim_channelizer_read(p->bank, c, buf, DRAIN_FRAMES)) > 0) {
       if (!sp) {
@@ -481,6 +484,10 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
       const guint ns = skim_tone_split_slots(sp);
       for (guint s = 0; s < ns; s++) {
         slot_sync(p, c, s, cw);
+        if (cw->set_freq) {
+          cw->set_freq(p->dec[SL(c, s)],
+                       chan_hz + skim_tone_split_slot_hz(sp, s));
+        }
         float sbuf[DRAIN_FRAMES * 2];
         guint m;
         while ((m = skim_tone_split_read(sp, s, sbuf, DRAIN_FRAMES)) > 0) {

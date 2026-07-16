@@ -51,6 +51,11 @@ struct _SkimDecodeBackend {
    * tone (a signal midway decodes in both at equal level and doubles every
    * character). Optional. */
   double (*tone_offset_hz)(gpointer state);
+
+  /* Absolute frequency label for this channel/slot (Hz) — the pipeline
+   * refreshes it each block before process(). Diagnostics only (run dumps
+   * carry real frequencies); the decode path never depends on it. Optional. */
+  void (*set_freq)(gpointer state, double freq_hz);
 };
 
 G_END_DECLS
