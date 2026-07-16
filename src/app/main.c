@@ -36,6 +36,12 @@
 #define FREQLOG_ROUTE_HZ  25.0
 #define FREQLOG_MAX       1024     /* cap on remembered frequency slots      */
 #define FREQLOG_BABBLE    512      /* below this many chars a slot is babble */
+/* Routing into the PANE while no station is fixed: an ear-tuned VFO sits
+ * tens of Hz off the carrier (live 2026-07-16: station locked at +27 Hz,
+ * the ±25 Hz route left the pane dead after a retune). Wider only in the
+ * unfixed phase — once a station is fixed the tight window rules, so the
+ * neighbour-interleave the 25 Hz limit exists for cannot return. */
+#define FREQLOG_FREE_HZ   60.0
 #define FREQLOG_CAP_CHARS 20000    /* per-slot history cap                   */
 
 /* --- station row object --------------------------------------------------------- */
@@ -329,7 +335,8 @@ static gboolean on_text_idle(gpointer data) {
    * within the window into the tuned station's text. Before a station is
    * resolved (fresh retune to a quiet spot), follow the VFO tightly. */
   const double key = app->tuned_call[0] ? app->tuned_slot_hz : app->vfo_hz;
-  if (key > 0 && ABS(ev->freq_hz - key) <= FREQLOG_ROUTE_HZ) {
+  const double win = app->tuned_call[0] ? FREQLOG_ROUTE_HZ : FREQLOG_FREE_HZ;
+  if (key > 0 && ABS(ev->freq_hz - key) <= win) {
     tail_append(app->tuned_view, app->tuned, ev->text);
   }
   g_free(ev->text);
