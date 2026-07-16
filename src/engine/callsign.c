@@ -210,6 +210,8 @@ struct _SkimCallsignExtractor {
   GString *tok;                                /* partial token across feeds */
   gint     de_pending;                         /* DE marker lives ≤ 2 tokens */
   gint     cq_recent;                          /* tokens since CQ (≤ window) */
+  guint    cq_pairs;                           /* adjacent "C","Q" pairs seen */
+  gboolean cq_half;                            /* last token was a lone "C"  */
   guint    tok_n;                              /* tokens processed (age clock)*/
   char     prev_tok[CALL_MAX];                 /* previous token (join hyp.) */
   gboolean prev_valid;                         /* it was a valid call itself */
@@ -237,6 +239,8 @@ void skim_callsign_extractor_reset(SkimCallsignExtractor *x) {
   g_string_set_size(x->tok, 0);
   x->de_pending = 0;
   x->cq_recent  = CQ_WINDOW + 1;
+  x->cq_pairs   = 0;
+  x->cq_half    = FALSE;
   x->tok_n      = 0;
   x->ncand      = 0;
   x->prev_tok[0] = '\0';
@@ -329,6 +333,22 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
     return;
   }
   x->tok_n++;
+  /* Letter-spaced CQ chain — the TORN twin of the fused "CQCQ" run: the
+   * same degenerate fist that glues gaps shut also stretches them, and the
+   * CQ chain arrives as single-letter tokens "C Q C Q" (EA1EYL again,
+   * live-caught 2026-07-16 — one operator, both shapes in one evening).
+   * Two adjacent pairs in strict alternation make a CQ marker; a machine
+   * always keys CQ into ONE token, so clean traffic never comes here. */
+  if (tok[0] == 'C' && tok[1] == '\0') {
+    if (x->cq_half) { x->cq_pairs = 0; }       /* "C C" broke the chain      */
+    x->cq_half = TRUE;
+  } else if (x->cq_half && tok[0] == 'Q' && tok[1] == '\0') {
+    x->cq_half = FALSE;
+    if (++x->cq_pairs >= 2) { x->cq_recent = 0; }
+  } else {
+    x->cq_half  = FALSE;
+    x->cq_pairs = 0;
+  }
   if (strcmp(tok, "DE") == 0) {
     x->de_pending = 2;
     x->prev_tok[0] = '\0';                     /* a call never straddles DE  */

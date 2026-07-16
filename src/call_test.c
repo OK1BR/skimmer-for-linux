@@ -236,6 +236,23 @@ int main(void) {
     s = skim_callsign_extractor_best(x, got, sizeof(got));
     check("DE-glued garbage and non-CQ runs never spot", s == 0.0);
     skim_callsign_extractor_free(x);
+
+    /* the TORN twin: stretched gaps tear the chain into single letters
+     * ("C Q C Q C Q DE EA1EYL", live-caught 2026-07-16 same evening) */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "C Q C Q C Q DE EA1EYL EA1EYL K ");
+    s = skim_callsign_extractor_best_ex(x, got, sizeof(got), &cq);
+    check("letter-spaced chain: C Q C Q → CQ marker (EA1EYL calling)",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "EA1EYL") == 0 && cq);
+    skim_callsign_extractor_free(x);
+
+    /* one pair is no marker, and interruptions reset the chain */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "C Q DE OK1XX OK1XX C C Q Q C E Q ");
+    s = skim_callsign_extractor_best_ex(x, got, sizeof(got), &cq);
+    check("one C Q pair / broken chains never open the CQ window",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "OK1XX") == 0 && !cq);
+    skim_callsign_extractor_free(x);
   }
 
   /* -- dictionary boost -------------------------------------------------------- */

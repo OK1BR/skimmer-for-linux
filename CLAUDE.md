@@ -105,10 +105,14 @@ live 14014.4 — the fist model rightly refuses such spacing, so the fix is
 lexical): a token of nothing but "CQ" repeated ≥2× counts as a CQ marker,
 and a DE-prefixed token that is NO call itself but whose remainder validates
 yields the call with the full DE marker (DEEA1EYL→EA1EYL; a real DE1ABC
-stays whole). Both fallbacks fire only where the normal path fails —
-machine keying untouched (oper corpus station table + decode log
-bit-identical pre/post). Binec replay: EA1EYL 0.70/no-CQ → 1.00/CQ.
-Gate `skimmer-call-test` 21 checks.
+stays whole). The TORN twin (same operator, same evening, live): stretched gaps read
+as word gaps → "C Q C Q C Q DE EA1EYL" — ≥2 adjacent single-letter
+"C","Q" pairs in strict alternation also make a CQ marker (a machine
+always keys CQ into ONE token). All fallbacks fire only where the normal
+path fails — machine keying untouched (oper corpus station table +
+decode log bit-identical pre/post). Binec replay: EA1EYL 0.70/no-CQ →
+1.00/CQ; 2sq replay (14009.45): CQ flag from the torn form too.
+Gate `skimmer-call-test` 23 checks.
 Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
 **v2 live session**, **tone splitter live session** (run the app with
 `SKIM_CW_V2=1 SKIM_TONE_SPLIT=1`). MASTER.SCP can go to
