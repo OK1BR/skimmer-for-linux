@@ -121,12 +121,31 @@ changes, bug fists) defeats per-element decoding (EA3BP live case).
 Trained offline on synthetic fists (ml/fist_synth.py, torch in
 /var/tmp/skimmer-cw-ml); C inference is dependency-free, blob carries a
 torch test vector the gate verifies against (plus an independent hand
-reference). PANE ONLY — never feeds extractor/spots (hallucination
-guard). Armed by SKIM_CW_READER=<blob> or config-dir cw-reader.bin;
-re-read stands on its own pane line (no bracket wrapper — Richard). Real A/B: EA3BP CER 0.13→0.06 (calls
-exact), EA1EYL torn CQ reads clean. Gate `skimmer-reader-test` — 9
-gates total. Caveats: over ending at capture EOF never flushes (replay
-artifact); reader text is chunked into 64-byte decode events.
+reference). DISPLAY ONLY — re-reads leave via the take_aux_text() hook
+("aux" decode-log lines); the extractor NEVER sees them (a babble
+re-read minted a phantom EI55ISI station before the separation; flip
+side: it also lifted the real, torn UA6AX — hence the phase-D "model
+as witness" question). Armed ONLY by explicit SKIM_CW_READER=<blob>
+(offline analyses; final weights /var/tmp/skimmer-cw-ml/run2/) — a
+plain app launch never arms it: the operator checks the pane by EAR
+and injected lines break that flow (Richard). Real A/B, final weights:
+EA3BP CER 0.133→0.031 (calls exact), EA1EYL torn CQ reads clean.
+Gate `skimmer-reader-test` — 9 gates total. Caveat: an over ending at
+capture EOF never flushes (replay artifact).
+**DECISION 2026-07-16: the model becomes the MAIN decode path via a
+HYBRID.** Roadmap: (A) streaming inference (causal features, ~2–4 s
+commit lag, retrain) → (B) model owns the pane text on solid channels;
+v2 keeps weak signals (non-negotiable) → (C) data: real ham vocabulary
+(LOTW…), EA1EYL tear class, independent per-element-class sigmas
+(R3BDL swing: dits σ0.36 / dahs σ0.10 — the inverse of bug mode),
+regression fixtures with CER bars in the gate, blob versioned in-repo
+→ (D) only then any model input to the spot path ("witness" design).
+Spots stay classical until D. Also from the 40 m collection: carrier
+rule 0.8 s floor + v2 clock-lost watchdog (a ~3× mid-stream speed drop
+no longer mutes either backend; gated); pane routes ±60 Hz unfixed /
+±25 fixed (ear tuning sits off zero-beat); freqlog 1024 slots with
+babble-first eviction. IQ corpus: 10 recordings in
+~/.local/share/skimmer-for-linux/iq/.
 Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
 **v2 live session**, **tone splitter live session** (run the app with
 `SKIM_CW_V2=1 SKIM_TONE_SPLIT=1`). MASTER.SCP can go to
