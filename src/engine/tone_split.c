@@ -49,7 +49,23 @@
 #define TS_AVG_TC_S  2.0                    /* periodogram EMA time constant */
 #define TS_EDGE_HZ   60.0                   /* peak search span (passband)   */
 #define TS_FLOOR_DB  8.0                    /* peak over median floor        */
-#define TS_REL_DB    25.0                   /* 2nd carrier within of primary */
+#define TS_REL_DB    12.0                   /* 2nd carrier within of primary */
+
+/* OFF-gated verification: a REAL second carrier stays lit when the primary
+ * keys OFF; keying sidebands and filter skirt vanish with it. The symmetric
+ * mirror test alone missed a chirpy fist (live-caught 2026-07-16: EA1EYL's
+ * drift makes his sidebands ASYMMETRIC — a slot camped on the lower pair at
+ * −28 Hz and decoded skirt junk for minutes). A second periodogram
+ * accumulates only over windows where the primary's own bin is dark; any
+ * non-primary candidate must keep ≥ TS_OFF_RATIO of its power there. Until
+ * enough dark windows exist the candidate is unverifiable: it gets NO slot
+ * but does flag CONTESTED (conservative — candidates hold, spots wait).
+ * Primaries with no keying dynamics (steady carrier, digi blob) cannot be
+ * gated — after warm-up they fall back to the ungated rules. */
+#define TS_OFF_RATIO 0.25
+#define TS_LO_MIN    8                      /* dark windows before verdicts  */
+#define TS_WARM_HOPS 40                     /* hops before "steady" verdict  */
+#define TS_DYN       4.0                    /* pa_hi/pa_lo ≥ this = keying   */
 /* One separability bar everywhere: carriers closer than TS_ENGAGE_HZ are
  * CONTESTED — never split, never slotted. The first build had two bars
  * (contested < 20, engage ≥ 22) and a pair sitting in the 20–22 Hz gap was
@@ -92,6 +108,12 @@ struct _SkimToneSplit {
   guint          wfill;
   double         psd[TS_FFT];               /* averaged periodogram          */
   gboolean       primed;
+  double         psd_lo[TS_FFT];            /* … over primary-dark windows   */
+  gboolean       lo_primed;
+  guint8         lo_n;                      /* dark windows seen (saturates) */
+  guint8         hops;                      /* windows seen (saturates)      */
+  gint           prim_bin;                  /* primary's bin; −1 = none yet  */
+  double         pa_hi, pa_lo;              /* primary-bin power trackers    */
   double         eval_due;                  /* samples until next eval       */
   guint          hold;
   double         hold_hz[2];
@@ -118,6 +140,7 @@ SkimToneSplit *skim_tone_split_new(double sample_rate) {
   ts->nslots = 1;
   ts->slot[0].active = TRUE;
   ts->slot[0].gen = ++ts->genseq;
+  ts->prim_bin = -1;
   ts->eval_due = TS_EVAL_S * sample_rate;
   ts->debug = g_getenv("SKIM_TS_DEBUG") != NULL;
   return ts;
@@ -220,12 +243,43 @@ static void accumulate_psd(SkimToneSplit *ts) {
     ts->fin[i][1] = ts->wbuf[2 * i + 1] * ts->win[i];
   }
   fftwf_execute(ts->plan);
+  double bin[TS_FFT];
   for (guint i = 0; i < TS_FFT; i++) {
-    const double p = (double)ts->fout[i][0] * ts->fout[i][0] +
-                     (double)ts->fout[i][1] * ts->fout[i][1];
-    ts->psd[i] = ts->primed ? ts->psd[i] + ts->alpha * (p - ts->psd[i]) : p;
+    bin[i] = (double)ts->fout[i][0] * ts->fout[i][0] +
+             (double)ts->fout[i][1] * ts->fout[i][1];
+    ts->psd[i] = ts->primed ? ts->psd[i] + ts->alpha * (bin[i] - ts->psd[i])
+                            : bin[i];
   }
   ts->primed = TRUE;
+  if (ts->hops < 255) { ts->hops++; }
+
+  /* OFF-gated periodogram (see TS_OFF_RATIO): windows where the primary's
+   * own line is dark teach psd_lo — the view with the primary blanked. */
+  if (ts->prim_bin < 0)
+    return;
+  double pa = 0.0;
+  for (gint d = -1; d <= 1; d++) {
+    pa = MAX(pa, bin[(ts->prim_bin + d + TS_FFT) % TS_FFT]);
+  }
+  if (pa > ts->pa_hi) {
+    ts->pa_hi = pa;
+  } else {
+    ts->pa_hi += 0.05 * (pa - ts->pa_hi);
+  }
+  if (pa < ts->pa_lo || ts->pa_lo <= 0.0) {
+    ts->pa_lo = pa;
+  } else {
+    ts->pa_lo += 0.05 * (pa - ts->pa_lo);
+  }
+  if (ts->pa_hi > TS_DYN * ts->pa_lo && pa < sqrt(ts->pa_hi * ts->pa_lo)) {
+    for (guint i = 0; i < TS_FFT; i++) {
+      ts->psd_lo[i] = ts->lo_primed
+                          ? ts->psd_lo[i] + ts->alpha * (bin[i] - ts->psd_lo[i])
+                          : bin[i];
+    }
+    ts->lo_primed = TRUE;
+    if (ts->lo_n < 255) { ts->lo_n++; }
+  }
 }
 
 static double bin_hz(const SkimToneSplit *ts, gint i) {
@@ -233,13 +287,12 @@ static double bin_hz(const SkimToneSplit *ts, gint i) {
   return s * ts->rate / TS_FFT;
 }
 
-/* Max averaged power within ±win_hz of hz. */
-static double psd_near(const SkimToneSplit *ts, double hz, double win_hz) {
+/* Max averaged power within ±win_hz of hz, in the given periodogram. */
+static double arr_near(const SkimToneSplit *ts, const double *arr, double hz,
+                       double win_hz) {
   double best = 0.0;
   for (gint i = 0; i < TS_FFT; i++) {
-    if (fabs(bin_hz(ts, i) - hz) <= win_hz && ts->psd[i] > best) {
-      best = ts->psd[i];
-    }
+    if (fabs(bin_hz(ts, i) - hz) <= win_hz && arr[i] > best) { best = arr[i]; }
   }
   return best;
 }
@@ -258,8 +311,12 @@ static int dbl_cmp(const void *a, const void *b) {
   return d > 0 ? 1 : d < 0 ? -1 : 0;
 }
 
-/* The peak list, sidebands and smear removed — see the file header. */
-static guint find_carriers(const SkimToneSplit *ts, Peak *out, guint max) {
+/* The peak list, sidebands and smear removed — see the file header.
+ * *pending is set when a non-primary candidate had to be dropped ONLY
+ * because the OFF-gate has no data yet: unverifiable, so the caller should
+ * treat the channel as contested rather than clean. */
+static guint find_carriers(const SkimToneSplit *ts, Peak *out, guint max,
+                           gboolean *pending) {
   double tmp[TS_FFT];
   memcpy(tmp, ts->psd, sizeof(tmp));
   qsort(tmp, TS_FFT, sizeof(double), dbl_cmp);
@@ -297,9 +354,25 @@ static guint find_carriers(const SkimToneSplit *ts, Peak *out, guint max) {
         drop = TRUE;                        /* same line, straddle smear     */
       } else {
         const double mirror = 2.0 * out[a].hz - cand[i].hz;
-        if (psd_near(ts, mirror, TS_SAME_HZ) >= TS_MIRROR * cand[i].pw) {
+        if (arr_near(ts, ts->psd, mirror, TS_SAME_HZ) >=
+            TS_MIRROR * cand[i].pw) {
           drop = TRUE;                      /* keying sideband pair member   */
         }
+      }
+    }
+    /* OFF-gate (see TS_OFF_RATIO). Order matters: mirror-dropped peaks are
+     * PROVEN sidebands and never reach here — they must not raise pending. */
+    if (!drop && na > 0) {
+      if (ts->lo_n >= TS_LO_MIN) {
+        const double off = arr_near(ts, ts->psd_lo, cand[i].hz, TS_SAME_HZ);
+        const double tot = arr_near(ts, ts->psd, cand[i].hz, TS_SAME_HZ);
+        if (off < TS_OFF_RATIO * tot) {
+          drop = TRUE;                      /* dark with the primary: skirt  */
+        }
+      } else if (!(ts->hops >= TS_WARM_HOPS &&
+                   ts->pa_hi < TS_DYN * ts->pa_lo)) {
+        drop = TRUE;                        /* unverifiable yet — hold       */
+        if (pending) { *pending = TRUE; }
       }
     }
     if (!drop) { out[na++] = cand[i]; }
@@ -361,13 +434,22 @@ static void slot_set_contested(TsSlot *sl, gboolean evidence) {
 static void eval_topology(SkimToneSplit *ts) {
   if (!ts->primed)
     return;
-  Peak  c[SKIM_TONE_SPLIT_MAX + 1];
-  guint nc = find_carriers(ts, c, SKIM_TONE_SPLIT_MAX + 1);
+  Peak     c[SKIM_TONE_SPLIT_MAX + 1];
+  gboolean pending = FALSE;
+  guint    nc = find_carriers(ts, c, SKIM_TONE_SPLIT_MAX + 1, &pending);
+
+  /* The strongest accepted line gates the OFF periodogram from now on. */
+  if (nc > 0) {
+    const gint b = (gint)lround(c[0].hz / (ts->rate / TS_FFT));
+    ts->prim_bin = ((b % TS_FFT) + TS_FFT) % TS_FFT;
+  }
 
   if (!ts->split) {
-    /* Two lines below the separable spacing: flag, don't split. */
+    /* Two lines below the separable spacing — or an unverifiable second
+     * line (OFF-gate still warming): flag, don't split. */
     slot_set_contested(&ts->slot[0],
-                       nc >= 2 && fabs(c[0].hz - c[1].hz) < TS_ENGAGE_HZ);
+                       pending ||
+                       (nc >= 2 && fabs(c[0].hz - c[1].hz) < TS_ENGAGE_HZ));
     if (nc >= 2 && fabs(c[0].hz - c[1].hz) >= TS_ENGAGE_HZ) {
       const double lo = MIN(c[0].hz, c[1].hz), hi = MAX(c[0].hz, c[1].hz);
       if (ts->hold > 0 && fabs(lo - ts->hold_hz[0]) <= TS_STABLE_HZ &&

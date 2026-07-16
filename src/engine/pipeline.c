@@ -401,6 +401,11 @@ static void slot_sync(SkimPipeline *p, guint c, guint s,
   const guint i = SL(c, s);
   if (p->sgen[i] == g && p->dec[i])
     return;
+  if (g_getenv("SKIM_TS_DEBUG")) {      /* absolute view the splitter lacks  */
+    g_printerr("pipeline: ch %u @ %.0f Hz slot %u gen %u->%u mix %+.1f Hz\n",
+               c, p->center_hz + skim_channelizer_offset_hz(p->bank, c), s,
+               p->sgen[i], g, skim_tone_split_slot_hz(p->split[c], s));
+  }
   if (p->dec[i]) { cw->channel_free(p->dec[i]); }
   p->dec[i] = cw->channel_new(skim_channelizer_out_rate(p->bank));
   if (p->ext[i]) {

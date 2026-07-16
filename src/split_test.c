@@ -135,6 +135,33 @@ static void env_fit(GArray *env, guint len) {
   }
 }
 
+/* One keyed carrier whose frequency starts +chirp_hz high at every key-down
+ * and settles within ~15 ms (a chirpy TX): the keying sidebands go
+ * ASYMMETRIC, which is what defeats the symmetric mirror test (live-caught
+ * 2026-07-16 — EA1EYL's drifty keying grew a phantom slot on his own lower
+ * sidebands). Whatever spurious lines this paints, they exist only WHILE
+ * the carrier keys — the OFF-gate must refuse them slots and clear the
+ * contested flag once it has data. */
+static float *synth_chirpy(const GArray *env, double f0, double amp,
+                           double chirp_hz, double snr_db, GRand *rng,
+                           guint *out_frames) {
+  const guint n = env->len;
+  const double sigma = 0.5 / (sqrt(2.0) * pow(10.0, snr_db / 20.0));
+  float *iq = g_new(float, 2 * n);
+  double ph = 0.0;
+  double mark_age = 1e9;
+  for (guint i = 0; i < n; i++) {
+    const double e = g_array_index(env, float, i);
+    mark_age = e > 0.5 ? mark_age + 1.0 : 0.0;
+    const double f = f0 + chirp_hz * exp(-mark_age / 3.0);
+    ph += 2.0 * G_PI * f / RATE;
+    iq[2 * i]     = (float)(amp * e * cos(ph) + sigma * gauss(rng));
+    iq[2 * i + 1] = (float)(amp * e * sin(ph) + sigma * gauss(rng));
+  }
+  *out_frames = n;
+  return iq;
+}
+
 /* Two independently keyed carriers + complex AWGN (σ per component against
  * the 0.5 reference amplitude, like cw_test). Returns interleaved IQ. */
 static float *synth_two(const GArray *ea, double fa, double aa,
@@ -192,7 +219,16 @@ typedef struct {
   double   t_split;                   /* first slots>1 (s), <0 = never       */
   gboolean contested_seen;
   guint8   slots_at[512];             /* topology per second (capped)        */
+  guint8   contested_at[512];         /* any slot contested that second      */
 } SplitRun;
+
+/* TRUE if any second in [from, to) had a contested slot. */
+static gboolean contested_between(const SplitRun *r, guint from, guint to) {
+  for (guint s = from; s < MIN(to, (guint)G_N_ELEMENTS(r->contested_at)); s++) {
+    if (r->contested_at[s]) { return TRUE; }
+  }
+  return FALSE;
+}
 
 static void run_split(const float *iq, guint frames,
                       const SkimDecodeBackend *cw, SplitRun *r) {
@@ -223,7 +259,10 @@ static void run_split(const float *iq, guint frames,
         g_string_truncate(r->txt[s], 0);
         gen[s] = g;
       }
-      if (skim_tone_split_slot_contested(ts, s)) { r->contested_seen = TRUE; }
+      if (skim_tone_split_slot_contested(ts, s)) {
+        r->contested_seen = TRUE;
+        if (sec < G_N_ELEMENTS(r->contested_at)) { r->contested_at[sec] = 1; }
+      }
       guint m;
       while ((m = skim_tone_split_read(ts, s, out, 64)) > 0) {
         if (cw->process(dec[s], out, m, &d)) {
@@ -286,10 +325,33 @@ static void run_suite(const SkimDecodeBackend *cw) {
     g_free(p);
   }
 
-  { /* 2. Δf = 50 Hz — the bread-and-butter split */
+  { /* 1b. chirpy lone carrier — asymmetric sidebands defeat the mirror
+     *     test; the OFF-gate must refuse them anyway (live 2026-07-16). */
+    printf(" [1b] chirpy lone carrier (asymmetric sidebands)\n");
+    char   *p = rep("CQ CQ DE OK1BR OK1BR K", 5);
+    GArray *ea = gen_env(p, 21, RATE);
+    guint   frames;
+    float  *iq = synth_chirpy(ea, 37.0, 0.5, 6.0, 25, rng, &frames);
+    SplitRun r;
+    run_split(iq, frames, cw, &r);
+    show("slot0", r.txt[0]->str);
+    check("chirpy: never split", r.max_slots == 1);
+    check("chirpy: contested clears once the OFF-gate has data",
+          !contested_between(&r, 35, 512));
+    check("chirpy: copies exactly", fuzzy_dist(r.txt[0]->str, "OK1BR OK1BR K") == 0);
+    run_free(&r);
+    g_free(iq);
+    g_array_free(ea, TRUE);
+    g_free(p);
+  }
+
+  { /* 2. Δf = 50 Hz — the bread-and-butter split. The OFF-gate needs ~8
+     *    dark windows of the primary before it can VERIFY the second
+     *    carrier (word gaps supply them), so engage lands ~20-25 s in;
+     *    until then the channel reads contested — candidates hold. */
     printf(" [2] two stations, Δf = 50 Hz (−20 / +30)\n");
-    char   *pa = rep("CQ TEST OK1BR OK1BR", 4);
-    char   *pb = rep("CQ DE 9A5K 9A5K K", 5);
+    char   *pa = rep("CQ TEST OK1BR OK1BR", 6);
+    char   *pb = rep("CQ DE 9A5K 9A5K K", 7);
     GArray *ea = gen_env(pa, 22, RATE);
     GArray *eb = gen_env(pb, 27, RATE);
     shape_env(ea, RATE);
@@ -300,9 +362,10 @@ static void run_suite(const SkimDecodeBackend *cw) {
     SplitRun r;
     run_split(iq, frames, cw, &r);
     check("split engaged", r.t_split >= 0);
-    check("engaged within 8 s", r.t_split >= 0 && r.t_split <= 8.0);
+    check("engaged within 30 s", r.t_split >= 0 && r.t_split <= 30.0);
     check("two slots at end", r.nslots == 2);
-    check("never contested", !r.contested_seen);
+    check("not contested once split", r.t_split >= 0 &&
+          !contested_between(&r, (guint)r.t_split + 3, 512));
     const gint sa = slot_near(&r, -20.0), sb = slot_near(&r, 30.0);
     check("slot mixes on both carriers (±6 Hz)", sa >= 0 && sb >= 0 && sa != sb);
     if (sa >= 0 && sb >= 0) {
@@ -323,8 +386,8 @@ static void run_suite(const SkimDecodeBackend *cw) {
 
   { /* 3. Δf = 30 Hz — narrow cutoffs, soft edges, still two copies */
     printf(" [3] two stations, Δf = 30 Hz (−5 / +25)\n");
-    char   *pa = rep("CQ TEST OK1BR OK1BR", 4);
-    char   *pb = rep("CQ DE 9A5K 9A5K K", 5);
+    char   *pa = rep("CQ TEST OK1BR OK1BR", 6);
+    char   *pb = rep("CQ DE 9A5K 9A5K K", 8);
     GArray *ea = gen_env(pa, 20, RATE);
     GArray *eb = gen_env(pb, 25, RATE);
     shape_env(ea, RATE);
@@ -404,15 +467,15 @@ static void run_suite(const SkimDecodeBackend *cw) {
 
   { /* 5. collapse on TTL, re-engage on return (a QSO pair with a long over) */
     printf(" [5] slot TTL: B leaves for 105 s, comes back\n");
-    char   *pa = rep("CQ TEST OK1BR OK1BR", 18);        /* A runs throughout */
+    char   *pa = rep("CQ TEST OK1BR OK1BR", 23);        /* A runs throughout */
     GArray *ea = gen_env(pa, 24, RATE);
     shape_env(ea, RATE);
-    char   *pb1 = rep("CQ DE 9A5K 9A5K K", 4);
-    GArray *eb = gen_env(pb1, 26, RATE);                /* ~35 s of B        */
+    char   *pb1 = rep("CQ DE 9A5K 9A5K K", 7);
+    GArray *eb = gen_env(pb1, 26, RATE);                /* ~50 s of B        */
     shape_env(eb, RATE);
-    env_fit(eb, (guint)(35.0 * RATE));
+    env_fit(eb, (guint)(50.0 * RATE));
     env_fit(eb, eb->len + (guint)(105.0 * RATE));       /* 105 s silence     */
-    GArray *eb2 = gen_env(pb1, 26, RATE);               /* B returns         */
+    GArray *eb2 = gen_env(pb1, 26, RATE);               /* B returns @155 s  */
     shape_env(eb2, RATE);
     g_array_append_vals(eb, eb2->data, eb2->len);
     g_array_free(eb2, TRUE);
@@ -422,12 +485,13 @@ static void run_suite(const SkimDecodeBackend *cw) {
                           &frames);
     SplitRun r;
     run_split(iq, frames, cw, &r);
-    check("split engaged early", r.t_split >= 0 && r.t_split <= 8.0);
-    /* B falls silent at ~35 s; TTL 90 s → collapse lands ≈ 126–128 s. */
-    check("still split at 120 s", r.slots_at[120] == 2);
-    check("collapsed by 135 s", r.slots_at[135] == 1);
-    /* B keys again at 140 s → re-detect ≈ 2–5 s. */
-    check("re-engaged by 150 s", r.slots_at[150] == 2);
+    check("split engaged (once the OFF-gate warmed)",
+          r.t_split >= 0 && r.t_split <= 30.0);
+    /* B falls silent at ~50 s; TTL 90 s → collapse lands ≈ 141–143 s. */
+    check("still split at 135 s", r.slots_at[135] == 2);
+    check("collapsed by 152 s", r.slots_at[152] == 1);
+    /* B keys again at ~155 s; the gate is warm → re-engage in seconds. */
+    check("re-engaged by 168 s", r.slots_at[168] == 2);
     run_free(&r);
     g_free(iq);
     g_array_free(ea, TRUE);
@@ -470,8 +534,8 @@ static void run_integration(void) {
   /* Channel 96 sits at +12 kHz; carriers at −10 Hz and +40 Hz inside it. */
   const double fa = 11990.0, fb = 12040.0;
   GRand *rng = g_rand_new_with_seed(20260716);
-  char   *pa = rep("CQ TEST OK1BR OK1BR", 4);
-  char   *pb = rep("CQ DE 9A5K 9A5K K", 5);
+  char   *pa = rep("CQ TEST OK1BR OK1BR", 6);
+  char   *pb = rep("CQ DE 9A5K 9A5K K", 8);
   GArray *ea = gen_env(pa, 22, rate);
   GArray *eb = gen_env(pb, 27, rate);
   shape_env(ea, rate);
