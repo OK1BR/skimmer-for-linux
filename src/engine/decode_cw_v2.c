@@ -317,12 +317,12 @@ static void rr_flush_over(Cw2State *st) {
     }
     char *txt = skim_cw_reader_read(rr_reader(), key, dur, n);
     if (txt[0]) {
-      /* The re-read stands on its OWN LINE in the pane — no bracket noise
-       * (Richard, 2026-07-16), the line break is the whole distinction. */
+      /* RAW text, no decoration — it leaves via take_aux_text(), never via
+       * out->text: the first wiring drained it into the ordinary text path
+       * and the pipeline fed it to the EXTRACTOR (phantom EI55ISI station
+       * from a re-read of babble, live-caught 2026-07-16 on 40 m). */
       if (!st->rr_out) { st->rr_out = g_string_new(NULL); }
-      g_string_append_c(st->rr_out, '\n');
       g_string_append(st->rr_out, txt);
-      g_string_append_c(st->rr_out, '\n');
     }
     g_free(txt);
     g_free(key);
@@ -707,18 +707,6 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
   guint pos = 0;
   out->text[0] = '\0';
 
-  /* Drain a queued over re-read first — it precedes this block's decodes
-   * chronologically (the over it re-reads already broke). Chunked by the
-   * 64-byte event; the rest follows next block. ASCII only (the pane events
-   * must stay valid UTF-8 across chunk boundaries). */
-  if (st->rr_out && st->rr_out->len) {
-    guint take = 0;
-    while (pos + 1 < SKIM_DECODE_TEXT_MAX && take < st->rr_out->len) {
-      emit(out, &pos, st->rr_out->str[take++]);
-    }
-    g_string_erase(st->rr_out, 0, take);
-  }
-
   for (guint n = 0; n < nframes; n++) {
     const float i = iq[2 * n], q = iq[2 * n + 1];
     const float mag = sqrtf(i * i + q * q);
@@ -1053,11 +1041,21 @@ static void cw2_set_freq(gpointer state, double freq_hz) {
   ((Cw2State *)state)->freq_hz = freq_hz;
 }
 
+static char *cw2_take_aux_text(gpointer state) {
+  Cw2State *st = state;
+  if (!st->rr_out || !st->rr_out->len)
+    return NULL;
+  char *txt = g_string_free(st->rr_out, FALSE);
+  st->rr_out = NULL;
+  return txt;
+}
+
 const SkimDecodeBackend *skim_decode_cw_v2(void) {
   static const SkimDecodeBackend backend = {
     .name           = "cw2",
     .channel_new    = cw2_channel_new,
     .set_freq       = cw2_set_freq,
+    .take_aux_text  = cw2_take_aux_text,
     .channel_free   = cw2_channel_free,
     .process        = cw2_process,
     .level          = cw2_level,

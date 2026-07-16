@@ -83,6 +83,8 @@ typedef struct {
   double     eff_off;   /* slot mix + decode offset = in-channel offset      */
   gboolean   contested; /* slot band held >1 carrier when this decoded       */
   SkimDecode d;
+  char      *aux;       /* display-only text (take_aux_text) — shown, logged,
+                         * NEVER fed to the extractor (hallucination guard)  */
 } Hit;
 
 struct _SkimPipeline {
@@ -473,10 +475,14 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
     guint n;
     while ((n = skim_channelizer_read(p->bank, c, buf, DRAIN_FRAMES)) > 0) {
       if (!sp) {
-        if (!cw->process(p->dec[SL(c, 0)], buf, n, &d))
+        const gboolean got = cw->process(p->dec[SL(c, 0)], buf, n, &d);
+        char *aux = cw->take_aux_text
+                        ? cw->take_aux_text(p->dec[SL(c, 0)]) : NULL;
+        if (!got && !aux)
           continue;
+        if (!got) { memset(&d, 0, sizeof(d)); }
         Hit h = { .chan = c, .slot = 0, .eff_off = d.freq_offset_hz,
-                  .contested = FALSE, .d = d };
+                  .contested = FALSE, .d = d, .aux = aux };
         g_array_append_val(p->hits, h);
         continue;
       }
@@ -491,13 +497,17 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
         float sbuf[DRAIN_FRAMES * 2];
         guint m;
         while ((m = skim_tone_split_read(sp, s, sbuf, DRAIN_FRAMES)) > 0) {
-          if (!cw->process(p->dec[SL(c, s)], sbuf, m, &d))
+          const gboolean got = cw->process(p->dec[SL(c, s)], sbuf, m, &d);
+          char *aux = cw->take_aux_text
+                          ? cw->take_aux_text(p->dec[SL(c, s)]) : NULL;
+          if (!got && !aux)
             continue;
+          if (!got) { memset(&d, 0, sizeof(d)); }
           Hit h = { .chan = c, .slot = s,
                     .eff_off = skim_tone_split_slot_hz(sp, s) +
                                d.freq_offset_hz,
                     .contested = skim_tone_split_slot_contested(sp, s),
-                    .d = d };
+                    .d = d, .aux = aux };
           g_array_append_val(p->hits, h);
         }
       }
@@ -516,6 +526,7 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
     d = h->d;
     if (cw->level && ghost_suppressed(p, p->lvl, c, h->slot, h->eff_off)) {
       p->ghosts++;
+      g_free(h->aux);
       continue;
     }
     {
@@ -572,11 +583,29 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
         }
         char khz[G_ASCII_DTOSTR_BUF_SIZE];   /* C locale — parseable dot     */
         g_ascii_formatd(khz, sizeof(khz), "%.2f", sig_hz / 1000.0);
-        fprintf(p->dlog, "%s %9s %2.0fwpm %3.0fdB |%s|\n",
-                tbuf, khz, d.speed, d.snr_db, d.text);
+        if (d.text[0]) {
+          fprintf(p->dlog, "%s %9s %2.0fwpm %3.0fdB |%s|\n",
+                  tbuf, khz, d.speed, d.snr_db, d.text);
+        }
+        if (h->aux) {
+          fprintf(p->dlog, "%s %9s   aux        |%s|\n", tbuf, khz, h->aux);
+        }
         fflush(p->dlog);
       }
-      if (p->text_cb) { p->text_cb(sig_hz, d.text, p->text_user); }
+      if (p->text_cb && d.text[0]) { p->text_cb(sig_hz, d.text, p->text_user); }
+      if (h->aux) {
+        /* Display-only: pane + log, NEVER the extractor (a lexically primed
+         * re-read hallucinates plausible calls from babble — the phantom
+         * EI55ISI station, live-caught 2026-07-16). Own line in the pane. */
+        if (p->text_cb) {
+          char *line = g_strdup_printf("\n%s\n", h->aux);
+          p->text_cb(sig_hz, line, p->text_user);
+          g_free(line);
+        }
+        g_free(h->aux);
+      }
+      if (!d.text[0])
+        continue;
 
       /* Two carriers beating inside one slot garble the text — it still
        * shows (log, monitor panes), but it must not breed callsign

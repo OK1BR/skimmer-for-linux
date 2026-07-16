@@ -56,6 +56,14 @@ struct _SkimDecodeBackend {
    * refreshes it each block before process(). Diagnostics only (run dumps
    * carry real frequencies); the decode path never depends on it. Optional. */
   void (*set_freq)(gpointer state, double freq_hz);
+
+  /* Pending DISPLAY-ONLY text (returns it and clears; caller g_frees; NULL
+   * when none). The pipeline shows it (pane, decode log) but must NEVER
+   * feed it to the callsign extractor: aux text may come from a lexically
+   * primed model that can hallucinate plausible callsigns from noise —
+   * live-caught 2026-07-16, a phantom "EI55ISI" station row minted from a
+   * neural re-read of channel babble. Optional. */
+  char *(*take_aux_text)(gpointer state);
 };
 
 G_END_DECLS
