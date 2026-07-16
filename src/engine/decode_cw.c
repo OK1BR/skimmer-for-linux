@@ -385,8 +385,12 @@ static gboolean cw_process(gpointer state, const float *iq, guint nframes,
     }
 
     if (st->key) {
-      /* A mark far beyond a dash is a carrier — drop the assembly. */
-      if (st->dit > 0 && !st->overlong && st->run > 8.0 * st->dit) {
+      /* A mark far beyond a dash is a carrier — drop the assembly. The
+       * 0.8 s floor keeps a SLOW operator's dahs alive under a stale fast
+       * clock (a ~3× speed drop made every dah "overlong" and the decoder
+       * went mute; live-caught 2026-07-16 on v2, same rule here). */
+      if (st->dit > 0 && !st->overlong &&
+          st->run > MAX(8.0 * st->dit, 0.8 * st->rate)) {
         st->overlong = TRUE;
         st->code = 0;
         st->nelem = 0;

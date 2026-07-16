@@ -448,6 +448,41 @@ int main(void) {
     g_rand_free(rng);
   }
 
+  /* -- mid-stream speed DROP: the stale-clock carrier trap ------------------------
+   * An operator falling from ~34 to ~11 WPM makes every slow dah ~9× the
+   * stale dit — the old "8 dits = carrier" rule swallowed the whole slow
+   * transmission and the clock never saw a commit to relearn from
+   * (live-caught 2026-07-16, 7028.9). The 0.8 s carrier floor must keep
+   * the slow dahs committing so the boosted clock can snap down. */
+  {
+    GRand *rng = g_rand_new_with_seed(20260717);
+    SkimDecode last;
+    const char *SLOW = "CQ CQ DE OK1WW OK1WW PSE K";
+
+    GArray *env = gen_env("CQ CQ DE OK1WW OK1WW K", 34, RATE, 0.03, rng);
+    GArray *tail = gen_env(SLOW, 11, RATE, 0.03, rng);
+    g_array_append_vals(env, tail->data, tail->len);
+    g_array_free(tail, TRUE);
+
+    g_cw = skim_decode_cw();
+    char *v1 = run_decoder(env, 14.0, 28.0, 0, 0, rng, &last);
+    g_cw = skim_decode_cw_v2();
+    char *v2 = run_decoder(env, 14.0, 28.0, 0, 0, rng, &last);
+    printf("--- speed drop: 34 -> 11 WPM mid-stream ---\n");
+    show("v1 (info):", v1);
+    show("v2:", v2);
+    printf("       v1 dist %d, v2 dist %d\n",
+           fuzzy_dist(v1, SLOW), fuzzy_dist(v2, SLOW));
+    check("v2 survives a 3x speed drop (slow copy ≤2 errors)",
+          fuzzy_dist(v2, SLOW) <= 2);
+    check("v1 survives a 3x speed drop (slow copy ≤2 errors)",
+          fuzzy_dist(v1, SLOW) <= 2);
+    g_free(v1);
+    g_free(v2);
+    g_array_free(env, TRUE);
+    g_rand_free(rng);
+  }
+
   printf("\n=== %d checks, %d failures ===\n%s\n", checks, fails,
          fails ? "FAIL" : "PASS — both CW backends copy, adapt and stay "
                           "quiet on noise; v2 rides out QSB and learns the "

@@ -161,6 +161,7 @@ typedef struct {
                                          * the reported WPM comes from      */
   double elem_err;                      /* EMA of |d − ideal|/ideal           */
   guint  marks_ok;
+  guint  dah_streak;                    /* committed dahs since the last dit  */
 
   /* --- soft discriminator ---------------------------------------------------- */
   double mu_m, mu_s;                    /* mark / space level trackers        */
@@ -639,6 +640,7 @@ static void lattice_commit(Cw2State *st, double lag_dits, SkimDecode *out,
       const double a = st->elem_err > 0.20 ? 0.30 : 0.15;
       st->dit += a * ((ty == SEG_DAH ? d / 3.0 : d) - st->dit);
       st->dit  = CLAMP(st->dit, st->rate * 0.022, st->rate * 0.30);
+      st->dah_streak = ty == SEG_DAH ? st->dah_streak + 1 : 0;
     }
       st->marks_ok++;
       if (st->nelem < 7) {
@@ -706,6 +708,28 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
   Cw2State *st = state;
   guint pos = 0;
   out->text[0] = '\0';
+
+  /* Clock-lost watchdog: a run of committed dahs with not one dit means the
+   * dit clock sits a class too fast and the labeling went SELF-CONSISTENT —
+   * slow dits read as dahs at ratio ~3, elem_err stays low, the EMA never
+   * moves (a ~3× speed drop; the carrier floor alone let the marks commit
+   * but not the clock recover, gate-caught 2026-07-16). No real text is
+   * dah-only for 16 marks ("0 0 0" is 15), so forget the clock and let the
+   * bootstrap relearn it from the very keying that is arriving. */
+  if (st->dah_streak >= 16 && st->dit > 0) {
+    CW2_DBG("[clock lost at t=%lu — %u dahs, no dit; rebootstrap]\n",
+            (unsigned long)st->t, st->dah_streak);
+    lattice_flush(st, out, &pos);
+    st->dit = 0;
+    st->nboot = 0;
+    st->marks_ok = 0;
+    st->dah_streak = 0;
+    st->fist_csp = FIST_CSP0;
+    st->fist_wsp = FIST_WSP0;
+    st->ngaps = st->gap_head = st->gap_fresh = 0;
+    st->carrier = FALSE;
+    st->paused = FALSE;
+  }
 
   for (guint n = 0; n < nframes; n++) {
     const float i = iq[2 * n], q = iq[2 * n + 1];
@@ -930,7 +954,15 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
       st->t++;
       continue;
     }
-    if (st->cont_mark > (guint)(8.0 * st->dit)) {
+    if (st->cont_mark > (guint)MAX(8.0 * st->dit, 0.8 * st->rate)) {
+      /* 8 dits alone is NOT carrier-proof against a stale clock: an
+       * operator dropping from ~35 to ~12 WPM makes every dah ~8× the old
+       * dit — the whole slow transmission read as "carrier" and, worse,
+       * dahs never committed so the clock had nothing to relearn from
+       * (live-caught 2026-07-16, 7028.9). A real carrier holds for
+       * seconds; even a 5 WPM dah is 720 ms, so the 0.8 s floor keeps
+       * SLOW keying committing — and one committed slow dah snaps the
+       * elem_err-boosted clock onto the new speed. */
       st->carrier = TRUE;
       st->active  = FALSE;                     /* drop the code in flight    */
       st->code    = 0;
