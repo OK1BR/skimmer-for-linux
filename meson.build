@@ -42,6 +42,7 @@ engine_sources = [
   'src/engine/channelizer.c',  # M2: polyphase filter bank → complex channels
   'src/engine/decode_cw.c',    # M3: CW backend (implements decode.h)
   'src/engine/decode_cw_v2.c', # CW v2: semi-Markov Viterbi (QSB-proof)
+  'src/engine/tone_split.c',   # per-channel carrier splitter (multi-signal)
   'src/engine/station.c',      # M5: per-frequency station tracker
   'src/engine/callsign.c',     # M4: extraction + validation
   'src/engine/spot_out.c',     # M5/M6: spot policy — dedup, rate, sinks
@@ -114,6 +115,17 @@ skimmer_cw_test = executable('skimmer-cw-test',
   link_with : engine_lib,
 )
 test('cw-decode', skimmer_cw_test, timeout : 120)
+
+# Tone splitter: offline gate — sideband immunity, Δf 50/30 Hz splits with
+# both texts copied, Δf 15 Hz contested, slot TTL collapse/re-engage, and the
+# WHOLE offline pipeline with SKIM_TONE_SPLIT=1 (both calls, no mutations).
+skimmer_split_test = executable('skimmer-split-test',
+  ['src/split_test.c'],
+  include_directories : include_directories('src'),
+  dependencies : engine_deps,
+  link_with : engine_lib,
+)
+test('tone-split', skimmer_split_test, timeout : 120)
 
 # M4: offline gate — callsign validity (ITU allocation), labelled-corpus
 # precision/recall, fragment feeds, dictionary boost, noise fuzz.

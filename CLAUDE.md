@@ -89,10 +89,21 @@ Replay A/B: "oper" corpus — v1 reads mutilated "9A1G", v2 the true
 the pipeline default — `SKIM_CW_V2=1` arms v2** (app + replay); flip the
 default after Richard's live session. Gate `skimmer-cw-test` runs BOTH
 backends + QSB/flutter cases (35 checks).
+**Tone splitter (offline-proven 2026-07-16, opt-in `SKIM_TONE_SPLIT=1`).**
+`tone_split.c`: per-channel Welch periodogram + keying-sideband mirror
+filter → ≥2 carriers ≥20 Hz apart get one SLOT each (NCO + adaptive-cutoff
+FIR) with its own decoder/extractor/freq-lock in the pipeline (slot-major
+arrays, arbitration on the effective in-channel offset); <20 Hz →
+CONTESTED (text shows, candidates blocked — the 14036 beat mutations stop
+at the tracker). Passthrough is sample-exact when idle; unarmed = old code
+path. Gate `skimmer-split-test` (46 checks, both backends + full offline
+pipeline) — 8 gates total in `meson test`. Live validation pending; flip
+the default together with v2.
 Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
-**v2 live session**. MASTER.SCP can go to
+**v2 live session**, **tone splitter live session** (run the app with
+`SKIM_CW_V2=1 SKIM_TONE_SPLIT=1`). MASTER.SCP can go to
 `~/.config/skimmer-for-linux/master.scp` (the app loads it if present).
-Next: RTTY/PSK backends; v2 default flip.
+Next: RTTY/PSK backends; v2 + splitter default flips.
 
 ## Layout
 

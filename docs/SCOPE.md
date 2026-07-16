@@ -261,6 +261,31 @@ where relevant, a live check against a running `sdr-for-linux`.
   reports), v2 the true **9A170NT** (121 reports, 0.90, CQ); contest A/B —
   same core stations, lone-E/T noise 15.6 → 11.6 %, 3 extra weak-signal
   calls each, ~60× realtime (v1 ~90×).
+- **Tone splitter — two stations in ONE channel decode separately.
+  IMPLEMENTED (offline 2026-07-16; opt-in `SKIM_TONE_SPLIT=1` until a live
+  session confirms it).** Motivation: the 14036 slot (live 2026-07-15) —
+  two carriers < 60 Hz apart share a channel, their envelopes beat and the
+  decoder mutates BOTH calls. `tone_split.c` watches each channel's
+  Welch-averaged spectrum (64-pt FFT, 2 s EMA); when it resolves ≥2
+  carriers ≥ 20 Hz apart it opens a SLOT per carrier (phase-continuous NCO
+  to ~0 Hz + 31-tap windowed-sinc lowpass, cutoff riding the spacing:
+  clamp(0.55·Δf, 10, 32) Hz) and the pipeline runs a separate
+  decoder + extractor + frequency lock per slot (slot-major arrays;
+  arbitration works on the effective in-channel offset, so all M5 ghost
+  rules carry over). Keying sidebands look like carriers (hard 50 % keying:
+  first pair ~4 dB down) — a peak whose mirror about a stronger carrier
+  holds comparable power is dropped, so a lone loud station never splits
+  against itself. Two lines closer than 20 Hz overlap in keying bandwidth —
+  linear filters cannot part them (that would take joint demod / SIC, a
+  possible later stage): the slot goes CONTESTED, its text still shows but
+  breeds no callsign candidates — the beat mutations stop reaching spots.
+  Single-carrier channels ride a sample-exact passthrough (legacy path
+  bit-identical; unarmed, the splitter is not even built). Gate
+  `skimmer-split-test` (46 checks, BOTH CW backends): sideband immunity,
+  Δf 50/30 Hz both texts copy, Δf 15 Hz contested + never split, slot TTL
+  collapse/re-engage (90 s — a slot survives the other side's over), and
+  the whole offline pipeline with two stations in one channel — both calls
+  tracked to the Hz, zero mutations.
 - **Later — RTTY backend** (FSK 45.45 bd, Baudot/ITA2), **PSK backend**
   (BPSK31 + BPSK63, Costas loop, varicode), and an optional **own-panorama
   waterfall** (port `waterfall.c`).

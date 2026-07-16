@@ -1,0 +1,523 @@
+/* tone_split.c — per-channel carrier splitter. See tone_split.h for the idea.
+ *
+ * Detection: Hann-windowed 64-point FFTs (hop 32) of the channel IQ,
+ * magnitude² EMA'd with a ~2 s time constant (Welch) — keying averages
+ * toward its duty cycle while a carrier stays a sharp line. Once a second
+ * the peak list is re-evaluated:
+ *
+ *   floor   = median bin power (a carrier + sidebands occupy few of 64 bins),
+ *   peak    = interpolated local max ≥ 8 dB over the floor, within ±60 Hz,
+ *   carrier = peak that is NOT a keying sideband. Hard 50 %-duty keying puts
+ *             the first sideband pair only ~4 dB under the carrier — far
+ *             above any noise rule, so naive peak-picking would split every
+ *             strong signal against its own keying. Sidebands come in
+ *             SYMMETRIC pairs about their carrier; a real second station has
+ *             no mirror twin. Any peak whose mirror about an accepted
+ *             stronger carrier holds ≥ 0.3× its power is dropped.
+ *
+ * Split engages after 2 consecutive evals agree (≥2 carriers ≥ 22 Hz apart,
+ * stable within ±10 Hz) and collapses when a slot's carrier stays unseen
+ * for 90 s: a QSO pair alternates overs, so a slot must ride out the other
+ * side's whole transmission — an idle slot only costs one parked decoder.
+ *
+ * Two lines closer than 20 Hz overlap in keying bandwidth and cannot be
+ * separated linearly (that needs joint demodulation / SIC — a later stage);
+ * the affected slot is flagged CONTESTED instead, so the pipeline can at
+ * least stop the beat mutations from reaching the callsign candidates.
+ *
+ * Slot routing: phase-continuous NCO to ~0 Hz, then a 31-tap windowed-sinc
+ * lowpass whose cutoff rides the nearest-carrier spacing,
+ * clamp(0.55·Δf, 10, 32) Hz — near the keying bandwidth the filter trades
+ * edge softness for rejection; the decoder tolerates soft edges far better
+ * than a beating neighbour.
+ *
+ * Part of skimmer-for-linux. GPL-3.0-or-later.
+ */
+#include "tone_split.h"
+
+#include <fftw3.h>
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define TS_FFT       64                     /* detection FFT length          */
+#define TS_HOP       32                     /* 50 % overlap                  */
+#define TS_TAPS      31                     /* slot FIR length               */
+#define TS_RING      1024                   /* frames per slot ring (2^n)    */
+#define TS_EVAL_S    1.0                    /* topology evaluation cadence   */
+#define TS_AVG_TC_S  2.0                    /* periodogram EMA time constant */
+#define TS_EDGE_HZ   60.0                   /* peak search span (passband)   */
+#define TS_FLOOR_DB  8.0                    /* peak over median floor        */
+#define TS_REL_DB    25.0                   /* 2nd carrier within of primary */
+#define TS_SEP_HZ    20.0                   /* below → contested, no slot    */
+#define TS_ENGAGE_HZ 22.0                   /* hysteresis: engage above      */
+#define TS_HOLD      2                      /* consecutive evals to engage   */
+#define TS_STABLE_HZ 10.0                   /* eval-to-eval carrier drift    */
+#define TS_TTL_S     90.0                   /* carrier unseen → slot dies    */
+#define TS_TRACK_HZ  12.0                   /* peak-to-slot claim radius     */
+#define TS_SAME_HZ   6.0                    /* peaks this close = one line   */
+#define TS_MIRROR    0.30                   /* mirror power ratio = sideband */
+#define TS_CUT_MIN   10.0                   /* slot FIR cutoff clamp (Hz)    */
+#define TS_CUT_MAX   32.0
+#define TS_RETAP_HZ  2.0                    /* cutoff moved this far → retap */
+
+typedef struct {
+  gboolean active;
+  guint    gen;
+  double   mix_hz;                          /* carrier offset being mixed    */
+  double   phi, dphi;                       /* NCO phase / increment         */
+  double   fc_hz;                           /* current FIR cutoff            */
+  float    taps[TS_TAPS];
+  float    dl[2 * TS_TAPS];                 /* complex FIR delay line        */
+  guint    dpos;
+  double   unseen_s;                        /* carrier absent this long      */
+  gboolean contested;
+  guint    clean;                           /* contested-free evals in a row */
+  float    ring[2 * TS_RING];
+  guint    rw, rr;                          /* free-running frame counters   */
+} TsSlot;
+
+struct _SkimToneSplit {
+  double         rate;
+  double         alpha;                     /* periodogram EMA coefficient   */
+  fftwf_complex *fin, *fout;
+  fftwf_plan     plan;
+  float          win[TS_FFT];               /* Hann                          */
+  float          wbuf[2 * TS_FFT];          /* sliding input window          */
+  guint          wfill;
+  double         psd[TS_FFT];               /* averaged periodogram          */
+  gboolean       primed;
+  double         eval_due;                  /* samples until next eval       */
+  guint          hold;
+  double         hold_hz[2];
+  TsSlot         slot[SKIM_TONE_SPLIT_MAX];
+  guint          nslots;
+  gboolean       split;                     /* narrow slots engaged          */
+  guint          genseq;
+  gboolean       debug;
+};
+
+/* ---- construction ------------------------------------------------------------ */
+
+SkimToneSplit *skim_tone_split_new(double sample_rate) {
+  SkimToneSplit *ts = g_new0(SkimToneSplit, 1);
+  ts->rate  = sample_rate;
+  ts->alpha = 1.0 - exp(-((double)TS_HOP / sample_rate) / TS_AVG_TC_S);
+  ts->fin   = fftwf_alloc_complex(TS_FFT);
+  ts->fout  = fftwf_alloc_complex(TS_FFT);
+  ts->plan  = fftwf_plan_dft_1d(TS_FFT, ts->fin, ts->fout, FFTW_FORWARD,
+                                FFTW_ESTIMATE);
+  for (guint i = 0; i < TS_FFT; i++) {
+    ts->win[i] = 0.5f - 0.5f * cosf(2.0f * (float)G_PI * i / (TS_FFT - 1));
+  }
+  ts->nslots = 1;
+  ts->slot[0].active = TRUE;
+  ts->slot[0].gen = ++ts->genseq;
+  ts->eval_due = TS_EVAL_S * sample_rate;
+  ts->debug = g_getenv("SKIM_TS_DEBUG") != NULL;
+  return ts;
+}
+
+void skim_tone_split_free(SkimToneSplit *ts) {
+  if (!ts)
+    return;
+  fftwf_destroy_plan(ts->plan);
+  fftwf_free(ts->fin);
+  fftwf_free(ts->fout);
+  g_free(ts);
+}
+
+/* ---- slot ring ---------------------------------------------------------------- */
+
+static inline void ring_put(TsSlot *sl, float i, float q) {
+  if (sl->rw - sl->rr >= TS_RING) {         /* owner stalled: drop oldest    */
+    sl->rr = sl->rw - TS_RING + 1;
+  }
+  const guint at = sl->rw & (TS_RING - 1);
+  sl->ring[2 * at]     = i;
+  sl->ring[2 * at + 1] = q;
+  sl->rw++;
+}
+
+guint skim_tone_split_read(SkimToneSplit *ts, guint slot, float *iq,
+                           guint max_frames) {
+  if (slot >= ts->nslots)
+    return 0;
+  TsSlot *sl = &ts->slot[slot];
+  const guint n = MIN(sl->rw - sl->rr, max_frames);
+  for (guint i = 0; i < n; i++) {
+    const guint at = (sl->rr + i) & (TS_RING - 1);
+    iq[2 * i]     = sl->ring[2 * at];
+    iq[2 * i + 1] = sl->ring[2 * at + 1];
+  }
+  sl->rr += n;
+  return n;
+}
+
+/* ---- slot setup ---------------------------------------------------------------- */
+
+/* Windowed-sinc lowpass (Hamming), unity DC gain — the carrier amplitude
+ * survives the slot, so decoder levels stay comparable across channels. */
+static void slot_design_fir(TsSlot *sl, double rate, double fc) {
+  const int M = (TS_TAPS - 1) / 2;
+  double sum = 0.0;
+  for (int k = 0; k < TS_TAPS; k++) {
+    const int d = k - M;
+    const double x = 2.0 * fc / rate * d;
+    double v = (d == 0) ? 1.0 : sin(G_PI * x) / (G_PI * x);
+    v *= 0.54 + 0.46 * cos(G_PI * (double)d / M);
+    sl->taps[k] = (float)v;
+    sum += v;
+  }
+  for (int k = 0; k < TS_TAPS; k++) { sl->taps[k] = (float)(sl->taps[k] / sum); }
+  sl->fc_hz = fc;
+}
+
+static void slot_start(SkimToneSplit *ts, TsSlot *sl, double hz) {
+  sl->active    = TRUE;
+  sl->gen       = ++ts->genseq;
+  sl->mix_hz    = hz;
+  sl->phi       = 0.0;
+  sl->dphi      = -2.0 * G_PI * hz / ts->rate;
+  sl->unseen_s  = 0.0;
+  sl->contested = FALSE;
+  sl->clean     = 0;
+  sl->dpos      = 0;
+  sl->fc_hz     = 0.0;                      /* forces the first retap        */
+  memset(sl->dl, 0, sizeof(sl->dl));
+  sl->rr = sl->rw;                          /* discard transition samples    */
+}
+
+/* Cutoffs ride the CURRENT spacing: two slots drifting toward each other
+ * narrow their filters, drifting apart widens them back. */
+static void retap_all(SkimToneSplit *ts) {
+  if (!ts->split)
+    return;
+  for (guint s = 0; s < ts->nslots; s++) {
+    double dmin = ts->rate;                 /* > any real spacing            */
+    for (guint o = 0; o < ts->nslots; o++) {
+      if (o == s)
+        continue;
+      dmin = MIN(dmin, fabs(ts->slot[o].mix_hz - ts->slot[s].mix_hz));
+    }
+    const double fc = CLAMP(0.55 * dmin, TS_CUT_MIN, TS_CUT_MAX);
+    if (fabs(fc - ts->slot[s].fc_hz) > TS_RETAP_HZ) {
+      slot_design_fir(&ts->slot[s], ts->rate, fc);
+    }
+  }
+}
+
+/* ---- detection ----------------------------------------------------------------- */
+
+static void accumulate_psd(SkimToneSplit *ts) {
+  for (guint i = 0; i < TS_FFT; i++) {
+    ts->fin[i][0] = ts->wbuf[2 * i] * ts->win[i];
+    ts->fin[i][1] = ts->wbuf[2 * i + 1] * ts->win[i];
+  }
+  fftwf_execute(ts->plan);
+  for (guint i = 0; i < TS_FFT; i++) {
+    const double p = (double)ts->fout[i][0] * ts->fout[i][0] +
+                     (double)ts->fout[i][1] * ts->fout[i][1];
+    ts->psd[i] = ts->primed ? ts->psd[i] + ts->alpha * (p - ts->psd[i]) : p;
+  }
+  ts->primed = TRUE;
+}
+
+static double bin_hz(const SkimToneSplit *ts, gint i) {
+  const gint s = (i < TS_FFT / 2) ? i : i - TS_FFT;
+  return s * ts->rate / TS_FFT;
+}
+
+/* Max averaged power within ±win_hz of hz. */
+static double psd_near(const SkimToneSplit *ts, double hz, double win_hz) {
+  double best = 0.0;
+  for (gint i = 0; i < TS_FFT; i++) {
+    if (fabs(bin_hz(ts, i) - hz) <= win_hz && ts->psd[i] > best) {
+      best = ts->psd[i];
+    }
+  }
+  return best;
+}
+
+typedef struct {
+  double hz;
+  double pw;
+} Peak;
+
+static int peak_cmp(const void *a, const void *b) {
+  const double d = ((const Peak *)b)->pw - ((const Peak *)a)->pw;
+  return d > 0 ? 1 : d < 0 ? -1 : 0;
+}
+static int dbl_cmp(const void *a, const void *b) {
+  const double d = *(const double *)a - *(const double *)b;
+  return d > 0 ? 1 : d < 0 ? -1 : 0;
+}
+
+/* The peak list, sidebands and smear removed — see the file header. */
+static guint find_carriers(const SkimToneSplit *ts, Peak *out, guint max) {
+  double tmp[TS_FFT];
+  memcpy(tmp, ts->psd, sizeof(tmp));
+  qsort(tmp, TS_FFT, sizeof(double), dbl_cmp);
+  const double thr = tmp[TS_FFT / 2] * pow(10.0, TS_FLOOR_DB / 10.0);
+
+  Peak cand[16];
+  guint nc = 0;
+  for (gint i = 0; i < TS_FFT && nc < G_N_ELEMENTS(cand); i++) {
+    const double f = bin_hz(ts, i);
+    if (fabs(f) > TS_EDGE_HZ)
+      continue;
+    const double p  = ts->psd[i];
+    const double pl = ts->psd[(i + TS_FFT - 1) % TS_FFT];
+    const double pr = ts->psd[(i + 1) % TS_FFT];
+    if (p < thr || p < pl || p <= pr)       /* strict on one side: plateaus  */
+      continue;
+    const double lp = log(MAX(p, 1e-30)), ll = log(MAX(pl, 1e-30)),
+                 lr = log(MAX(pr, 1e-30));
+    const double den   = ll - 2.0 * lp + lr;
+    double       delta = (den < -1e-9) ? 0.5 * (ll - lr) / den : 0.0;
+    delta        = CLAMP(delta, -0.5, 0.5);
+    cand[nc].hz  = f + delta * ts->rate / TS_FFT;
+    cand[nc].pw  = p;
+    nc++;
+  }
+  qsort(cand, nc, sizeof(Peak), peak_cmp);
+
+  guint na = 0;
+  for (guint i = 0; i < nc && na < max; i++) {
+    if (na && cand[i].pw < out[0].pw * pow(10.0, -TS_REL_DB / 10.0))
+      break;                                /* sorted: the rest is weaker    */
+    gboolean drop = FALSE;
+    for (guint a = 0; a < na && !drop; a++) {
+      if (fabs(cand[i].hz - out[a].hz) < TS_SAME_HZ) {
+        drop = TRUE;                        /* same line, straddle smear     */
+      } else {
+        const double mirror = 2.0 * out[a].hz - cand[i].hz;
+        if (psd_near(ts, mirror, TS_SAME_HZ) >= TS_MIRROR * cand[i].pw) {
+          drop = TRUE;                      /* keying sideband pair member   */
+        }
+      }
+    }
+    if (!drop) { out[na++] = cand[i]; }
+  }
+  return na;
+}
+
+/* ---- topology ------------------------------------------------------------------ */
+
+static void engage(SkimToneSplit *ts, const Peak *c, guint nc) {
+  double hz[SKIM_TONE_SPLIT_MAX];
+  guint  n = 0;
+  for (guint k = 0; k < nc && n < SKIM_TONE_SPLIT_MAX; k++) {
+    gboolean ok = TRUE;
+    for (guint j = 0; j < n; j++) {
+      if (fabs(c[k].hz - hz[j]) < TS_SEP_HZ) { ok = FALSE; }
+    }
+    if (ok) { hz[n++] = c[k].hz; }
+  }
+  if (n < 2)
+    return;
+  ts->split  = TRUE;
+  ts->nslots = n;
+  ts->hold   = 0;
+  for (guint s = 0; s < n; s++) { slot_start(ts, &ts->slot[s], hz[s]); }
+  retap_all(ts);
+  if (ts->debug) {
+    g_printerr("tone-split %p: ENGAGE %u slots (%+.1f / %+.1f%s) Hz\n",
+               (void *)ts, n, hz[0], hz[1], n > 2 ? " / +1" : "");
+  }
+}
+
+static void collapse(SkimToneSplit *ts) {
+  ts->split  = FALSE;
+  ts->nslots = 1;
+  TsSlot *s0 = &ts->slot[0];
+  s0->active    = TRUE;
+  s0->gen       = ++ts->genseq;
+  s0->mix_hz    = 0.0;
+  s0->contested = FALSE;
+  s0->clean     = 0;
+  s0->unseen_s  = 0.0;
+  s0->rr = s0->rw;
+  for (guint s = 1; s < SKIM_TONE_SPLIT_MAX; s++) { ts->slot[s].active = FALSE; }
+  if (ts->debug) { g_printerr("tone-split %p: COLLAPSE\n", (void *)ts); }
+}
+
+/* Contested is set on sight and cleared only after 2 clean evals — the flag
+ * gates the callsign path, so flapping costs candidates, not correctness. */
+static void slot_set_contested(TsSlot *sl, gboolean evidence) {
+  if (evidence) {
+    sl->contested = TRUE;
+    sl->clean     = 0;
+  } else if (sl->contested && ++sl->clean >= 2) {
+    sl->contested = FALSE;
+  }
+}
+
+static void eval_topology(SkimToneSplit *ts) {
+  if (!ts->primed)
+    return;
+  Peak  c[SKIM_TONE_SPLIT_MAX + 1];
+  guint nc = find_carriers(ts, c, SKIM_TONE_SPLIT_MAX + 1);
+
+  if (!ts->split) {
+    /* Two lines below the separable spacing: flag, don't split. */
+    slot_set_contested(&ts->slot[0],
+                       nc >= 2 && fabs(c[0].hz - c[1].hz) < TS_SEP_HZ);
+    if (nc >= 2 && fabs(c[0].hz - c[1].hz) >= TS_ENGAGE_HZ) {
+      const double lo = MIN(c[0].hz, c[1].hz), hi = MAX(c[0].hz, c[1].hz);
+      if (ts->hold > 0 && fabs(lo - ts->hold_hz[0]) <= TS_STABLE_HZ &&
+          fabs(hi - ts->hold_hz[1]) <= TS_STABLE_HZ) {
+        ts->hold++;
+      } else {
+        ts->hold = 1;
+      }
+      ts->hold_hz[0] = lo;
+      ts->hold_hz[1] = hi;
+      if (ts->hold >= TS_HOLD) { engage(ts, c, nc); }
+    } else {
+      ts->hold = 0;
+    }
+    return;
+  }
+
+  /* Split mode: every slot claims the nearest peak within the track radius —
+   * carriers sit ≥20 Hz apart while the radius is 12, so claims can't
+   * collide. A claimed slot follows its carrier (EMA); an unclaimed one
+   * ages toward the TTL (the station is between overs, or gone). */
+  gboolean claimed[SKIM_TONE_SPLIT_MAX + 1] = { FALSE };
+  for (guint s = 0; s < ts->nslots; s++) {
+    TsSlot *sl   = &ts->slot[s];
+    gint    best = -1;
+    double  bd   = TS_TRACK_HZ;
+    for (guint k = 0; k < nc; k++) {
+      const double d = fabs(c[k].hz - sl->mix_hz);
+      if (!claimed[k] && d < bd) {
+        bd   = d;
+        best = (gint)k;
+      }
+    }
+    if (best >= 0) {
+      claimed[best] = TRUE;
+      sl->unseen_s  = 0.0;
+      sl->mix_hz += 0.25 * (c[best].hz - sl->mix_hz);
+      sl->dphi = -2.0 * G_PI * sl->mix_hz / ts->rate;
+    } else {
+      sl->unseen_s += TS_EVAL_S;
+    }
+  }
+
+  /* Unclaimed peaks: far from every slot → a NEW station gets a slot;
+   * close to a slot → that slot's band holds two lines → contested. */
+  for (guint s = 0; s < ts->nslots; s++) {
+    gboolean crowd = FALSE;
+    for (guint k = 0; k < nc; k++) {
+      if (!claimed[k] &&
+          fabs(c[k].hz - ts->slot[s].mix_hz) < TS_SEP_HZ) {
+        crowd = TRUE;
+      }
+    }
+    slot_set_contested(&ts->slot[s], crowd);
+  }
+  for (guint k = 0; k < nc; k++) {
+    if (claimed[k] || ts->nslots >= SKIM_TONE_SPLIT_MAX)
+      continue;
+    double dmin = ts->rate;
+    for (guint s = 0; s < ts->nslots; s++) {
+      dmin = MIN(dmin, fabs(c[k].hz - ts->slot[s].mix_hz));
+    }
+    if (dmin >= TS_SEP_HZ) {
+      slot_start(ts, &ts->slot[ts->nslots], c[k].hz);
+      ts->nslots++;
+      if (ts->debug) {
+        g_printerr("tone-split %p: SPAWN slot %u at %+.1f Hz\n", (void *)ts,
+                   ts->nslots - 1, c[k].hz);
+      }
+    }
+  }
+
+  /* TTL kills — compact downward; a moved slot keeps its gen (≠ whatever
+   * the owner cached at that index, so the owner resets, as it must). */
+  for (gint s = (gint)ts->nslots - 1; s >= 0; s--) {
+    if (ts->slot[s].unseen_s <= TS_TTL_S)
+      continue;
+    if (ts->debug) {
+      g_printerr("tone-split %p: KILL slot %d (%+.1f Hz)\n", (void *)ts, s,
+                 ts->slot[s].mix_hz);
+    }
+    for (guint m = (guint)s; m + 1 < ts->nslots; m++) {
+      ts->slot[m] = ts->slot[m + 1];
+    }
+    ts->nslots--;
+    ts->slot[ts->nslots].active = FALSE;
+  }
+  if (ts->nslots == 1) {
+    collapse(ts);
+    return;
+  }
+  retap_all(ts);
+}
+
+/* ---- the sample path ------------------------------------------------------------ */
+
+void skim_tone_split_push(SkimToneSplit *ts, const float *iq, guint nframes) {
+  for (guint i = 0; i < nframes; i++) {
+    const float I = iq[2 * i], Q = iq[2 * i + 1];
+
+    ts->wbuf[2 * ts->wfill]     = I;
+    ts->wbuf[2 * ts->wfill + 1] = Q;
+    if (++ts->wfill == TS_FFT) {
+      accumulate_psd(ts);
+      memmove(ts->wbuf, ts->wbuf + 2 * TS_HOP,
+              2 * (TS_FFT - TS_HOP) * sizeof(float));
+      ts->wfill = TS_FFT - TS_HOP;
+    }
+
+    if (!ts->split) {
+      ring_put(&ts->slot[0], I, Q);         /* passthrough: sample-exact     */
+    } else {
+      for (guint s = 0; s < ts->nslots; s++) {
+        TsSlot *sl = &ts->slot[s];
+        const float cp = (float)cos(sl->phi), sp = (float)sin(sl->phi);
+        const float mr = I * cp - Q * sp;   /* ×e^{jφ}, φ runs at −mix_hz    */
+        const float mi = I * sp + Q * cp;
+        sl->phi += sl->dphi;
+        if (sl->phi > G_PI) { sl->phi -= 2.0 * G_PI; }
+        if (sl->phi < -G_PI) { sl->phi += 2.0 * G_PI; }
+
+        sl->dl[2 * sl->dpos]     = mr;
+        sl->dl[2 * sl->dpos + 1] = mi;
+        float or_ = 0.0f, oi = 0.0f;
+        guint at = sl->dpos;
+        for (guint k = 0; k < TS_TAPS; k++) {
+          or_ += sl->taps[k] * sl->dl[2 * at];
+          oi  += sl->taps[k] * sl->dl[2 * at + 1];
+          at = (at == 0) ? TS_TAPS - 1 : at - 1;
+        }
+        sl->dpos = (sl->dpos + 1) % TS_TAPS;
+        ring_put(sl, or_, oi);
+      }
+    }
+  }
+
+  ts->eval_due -= nframes;
+  if (ts->eval_due <= 0) {
+    eval_topology(ts);
+    ts->eval_due += TS_EVAL_S * ts->rate;
+  }
+}
+
+/* ---- queries -------------------------------------------------------------------- */
+
+guint skim_tone_split_slots(const SkimToneSplit *ts) { return ts->nslots; }
+
+double skim_tone_split_slot_hz(const SkimToneSplit *ts, guint slot) {
+  return slot < ts->nslots ? ts->slot[slot].mix_hz : 0.0;
+}
+
+guint skim_tone_split_slot_gen(const SkimToneSplit *ts, guint slot) {
+  return slot < ts->nslots ? ts->slot[slot].gen : 0;
+}
+
+gboolean skim_tone_split_slot_contested(const SkimToneSplit *ts, guint slot) {
+  return slot < ts->nslots ? ts->slot[slot].contested : FALSE;
+}

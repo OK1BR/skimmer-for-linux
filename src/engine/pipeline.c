@@ -26,6 +26,7 @@
 #include "decode_cw.h"
 #include "spot_out.h"
 #include "tci_client.h"
+#include "tone_split.h"
 
 #define QUEUE_MAX      64                     /* blocks in flight            */
 #define DRAIN_FRAMES   64                     /* per-channel read chunk      */
@@ -58,6 +59,15 @@ typedef struct {
   gint64 at;                                   /* last decode using the lock  */
 } FreqLock;
 
+/* Tone slots (SKIM_TONE_SPLIT=1, default OFF until the live session confirms
+ * it). Every per-channel array (dec/ext/lvl/flock/sgen) is slot-major, sized
+ * nchan × SKIM_TONE_SPLIT_MAX. Slot 0 is the channel itself — with the
+ * splitter unarmed the walk touches only slot 0 and the path is the old one
+ * exactly. Higher slots come and go with the channel's splitter topology;
+ * their decoders spawn lazily and reset whenever the slot generation moves. */
+#define NSLOT SKIM_TONE_SPLIT_MAX
+#define SL(c, s) ((c) * NSLOT + (s))
+
 typedef struct {
   float  *iq;
   guint   nframes;
@@ -65,10 +75,13 @@ typedef struct {
   double  center_hz;
 } IqBlock;
 
-/* One channel's decode collected in pass 1 of a block (dispatch happens in
+/* One slot's decode collected in pass 1 of a block (dispatch happens in
  * pass 2, once every channel's level is known for ghost arbitration). */
 typedef struct {
   guint      chan;
+  guint      slot;
+  double     eff_off;   /* slot mix + decode offset = in-channel offset      */
+  gboolean   contested; /* slot band held >1 carrier when this decoded       */
   SkimDecode d;
 } Hit;
 
@@ -80,8 +93,11 @@ struct _SkimPipeline {
   SkimChannelizer  *bank;
   double            bank_rate;
   double            center_hz;                 /* last block's dds centre    */
-  gpointer         *dec;                       /* per-channel decoder state  */
+  gpointer         *dec;                       /* per-slot decoder state     */
   SkimCallsignExtractor **ext;
+  SkimToneSplit   **split;                     /* per-channel; NULL = unarmed */
+  guint            *sgen;                      /* slot generations last seen */
+  gboolean          use_split;
   guint             nchan;
 
   SkimStationTable *stations;
@@ -144,6 +160,7 @@ SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg) {
   p->cfg.host = p->host;
   p->dlog_path = g_strdup(cfg->decode_log_path);
   if (p->cfg.chan_bw_hz <= 0) { p->cfg.chan_bw_hz = 125.0; }
+  p->use_split = g_getenv("SKIM_TONE_SPLIT") != NULL;
   p->stations = skim_station_table_new();
   skim_station_table_set_gone_cb(p->stations, station_gone_fwd, p);
   p->queue    = g_async_queue_new();
@@ -171,16 +188,23 @@ SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg) {
 
 static void bank_teardown(SkimPipeline *p) {
   const SkimDecodeBackend *cw = cw_backend();
-  for (guint c = 0; c < p->nchan; c++) {
-    if (p->dec) { cw->channel_free(p->dec[c]); }
-    if (p->ext) { skim_callsign_extractor_free(p->ext[c]); }
+  for (guint i = 0; i < p->nchan * NSLOT; i++) {
+    if (p->dec && p->dec[i]) { cw->channel_free(p->dec[i]); }
+    if (p->ext && p->ext[i]) { skim_callsign_extractor_free(p->ext[i]); }
+  }
+  if (p->split) {
+    for (guint c = 0; c < p->nchan; c++) { skim_tone_split_free(p->split[c]); }
   }
   g_free(p->dec);
   g_free(p->ext);
+  g_free(p->split);
+  g_free(p->sgen);
   g_free(p->lvl);
   g_free(p->flock);
   p->dec = NULL;
   p->ext = NULL;
+  p->split = NULL;
+  p->sgen = NULL;
   p->lvl = NULL;
   p->flock = NULL;
   p->nchan = 0;
@@ -284,16 +308,22 @@ static void bank_build(SkimPipeline *p, double rate) {
   }
   p->bank_rate = rate;
   p->nchan = skim_channelizer_count(p->bank);
-  p->dec = g_new0(gpointer, p->nchan);
-  p->ext = g_new0(SkimCallsignExtractor *, p->nchan);
-  p->lvl = g_new0(double, p->nchan);
-  p->flock = g_new0(FreqLock, p->nchan);
+  p->dec = g_new0(gpointer, p->nchan * NSLOT);
+  p->ext = g_new0(SkimCallsignExtractor *, p->nchan * NSLOT);
+  p->sgen = g_new0(guint, p->nchan * NSLOT);
+  p->lvl = g_new0(double, p->nchan * NSLOT);
+  p->flock = g_new0(FreqLock, p->nchan * NSLOT);
+  if (p->use_split) { p->split = g_new0(SkimToneSplit *, p->nchan); }
   p->center_hz = 0;                            /* fresh states — no flush    */
   const SkimDecodeBackend *cw = cw_backend();
   const double out_rate = skim_channelizer_out_rate(p->bank);
   for (guint c = 0; c < p->nchan; c++) {
-    p->dec[c] = cw->channel_new(out_rate);
-    p->ext[c] = skim_callsign_extractor_new();
+    p->dec[SL(c, 0)] = cw->channel_new(out_rate);
+    p->ext[SL(c, 0)] = skim_callsign_extractor_new();
+    if (p->split) {
+      p->split[c] = skim_tone_split_new(out_rate);
+      p->sgen[SL(c, 0)] = skim_tone_split_slot_gen(p->split[c], 0);
+    }
   }
   if (p->state_cb) {
     char detail[128];
@@ -313,42 +343,73 @@ static void bank_build(SkimPipeline *p, double rate) {
  * passband edge) — that margin protects a genuinely weaker station one
  * channel away from a big gun. */
 static gboolean ghost_suppressed(SkimPipeline *p, const double *lvl, guint c,
-                                 const SkimDecode *d) {
+                                 guint slot, double eff_off) {
   const SkimDecodeBackend *cw = cw_backend();
   const gint M = (gint)p->nchan;
   const gint k = (c <= p->nchan / 2) ? (gint)c : (gint)c - M;
-  const double mine = lvl[c];
+  const double mine = lvl[SL(c, slot)];
   for (gint s = -2; s <= 2; s++) {
     if (s == 0)
       continue;
     const gint kn = k + s;
     const guint cn = (guint)((kn % M + M) % M);
-    const double ratio = lvl[cn] / MAX(mine, 1e-12);
+    /* The neighbour's strongest slot: "does that channel hold a clearly
+     * stronger signal" is a per-channel question either way. */
+    double nb_lvl = 0.0;
+    for (guint j = 0; j < NSLOT; j++) { nb_lvl = MAX(nb_lvl, lvl[SL(cn, j)]); }
+    const double ratio = nb_lvl / MAX(mine, 1e-12);
     if (ratio >= 2.0) { return TRUE; }                     /* +6 dB          */
     if (ABS(s) == 1 && ratio >= 1.41 &&                     /* +3 dB          */
-        fabs(d->freq_offset_hz) > 0.24 * p->cfg.chan_bw_hz) {
+        fabs(eff_off) > 0.24 * p->cfg.chan_bw_hz) {
       return TRUE;
     }
     /* Same-tone tie-break: a signal midway between two overlapping channels
      * decodes in BOTH at near-equal level (the ±3 dB rule cannot pick a
      * winner) and every character comes out twice (live-caught 2026-07-15,
      * IT9IQN doubling in the tuned pane). When a DIRECT neighbour tracks
-     * the same physical tone, the channel whose centre is closer keeps it;
-     * a dead tie falls to the lower channel. */
+     * the same physical tone in ANY of its slots, the channel whose centre
+     * is closer keeps it; a dead tie falls to the lower channel. */
     if (ABS(s) == 1 && ratio > 0.71 && cw->tone_offset_hz) {
-      const double nb_off = cw->tone_offset_hz(p->dec[cn]);
-      const double my_hz  = skim_channelizer_offset_hz(p->bank, c) +
-                            d->freq_offset_hz;
-      const double nb_hz  = skim_channelizer_offset_hz(p->bank, cn) + nb_off;
-      if (fabs(my_hz - nb_hz) < 60.0) {
-        const double my_dist = fabs(d->freq_offset_hz);
-        const double nb_dist = fabs(nb_off);
-        if (my_dist > nb_dist + 5.0) { return TRUE; }
-        if (fabs(my_dist - nb_dist) <= 5.0 && kn < k) { return TRUE; }
+      const double my_hz = skim_channelizer_offset_hz(p->bank, c) + eff_off;
+      const guint nns = (p->split && p->split[cn])
+                            ? skim_tone_split_slots(p->split[cn]) : 1;
+      for (guint j = 0; j < nns; j++) {
+        if (!p->dec[SL(cn, j)])
+          continue;
+        const double nb_off =
+            ((p->split && p->split[cn])
+                 ? skim_tone_split_slot_hz(p->split[cn], j) : 0.0) +
+            cw->tone_offset_hz(p->dec[SL(cn, j)]);
+        const double nb_hz = skim_channelizer_offset_hz(p->bank, cn) + nb_off;
+        if (fabs(my_hz - nb_hz) < 60.0) {
+          const double my_dist = fabs(eff_off);
+          const double nb_dist = fabs(nb_off);
+          if (my_dist > nb_dist + 5.0) { return TRUE; }
+          if (fabs(my_dist - nb_dist) <= 5.0 && kn < k) { return TRUE; }
+        }
       }
     }
   }
   return FALSE;
+}
+
+/* A slot whose generation moved is a NEW stream: fresh decoder, cleared
+ * candidates, no frequency pin. Slot decoders spawn lazily here. */
+static void slot_sync(SkimPipeline *p, guint c, guint s,
+                      const SkimDecodeBackend *cw) {
+  const guint g = skim_tone_split_slot_gen(p->split[c], s);
+  const guint i = SL(c, s);
+  if (p->sgen[i] == g && p->dec[i])
+    return;
+  if (p->dec[i]) { cw->channel_free(p->dec[i]); }
+  p->dec[i] = cw->channel_new(skim_channelizer_out_rate(p->bank));
+  if (p->ext[i]) {
+    skim_callsign_extractor_reset(p->ext[i]);
+  } else {
+    p->ext[i] = skim_callsign_extractor_new();
+  }
+  memset(&p->flock[i], 0, sizeof(FreqLock));
+  p->sgen[i] = g;
 }
 
 static void process_block(SkimPipeline *p, IqBlock *b) {
@@ -369,11 +430,20 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
       const SkimDecodeBackend *cwf = cw_backend();
       const double out_rate = skim_channelizer_out_rate(p->bank);
       for (guint c = 0; c < p->nchan; c++) {
-        cwf->channel_free(p->dec[c]);
-        p->dec[c] = cwf->channel_new(out_rate);
-        skim_callsign_extractor_reset(p->ext[c]);
+        for (guint s = 0; s < NSLOT; s++) {
+          const guint i = SL(c, s);
+          if (p->dec[i]) { cwf->channel_free(p->dec[i]); }
+          p->dec[i] = (s == 0) ? cwf->channel_new(out_rate) : NULL;
+          if (p->ext[i]) { skim_callsign_extractor_reset(p->ext[i]); }
+          p->sgen[i] = 0;
+        }
+        if (p->split) {                /* fresh detection: old carriers gone */
+          skim_tone_split_free(p->split[c]);
+          p->split[c] = skim_tone_split_new(out_rate);
+          p->sgen[SL(c, 0)] = skim_tone_split_slot_gen(p->split[c], 0);
+        }
       }
-      memset(p->flock, 0, p->nchan * sizeof(FreqLock));
+      memset(p->flock, 0, p->nchan * NSLOT * sizeof(FreqLock));
     }
     p->center_hz = b->center_hz;
   }
@@ -386,17 +456,45 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
   SkimDecode d;
 
   /* Pass 1: drain every channel, collect its decodes (dispatch waits until
-   * all levels for this block are known — arbitration needs the neighbours). */
+   * all levels for this block are known — arbitration needs the neighbours).
+   * An armed splitter sits between the channel and the decoders: samples go
+   * through it and come back out per slot (verbatim while passthrough). */
   g_array_set_size(p->hits, 0);
   for (guint c = 0; c < p->nchan; c++) {
+    SkimToneSplit *sp = p->split ? p->split[c] : NULL;
     guint n;
     while ((n = skim_channelizer_read(p->bank, c, buf, DRAIN_FRAMES)) > 0) {
-      if (!cw->process(p->dec[c], buf, n, &d))
+      if (!sp) {
+        if (!cw->process(p->dec[SL(c, 0)], buf, n, &d))
+          continue;
+        Hit h = { .chan = c, .slot = 0, .eff_off = d.freq_offset_hz,
+                  .contested = FALSE, .d = d };
+        g_array_append_val(p->hits, h);
         continue;
-      Hit h = { .chan = c, .d = d };
-      g_array_append_val(p->hits, h);
+      }
+      skim_tone_split_push(sp, buf, n);
+      const guint ns = skim_tone_split_slots(sp);
+      for (guint s = 0; s < ns; s++) {
+        slot_sync(p, c, s, cw);
+        float sbuf[DRAIN_FRAMES * 2];
+        guint m;
+        while ((m = skim_tone_split_read(sp, s, sbuf, DRAIN_FRAMES)) > 0) {
+          if (!cw->process(p->dec[SL(c, s)], sbuf, m, &d))
+            continue;
+          Hit h = { .chan = c, .slot = s,
+                    .eff_off = skim_tone_split_slot_hz(sp, s) +
+                               d.freq_offset_hz,
+                    .contested = skim_tone_split_slot_contested(sp, s),
+                    .d = d };
+          g_array_append_val(p->hits, h);
+        }
+      }
     }
-    p->lvl[c] = cw->level ? cw->level(p->dec[c]) : 0.0;
+    for (guint s = 0; s < NSLOT; s++) {
+      const gboolean live = (s == 0) || (sp && s < skim_tone_split_slots(sp));
+      p->lvl[SL(c, s)] = (live && p->dec[SL(c, s)] && cw->level)
+                             ? cw->level(p->dec[SL(c, s)]) : 0.0;
+    }
   }
 
   /* Pass 2: arbitrate and dispatch the survivors. */
@@ -404,35 +502,44 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
     const Hit *h = &g_array_index(p->hits, Hit, i);
     const guint c = h->chan;
     d = h->d;
-    if (cw->level && ghost_suppressed(p, p->lvl, c, &d)) {
+    if (cw->level && ghost_suppressed(p, p->lvl, c, h->slot, h->eff_off)) {
       p->ghosts++;
       continue;
     }
     {
       const double chan_hz =
           b->center_hz + skim_channelizer_offset_hz(p->bank, c);
-      const double raw_hz = chan_hz + d.freq_offset_hz;
+      const double raw_hz = chan_hz + h->eff_off;
 
       /* Frequency lock (see FLOCK_* above): pin the signal, follow the
-       * carrier only slowly, adopt a neighbour's lock on a channel swap. */
-      FreqLock *L = &p->flock[c];
+       * carrier only slowly, adopt a neighbour's lock on a channel swap.
+       * Adoption takes the CLOSEST live lock — a split channel's slots sit
+       * ≥20 Hz apart, so its window tightens or the default 60 Hz would
+       * steal the OTHER carrier's pin. */
+      FreqLock *L = &p->flock[SL(c, h->slot)];
       const gint64 tnow = g_get_monotonic_time();
       if (L->hz > 0 && tnow - L->at > FLOCK_TTL_US) { L->hz = 0; }
       if (L->hz > 0 && fabs(raw_hz - L->hz) <= FLOCK_WIN_HZ) {
         L->hz += 0.1 * (raw_hz - L->hz);
       } else {
         L->hz = raw_hz;
+        const double win = (p->split && p->split[c] &&
+                            skim_tone_split_slots(p->split[c]) > 1)
+                               ? 15.0 : FLOCK_ADOPT_HZ;
         const gint M = (gint)p->nchan;
         const gint k = (c <= p->nchan / 2) ? (gint)c : (gint)c - M;
+        double best = win;
         for (gint s = -2; s <= 2; s++) {
           if (s == 0)
             continue;
           const guint cn = (guint)(((k + s) % M + M) % M);
-          const FreqLock *N = &p->flock[cn];
-          if (N->hz > 0 && tnow - N->at <= FLOCK_TTL_US &&
-              fabs(N->hz - raw_hz) <= FLOCK_ADOPT_HZ) {
-            L->hz = N->hz;                     /* same tone, keep its pin    */
-            break;
+          for (guint j = 0; j < NSLOT; j++) {
+            const FreqLock *N = &p->flock[SL(cn, j)];
+            if (N->hz > 0 && tnow - N->at <= FLOCK_TTL_US &&
+                fabs(N->hz - raw_hz) <= best) {
+              best  = fabs(N->hz - raw_hz);
+              L->hz = N->hz;                   /* same tone, keep its pin    */
+            }
           }
         }
       }
@@ -459,11 +566,18 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
       }
       if (p->text_cb) { p->text_cb(sig_hz, d.text, p->text_user); }
 
-      skim_callsign_extractor_feed(p->ext[c], d.text);
+      /* Two carriers beating inside one slot garble the text — it still
+       * shows (log, monitor panes), but it must not breed callsign
+       * candidates: beat mutations validate often enough to reach the
+       * spot path (live-caught 2026-07-15, the 14036 slot). */
+      if (h->contested)
+        continue;
+
+      skim_callsign_extractor_feed(p->ext[SL(c, h->slot)], d.text);
       char call[24];
       gboolean cq = FALSE;
-      double score =
-          skim_callsign_extractor_best_ex(p->ext[c], call, sizeof(call), &cq);
+      double score = skim_callsign_extractor_best_ex(p->ext[SL(c, h->slot)],
+                                                     call, sizeof(call), &cq);
       if (score <= 0)
         continue;
 
