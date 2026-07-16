@@ -377,6 +377,31 @@ static void run_suite(const SkimDecodeBackend *cw) {
     g_free(pb);
   }
 
+  { /* 4b. Δf = 21 Hz — the 20–22 Hz dead zone (live-caught 2026-07-16 on
+     *     14014.4: neither contested nor split, beat garbage flowed free).
+     *     One bar now: anything below the engage threshold is CONTESTED. */
+    printf(" [4b] two stations, Δf = 21 Hz (0 / +21) → contested (dead zone)\n");
+    char   *pa = rep("CQ TEST OK1BR OK1BR", 4);
+    char   *pb = rep("CQ DE 9A5K 9A5K K", 6);
+    GArray *ea = gen_env(pa, 22, RATE);
+    GArray *eb = gen_env(pb, 38, RATE);
+    shape_env(ea, RATE);
+    shape_env(eb, RATE);
+    guint  frames;
+    float *iq = synth_two(ea, 0.0, 0.5, eb, 21.0, 0.45, RATE, 20, rng,
+                          &frames);
+    SplitRun r;
+    run_split(iq, frames, cw, &r);
+    check("dead zone: never split", r.max_slots == 1);
+    check("dead zone: contested flagged", r.contested_seen);
+    run_free(&r);
+    g_free(iq);
+    g_array_free(ea, TRUE);
+    g_array_free(eb, TRUE);
+    g_free(pa);
+    g_free(pb);
+  }
+
   { /* 5. collapse on TTL, re-engage on return (a QSO pair with a long over) */
     printf(" [5] slot TTL: B leaves for 105 s, comes back\n");
     char   *pa = rep("CQ TEST OK1BR OK1BR", 18);        /* A runs throughout */

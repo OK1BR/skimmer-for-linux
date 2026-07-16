@@ -20,10 +20,11 @@
  * for 90 s: a QSO pair alternates overs, so a slot must ride out the other
  * side's whole transmission — an idle slot only costs one parked decoder.
  *
- * Two lines closer than 20 Hz overlap in keying bandwidth and cannot be
- * separated linearly (that needs joint demodulation / SIC — a later stage);
- * the affected slot is flagged CONTESTED instead, so the pipeline can at
- * least stop the beat mutations from reaching the callsign candidates.
+ * Two lines closer than the engage bar overlap in keying bandwidth and
+ * cannot be separated linearly (that needs joint demodulation / SIC — a
+ * later stage); the affected slot is flagged CONTESTED instead, so the
+ * pipeline can at least stop the beat mutations from reaching the callsign
+ * candidates.
  *
  * Slot routing: phase-continuous NCO to ~0 Hz, then a 31-tap windowed-sinc
  * lowpass whose cutoff rides the nearest-carrier spacing,
@@ -49,8 +50,12 @@
 #define TS_EDGE_HZ   60.0                   /* peak search span (passband)   */
 #define TS_FLOOR_DB  8.0                    /* peak over median floor        */
 #define TS_REL_DB    25.0                   /* 2nd carrier within of primary */
-#define TS_SEP_HZ    20.0                   /* below → contested, no slot    */
-#define TS_ENGAGE_HZ 22.0                   /* hysteresis: engage above      */
+/* One separability bar everywhere: carriers closer than TS_ENGAGE_HZ are
+ * CONTESTED — never split, never slotted. The first build had two bars
+ * (contested < 20, engage ≥ 22) and a pair sitting in the 20–22 Hz gap was
+ * neither: its beat garbage flowed to the extractor unflagged (live-caught
+ * 2026-07-16, EA1EYL + a carrier 20 Hz up mutating on 14014.4). */
+#define TS_ENGAGE_HZ 22.0
 #define TS_HOLD      2                      /* consecutive evals to engage   */
 #define TS_STABLE_HZ 10.0                   /* eval-to-eval carrier drift    */
 #define TS_TTL_S     90.0                   /* carrier unseen → slot dies    */
@@ -310,7 +315,7 @@ static void engage(SkimToneSplit *ts, const Peak *c, guint nc) {
   for (guint k = 0; k < nc && n < SKIM_TONE_SPLIT_MAX; k++) {
     gboolean ok = TRUE;
     for (guint j = 0; j < n; j++) {
-      if (fabs(c[k].hz - hz[j]) < TS_SEP_HZ) { ok = FALSE; }
+      if (fabs(c[k].hz - hz[j]) < TS_ENGAGE_HZ) { ok = FALSE; }
     }
     if (ok) { hz[n++] = c[k].hz; }
   }
@@ -362,7 +367,7 @@ static void eval_topology(SkimToneSplit *ts) {
   if (!ts->split) {
     /* Two lines below the separable spacing: flag, don't split. */
     slot_set_contested(&ts->slot[0],
-                       nc >= 2 && fabs(c[0].hz - c[1].hz) < TS_SEP_HZ);
+                       nc >= 2 && fabs(c[0].hz - c[1].hz) < TS_ENGAGE_HZ);
     if (nc >= 2 && fabs(c[0].hz - c[1].hz) >= TS_ENGAGE_HZ) {
       const double lo = MIN(c[0].hz, c[1].hz), hi = MAX(c[0].hz, c[1].hz);
       if (ts->hold > 0 && fabs(lo - ts->hold_hz[0]) <= TS_STABLE_HZ &&
@@ -412,7 +417,7 @@ static void eval_topology(SkimToneSplit *ts) {
     gboolean crowd = FALSE;
     for (guint k = 0; k < nc; k++) {
       if (!claimed[k] &&
-          fabs(c[k].hz - ts->slot[s].mix_hz) < TS_SEP_HZ) {
+          fabs(c[k].hz - ts->slot[s].mix_hz) < TS_ENGAGE_HZ) {
         crowd = TRUE;
       }
     }
@@ -425,7 +430,7 @@ static void eval_topology(SkimToneSplit *ts) {
     for (guint s = 0; s < ts->nslots; s++) {
       dmin = MIN(dmin, fabs(c[k].hz - ts->slot[s].mix_hz));
     }
-    if (dmin >= TS_SEP_HZ) {
+    if (dmin >= TS_ENGAGE_HZ) {
       slot_start(ts, &ts->slot[ts->nslots], c[k].hz);
       ts->nslots++;
       if (ts->debug) {

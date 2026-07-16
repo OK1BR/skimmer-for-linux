@@ -28,8 +28,12 @@
 /* ROUTING decode text into a history slot must be TIGHT: the engine pins
  * each signal's frequency now, so a slot is one signal — a ±300 Hz routing
  * window let neighbouring stations interleave into one another's history
- * (live-caught 2026-07-15: the decode pane "resyncing" between stations). */
-#define FREQLOG_ROUTE_HZ  75.0
+ * (live-caught 2026-07-15: the decode pane "resyncing" between stations).
+ * Tightened 75 → 25: two carriers 20 Hz apart each carry their OWN lock,
+ * and ±75 interleaved both streams into one pane (live-caught 2026-07-16,
+ * EA1EYL vs the beat stream 20 Hz up). Locks are stable to a few Hz, so
+ * ±25 keeps a signal's own wobble and excludes the neighbour's. */
+#define FREQLOG_ROUTE_HZ  25.0
 #define FREQLOG_MAX       256      /* LRU cap on remembered frequency slots  */
 #define FREQLOG_CAP_CHARS 20000    /* per-slot history cap                   */
 
