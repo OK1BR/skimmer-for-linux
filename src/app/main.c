@@ -603,7 +603,8 @@ static void on_list_toggled(GtkToggleButton *btn, gpointer user) {
  * the view live. The family stack picks a SANS monospace explicitly: the
  * bare "monospace" alias resolves through fontconfig to a Courier clone
  * (FreeMono/Nimbus) on a stock install — serifs in a decode stream read
- * terribly (Richard, 2026-07-15). */
+ * terribly (Richard, 2026-07-15). Adwaita Mono leads: Iosevka's condensed
+ * width strains a long history (Richard, 2026-07-16). */
 static void decode_font_apply(App *app) {
   if (!app->css) {
     app->css = gtk_css_provider_new();
@@ -614,8 +615,8 @@ static void decode_font_apply(App *app) {
   char rule[256];
   g_snprintf(rule, sizeof(rule),
              "textview.decode-pane { "
-             "font-family: \"Iosevka Nerd Font Mono\", \"Adwaita Mono\", "
-             "\"JetBrains Mono\", \"Liberation Mono\", monospace; "
+             "font-family: \"Adwaita Mono\", \"JetBrains Mono\", "
+             "\"Liberation Mono\", \"Iosevka Nerd Font Mono\", monospace; "
              "font-size: %dpt; }",
              app->decode_font);
   gtk_css_provider_load_from_string(app->css, rule);
