@@ -15,6 +15,10 @@
  * Extraction: tokenised stream with CW context — a token after DE gets the
  * strongest marker, tokens shortly after CQ get a weaker one, repetitions
  * accumulate, and an optional known-call dictionary (MASTER.SCP) boosts.
+ * A degenerate fist can close the gaps AROUND the markers ("CQCQCQ
+ * DEEA1EYL"); two strictly-shaped fallbacks recover those tokens, and both
+ * fire only where the normal path fails — cleanly keyed streams never
+ * enter them.
  * Scores: 0.55 structural+allocation, +0.25 DE, +0.10 CQ, +0.20 repeated
  * (+0.05 at ≥3), +0.15 dictionary — capped at 1.0. The spot threshold 0.70
  * means a lone structurally-valid token is never spotted (the RBN rule).
@@ -299,6 +303,23 @@ static gboolean join_stop_word(const char *s) {
   return FALSE;
 }
 
+/* "CQCQCQ" — a fist whose inter-word gaps collapse sends the whole CQ chain
+ * as ONE token (EA1EYL, live-caught 2026-07-16: word ≈ letter gaps at ~5-6
+ * dits, the fist model rightly refuses such a fit — so the fix belongs
+ * here, in the lexicon). Strict shape: nothing but "CQ" repeated, ≥2 times;
+ * a cleanly keyed stream cannot produce it, so the normal CQ path is
+ * untouched. */
+static gboolean cq_run_token(const char *s) {
+  gsize n = strlen(s);
+  if (n < 4 || (n % 2) != 0)
+    return FALSE;
+  for (gsize i = 0; i < n; i += 2) {
+    if (s[i] != 'C' || s[i + 1] != 'Q')
+      return FALSE;
+  }
+  return TRUE;
+}
+
 static void take_token(SkimCallsignExtractor *x, const char *tok) {
   if (strcmp(tok, "\xC2\xB7") == 0) {
     /* The decoder's over-break mark ("·") is metadata, not received text —
@@ -315,7 +336,7 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
   }
   if (strcmp(tok, "CQ") == 0 || strcmp(tok, "TEST") == 0 ||
       strcmp(tok, "QRZ") == 0 || strcmp(tok, "CWT") == 0 ||
-      strcmp(tok, "TU") == 0) {
+      strcmp(tok, "TU") == 0 || cq_run_token(tok)) {
     /* A calling marker: CQ/QRZ, TEST and CWT (CWops) — both contest-style
      * leading ("TEST SD1A") and trailing ("SD1A TEST" / "F5IN CWT") —
      * bless the call that was JUST sent too, then open the window for the
@@ -356,6 +377,24 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
         cand_add(x, join, x->prev_de || de_now, x->prev_cq || cq_now);
       }
     }
+  }
+
+  /* DE-strip — the other half of the degenerate-fist fix: the gap between
+   * DE and the call collapses too and the marker arrives GLUED on
+   * ("DEEA1EYL", live-caught 2026-07-16). Strictly a fallback: fires only
+   * when the whole token is NOT a valid call itself (a real DE1ABC stays
+   * whole, and so does every cleanly keyed token) and the remainder
+   * validates; the call inherits the full DE marker, exactly as if the gap
+   * had been keyed. */
+  if (!valid && strlen(tok) >= 5 && tok[0] == 'D' && tok[1] == 'E' &&
+      skim_callsign_is_valid(tok + 2)) {
+    cand_add(x, tok + 2, TRUE, cq_now);
+    g_strlcpy(x->prev_tok, tok + 2, sizeof(x->prev_tok));
+    x->prev_valid = TRUE;
+    x->prev_de    = TRUE;
+    x->prev_cq    = cq_now;
+    x->de_pending = 0;
+    return;
   }
 
   g_strlcpy(x->prev_tok, tok, sizeof(x->prev_tok));

@@ -198,6 +198,46 @@ int main(void) {
     skim_callsign_extractor_free(x);
   }
 
+  /* -- degenerate fist: gaps around the markers collapse (2026-07-16) ---------- */
+  {
+    SkimCallsignExtractor *x = skim_callsign_extractor_new();
+    char got[32];
+    gboolean cq = FALSE;
+    /* EA1EYL live: word ≈ letter gaps, the CQ chain fuses into one token and
+     * DE glues onto the call — both fallbacks must fire, and the call must
+     * carry the CALLING flag (the cq_only feed policy keys off it). */
+    skim_callsign_extractor_feed(x, "CQCQCQ DEEA1EYL CQCQCQ DEEA1EYL K ");
+    double s = skim_callsign_extractor_best_ex(x, got, sizeof(got), &cq);
+    check("fused chain: CQCQCQ DEEA1EYL → EA1EYL, flagged calling",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "EA1EYL") == 0 && cq);
+    skim_callsign_extractor_free(x);
+
+    /* the stripped call inherits the full DE marker — a single hearing
+     * scores exactly like a cleanly keyed "CQ DE OK1BR" */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "CQCQ DEOK1BR ");
+    s = skim_callsign_extractor_best_ex(x, got, sizeof(got), &cq);
+    check("DE-strip inherits the marker (CQCQ DEOK1BR spots in one hearing)",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "OK1BR") == 0 && cq);
+    skim_callsign_extractor_free(x);
+
+    /* a token that IS a valid call must never be stripped — the fallback
+     * only runs where the normal path fails (machine keying untouched) */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "CQ DE DE1ABC DE1ABC K ");
+    s = skim_callsign_extractor_best(x, got, sizeof(got));
+    check("valid DE-prefixed call stays whole (DE1ABC never stripped)",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "DE1ABC") == 0);
+    skim_callsign_extractor_free(x);
+
+    /* strict shapes only: DE-glued garbage and almost-CQ runs all die */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "DEEE DE5NN DETEST CQC CQCQC ");
+    s = skim_callsign_extractor_best(x, got, sizeof(got));
+    check("DE-glued garbage and non-CQ runs never spot", s == 0.0);
+    skim_callsign_extractor_free(x);
+  }
+
   /* -- dictionary boost -------------------------------------------------------- */
   {
     char got[32];

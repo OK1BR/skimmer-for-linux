@@ -99,6 +99,16 @@ at the tracker). Passthrough is sample-exact when idle; unarmed = old code
 path. Gate `skimmer-split-test` (46 checks, both backends + full offline
 pipeline) — 8 gates total in `meson test`. Live validation pending; flip
 the default together with v2.
+**Extractor variant C — glued markers (offline-proven 2026-07-16, always on).**
+A degenerate fist collapses the gaps around the markers ("CQCQCQ DEEA1EYL",
+live 14014.4 — the fist model rightly refuses such spacing, so the fix is
+lexical): a token of nothing but "CQ" repeated ≥2× counts as a CQ marker,
+and a DE-prefixed token that is NO call itself but whose remainder validates
+yields the call with the full DE marker (DEEA1EYL→EA1EYL; a real DE1ABC
+stays whole). Both fallbacks fire only where the normal path fails —
+machine keying untouched (oper corpus station table + decode log
+bit-identical pre/post). Binec replay: EA1EYL 0.70/no-CQ → 1.00/CQ.
+Gate `skimmer-call-test` 21 checks.
 Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
 **v2 live session**, **tone splitter live session** (run the app with
 `SKIM_CW_V2=1 SKIM_TONE_SPLIT=1`). MASTER.SCP can go to
