@@ -252,6 +252,39 @@ fix harvest to keep disagreement-with-confident-machine-decode chunks
 capture (machine keying + chop — clean gaps are facts); calibrate
 RR_MARG_* with a labeled sweep, not a hand fit; A/B the context
 hypothesis (feed the reader only outside v2 squelch vs raw).
+**run5 — the reader learns the truth (offline-proven 2026-07-18 late 2).**
+The harvest bias died by REDESIGN, not a patch: labels now come from **v2
+itself** — `emit()` writes every decoded char + end-of-audio time +
+elem_err/solid into `<SKIM_CW_DUMP_RUNS>.chars` (file order = text order,
+do NOT re-sort: a lag-committed char and its word space share a tau), and
+`harvest_real.py` slices those chars onto run chunks by time. The reader
+model is OUT of the label path entirely (only flags "teach" chunks it
+misreads — 3× oversampled by train_ctc `--teach-boost`). New label-side
+filter: **run inflation** (chunk runs > 1.5× the label's morse element
+count = a splatter shadow where v2 rightly squelched a strong neighbour —
+its fragment label would teach DROPPING real text; measured on F: <1.3 →
+0 % garbage, >2.0 → 94 %). Yield 5143 pairs (A–G + phaseB, 86 % teach)
+vs run4's 274. run5 = run3 + 20k steps at 25 % real: **held-out H CER
+0.25 vs run4 0.428; EA3BP 0.008 vs 0.016; noise transcription trained
+away** (run5 blanks what v2's squelch blanks — "PA4O TU 5NN 2" where
+run4 wrote "EEEAAOEEEIEX 5NN 2M"). **Blob data/cw-reader.bin = run5.**
+Margin gate recalibrated by measurement (`ml/margin_sweep.py`, 3-class:
+match/conflict/orphan vs v2 words from .chars): 6/3 stands (higher bars
+halve recall, conflict share barely moves); phaseB 6/3: 219 match / 93
+conflict vs run4's 228/214, and accepted orphans are REAL weak-signal
+words (TEST 198×, CQ, calls in the station tables), not babble. Two new
+defenses: **gated feed is default** (reader eats no dead-air runs — the
+hoisted v2 pause predicate; raw via SKIM_CW_READER_RAW=1; station tables
+bit-identical, 2.8× faster, half the candidates) and the **same-shape
+guard** (a word rewriting its whole draft span 1:1 with 1–2 chars
+changed is a confident wrong call — EA2KC over EA2CC, H7KA over EB7KA —
+fist corrections change length; draft stays, RRWORD tags MUT). binec:
+3 exact EA1EYL accepted (=run4), "EA1EYLL" rejected at min 0.51;
+9A170NT table identical reader on/off. 10 gates green. Known limit:
+conflicts where reader and v2 disagree at equal confidence remain
+(~50/600 s accepted, half are reader out-reading v2 fragments) — the
+phase-D witness/consensus design is the answer, not a bigger threshold.
+Reader stays **default OFF until Richard's live look** at the run5 pane.
 Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
 **v2 live session**, **tone splitter live session** (run the app with
 `SKIM_CW_V2=1 SKIM_TONE_SPLIT=1`). MASTER.SCP can go to

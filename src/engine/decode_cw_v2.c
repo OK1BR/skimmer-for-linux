@@ -224,6 +224,8 @@ typedef struct {
    * whole of it at the break (aux line). Pane only either way — the
    * extractor/spot path never sees reader text (hallucination guard). */
   gboolean rr_arm;
+  gboolean rr_gate;                     /* SKIM_CW_READER_GATE: no dead-air
+                                         * runs into the ring/stream (A/B)    */
   GArray  *rr_runs;                     /* RrRun ring of the current over     */
   SkimCwReaderStream *rr_stream;        /* v3 blobs only (lazy)               */
   gboolean rr_stream_no;                /* stream_new refused (v2 blob)       */
@@ -276,6 +278,10 @@ static gpointer cw2_channel_new(double sample_rate) {
    * and clears SKIM_CW_READER between connects. Weights stay cached in
    * rr_reader() once loaded; only the arming toggles. */
   st->rr_arm   = g_getenv("SKIM_CW_READER") != NULL && rr_reader() != NULL;
+  /* Dead-air gating is the DEFAULT reader diet (run5 A/B 2026-07-18: same
+   * or better on every regression, half the candidate words, 2.8× faster).
+   * SKIM_CW_READER_RAW=1 restores the raw feed for A/B analyses. */
+  st->rr_gate  = g_getenv("SKIM_CW_READER_RAW") == NULL;
   return st;
 }
 
@@ -365,15 +371,17 @@ static void rr_commit_stream(Cw2State *st, char *txt, guint *pos,
     st->hy_final = g_string_new(NULL);
     st->hy_fresh = g_string_new(NULL);
   }
-  /* Per-word confidence gate (logit margins, run4-calibrated — measured
-   * 2026-07-18 on the binec fist + a live 20 m contest capture): drivel —
-   * E/T babble, gap fusions — reads with soft, flickering posteriors
-   * (mean ~4, worst char ~0), real words with sharp ones (TEST 13+, exact
-   * calls 6-10). A word only replaces the draft when the net is SURE of
+  /* Per-word confidence gate (logit margins). Calibrated for run5 with
+   * ml/margin_sweep.py (labeled 3-class sweep against v2's .chars decode,
+   * phaseB live capture, 2026-07-18): 6/3 keeps 219 v2-exact words per
+   * 600 s against 93 conflicts (half of those are the reader out-reading
+   * a v2 fragment); higher bars halve the recall while barely moving the
+   * conflict share, and the same-shape guard below removes the worst of
+   * what remains. A word only replaces the draft when the net is SURE of
    * it, mean and worst char both; a rejected word's span keeps v2's draft
    * — the pane loses nothing, it just stays classical there. Rejected
    * babble whose span v2's squelch kept silent vanishes entirely. A new
-   * blob recalibrates these. */
+   * blob recalibrates these (rerun the sweep). */
 #define RR_MARG_MEAN 6.0f
 #define RR_MARG_MIN  3.0f
   gsize at = 0;
@@ -399,12 +407,6 @@ static void rr_commit_stream(Cw2State *st, char *txt, guint *pos,
     const gboolean sure = solid_chars >= 2 &&
                           sum / (double)wn >= RR_MARG_MEAN &&
                           lo >= RR_MARG_MIN;
-    if (g_getenv("SKIM_RR_DBG")) {
-      char *w = g_strndup(st->hy_word->str + at, wn);
-      fprintf(stderr, "RRWORD %.1f mean=%.2f min=%.2f %s |%s|\n",
-              st->freq_hz, sum / (double)wn, lo, sure ? "OK " : "REJ", w);
-      g_free(w);
-    }
     const guint seam_run =
         st->rr_base + g_array_index(st->hy_pos, guint, we - 1);
     guint64 T = G_MAXUINT64;                   /* runs wiped → cover all    */
@@ -418,7 +420,40 @@ static void rr_commit_stream(Cw2State *st, char *txt, guint *pos,
         st->ov_covered++;
       }
     }
-    if (sure) {
+    /* Same-shape guard (run5 margin sweep, phaseB capture): the mutation
+     * that SURVIVES the margin gate is a same-length substitution of a
+     * solid draft word ("EA2KC" over v2's EA2CC, min margin 5.4) — while a
+     * genuine fist correction changes length (torn gaps split chars, fused
+     * gaps merge them). A word that rewrites its whole draft span 1:1 with
+     * only 1-2 chars changed is a confident wrong call, not a fix — the
+     * draft stays. */
+    gboolean mut = FALSE;
+    if (sure && st->ov_txt && st->ov_covered > dv0) {
+      char  wb[64], db[64];
+      guint wl = 0, dl = 0;
+      for (gsize i = at; i < we && wl < sizeof wb; i++) {
+        if (st->hy_word->str[i] != ' ') { wb[wl++] = st->hy_word->str[i]; }
+      }
+      for (guint i = dv0; i < st->ov_covered && dl < sizeof db; i++) {
+        if (st->ov_txt->str[i] != ' ') { db[dl++] = st->ov_txt->str[i]; }
+      }
+      if (wl && wl == dl && wl < sizeof wb) {
+        guint diff = 0;
+        for (guint i = 0; i < wl; i++) { diff += wb[i] != db[i]; }
+        mut = diff >= 1 && diff <= 2;
+      }
+    }
+    if (g_getenv("SKIM_RR_DBG")) {
+      /* t_ms = end of the word's audio, sample clock — aligns an offline
+       * margin sweep against the .chars label dump. */
+      char *w = g_strndup(st->hy_word->str + at, wn);
+      fprintf(stderr, "RRWORD %.1f t=%.1f mean=%.2f min=%.2f %s |%s|\n",
+              st->freq_hz,
+              T == G_MAXUINT64 ? -1.0 : (double)T * 1000.0 / st->rate,
+              sum / (double)wn, lo, mut ? "MUT" : sure ? "OK " : "REJ", w);
+      g_free(w);
+    }
+    if (sure && !mut) {
       g_string_append_len(st->hy_final, st->hy_word->str + at, (gssize)wn);
       g_string_append_len(st->hy_fresh, st->hy_word->str + at, (gssize)wn);
     } else if (st->ov_txt && st->ov_covered > dv0) {
@@ -575,6 +610,41 @@ static void rd_emit(const Cw2State *st, gboolean key, double len) {
   fprintf(f, "%s %s %d %s\n", hz, tms, key ? 1 : 0, dur);
 }
 
+/* The decode's own text, char by char, into <SKIM_CW_DUMP_RUNS>.chars:
+ * "freq_hz t_ms ascii elem_err solid". Time is the end of the char's AUDIO
+ * (same sample clock as rd_emit), so a char aligns to the run stream
+ * exactly; elem_err/solid carry v2's own quality judgment at the commit.
+ * The offline harvest labels its chunks with these instead of a trivial
+ * re-decode — v2's squelch and lattice are the label's defenses. */
+static FILE *rd_char_file(void) {
+  static FILE *f;
+  static gsize once;
+  if (g_once_init_enter(&once)) {
+    const char *path = g_getenv("SKIM_CW_DUMP_RUNS");
+    if (path) {
+      char *p = g_strconcat(path, ".chars", NULL);
+      f = fopen(p, "w");
+      g_free(p);
+    }
+    g_once_init_leave(&once, TRUE);
+  }
+  return f;
+}
+
+static void rd_emit_char(const Cw2State *st, char c, guint64 t_end) {
+  FILE *f = rd_char_file();
+  if (!f)
+    return;
+  char hz[G_ASCII_DTOSTR_BUF_SIZE];
+  char tms[G_ASCII_DTOSTR_BUF_SIZE];
+  char er[G_ASCII_DTOSTR_BUF_SIZE];
+  g_ascii_formatd(hz, sizeof(hz), "%.1f", st->freq_hz);
+  g_ascii_formatd(tms, sizeof(tms), "%.1f", (double)t_end * 1000.0 / st->rate);
+  g_ascii_formatd(er, sizeof(er), "%.3f", st->elem_err);
+  const int solid = st->dit > 0 && st->marks_ok >= 8 && st->elem_err < 0.35;
+  fprintf(f, "%s %s %d %s %d\n", hz, tms, (int)(unsigned char)c, er, solid);
+}
+
 static void cw2_channel_free(gpointer state) {
   Cw2State *st = state;
   if (!st)
@@ -622,6 +692,7 @@ static void emit(Cw2State *st, SkimDecode *out, guint *pos, char c,
     return;
   out->text[(*pos)++] = c;
   out->text[*pos] = '\0';
+  if (st->rd_on) { rd_emit_char(st, c, t_end); }
   if (!st->rr_arm)
     return;
   if (!st->ov_txt) {
@@ -1028,6 +1099,16 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
       st->keying = FALSE;
     }
 
+    /* Dead air by v2's own judgment (the pause predicate below, hoisted):
+     * envelope gate shut with no solid discriminator to ride a dip, or no
+     * keying duty on a channel that never proved itself. */
+    const gboolean solid =
+        st->dit > 0 && st->marks_ok >= 8 && st->elem_err < 0.35;
+    const gboolean mu_alive =
+        st->active && st->mu_m > 3.0 * st->mu_s;
+    const gboolean dead =
+        (!st->gate_open && !(solid && mu_alive)) || (!st->keying && !solid);
+
     if (st->rd_on || st->rr_arm) {
       /* Run keyer: sees EVERY sample (before gate/pause early-exits), so the
        * corpus/reader keeps what the decode path may throw away. */
@@ -1050,7 +1131,10 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
       st->rd_run += 1.0;
       if (st->rd_pend_valid && st->rd_run > 3.0) {
         if (st->rd_on) { rd_emit(st, st->rd_pend_key, st->rd_pend_len); }
-        if (st->rr_arm) {
+        /* Gated feed: the reader eats only what v2 itself would — dead-air
+         * runs (noise before the squelch opens, splatter shadows) stay out
+         * of the ring and the stream. The corpus dump above stays raw. */
+        if (st->rr_arm && !(st->rr_gate && dead)) {
           if (!st->rr_runs) {
             st->rr_runs = g_array_new(FALSE, FALSE, sizeof(RrRun));
           }
@@ -1078,17 +1162,12 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
       }
     }
 
-    const gboolean solid =
-        st->dit > 0 && st->marks_ok >= 8 && st->elem_err < 0.35;
     /* Deep QSB pulls faded marks under the envelope midpoint, feeds them
      * to env_lo and slams the envelope gate shut mid-callsign (v1 tears
      * "9A170NT" apart exactly this way). The µ discriminator knows better:
      * in a trough µ_m/µ_s stays ≫ the 1.5 floor it collapses to on noise —
      * a SOLID channel with a live discriminator rides the dip out. */
-    const gboolean mu_alive =
-        st->active && st->mu_m > 3.0 * st->mu_s;
-    if ((!st->gate_open && !(solid && mu_alive)) ||
-        (!st->keying && !solid)) {
+    if (dead) {
       if (solid || st->nboot) {
         if (!st->paused) {
           CW2_DBG("[pause t=%lu gate=%d keying=%d solid=%d marks=%u err=%.2f "

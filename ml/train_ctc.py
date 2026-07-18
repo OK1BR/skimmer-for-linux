@@ -130,12 +130,15 @@ def cer(hyp, ref):
         prev = cur
     return prev[-1] / len(ref)
 
-def load_real(paths):
-    """Consensus-labeled real pairs (ml/harvest_real.py) -> [(runs, text)]."""
+def load_real(paths, teach_boost=1):
+    """v2-labeled real pairs (ml/harvest_real.py) -> [(runs, text)].
+    Chunks the harvest flagged "teach" (the reader model misread them —
+    its systematic errors) enter the pool teach_boost times."""
     out = []
     for p in paths:
         for e in json.load(open(p)):
-            out.append(([(k, d) for k, d in e["runs"]], e["text"]))
+            n = teach_boost if e.get("teach") else 1
+            out.extend([([(k, d) for k, d in e["runs"]], e["text"])] * n)
     return out
 
 def make_batch(rng, n, max_runs=320, real=None, real_frac=0.0):
@@ -211,6 +214,8 @@ def main():
     ap.add_argument("--real-frac", type=float, default=0.25)
     ap.add_argument("--real-val", action="append", default=[],
                     help="held-out real json — CER reported at every eval")
+    ap.add_argument("--teach-boost", type=int, default=3,
+                    help="oversampling factor for harvest 'teach' pairs")
     ap.add_argument("--threads", type=int, default=4)   # small LSTM: more
     a = ap.parse_args()                                  # threads = lock churn
     os.makedirs(a.out, exist_ok=True)
@@ -225,7 +230,7 @@ def main():
     if a.resume and os.path.exists(f"{a.out}/model.pt"):
         model.load_state_dict(torch.load(f"{a.out}/model.pt"))
         print("resumed")
-    real = load_real(a.real)
+    real = load_real(a.real, teach_boost=a.teach_boost)
     rval = load_real(a.real_val)
     if real or rval:
         print(f"real pairs: train {len(real)}, val {len(rval)}")
