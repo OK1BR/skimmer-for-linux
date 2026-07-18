@@ -542,32 +542,38 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
       FreqLock *L = &p->flock[SL(c, h->slot)];
       const gint64 tnow = g_get_monotonic_time();
       if (L->hz > 0 && tnow - L->at > FLOCK_TTL_US) { L->hz = 0; }
-      if (L->hz > 0 && fabs(raw_hz - L->hz) <= FLOCK_WIN_HZ) {
-        L->hz += 0.1 * (raw_hz - L->hz);
-      } else {
-        L->hz = raw_hz;
-        const double win = (p->split && p->split[c] &&
-                            skim_tone_split_slots(p->split[c]) > 1)
-                               ? 15.0 : FLOCK_ADOPT_HZ;
-        const gint M = (gint)p->nchan;
-        const gint k = (c <= p->nchan / 2) ? (gint)c : (gint)c - M;
-        double best = win;
-        for (gint s = -2; s <= 2; s++) {
-          if (s == 0)
-            continue;
-          const guint cn = (guint)(((k + s) % M + M) % M);
-          for (guint j = 0; j < NSLOT; j++) {
-            const FreqLock *N = &p->flock[SL(cn, j)];
-            if (N->hz > 0 && tnow - N->at <= FLOCK_TTL_US &&
-                fabs(N->hz - raw_hz) <= best) {
-              best  = fabs(N->hz - raw_hz);
-              L->hz = N->hz;                   /* same tone, keep its pin    */
+      /* Aux-only hits (reader text, no decode) carry NO tone measurement —
+       * their eff_off is a zeroed placeholder, and letting them into the
+       * lock dragged a pin toward the channel centre one word at a time
+       * once the reader streamed (EA7JQA drifted 20 Hz in one replay). */
+      if (d.text[0]) {
+        if (L->hz > 0 && fabs(raw_hz - L->hz) <= FLOCK_WIN_HZ) {
+          L->hz += 0.1 * (raw_hz - L->hz);
+        } else {
+          L->hz = raw_hz;
+          const double win = (p->split && p->split[c] &&
+                              skim_tone_split_slots(p->split[c]) > 1)
+                                 ? 15.0 : FLOCK_ADOPT_HZ;
+          const gint M = (gint)p->nchan;
+          const gint k = (c <= p->nchan / 2) ? (gint)c : (gint)c - M;
+          double best = win;
+          for (gint s = -2; s <= 2; s++) {
+            if (s == 0)
+              continue;
+            const guint cn = (guint)(((k + s) % M + M) % M);
+            for (guint j = 0; j < NSLOT; j++) {
+              const FreqLock *N = &p->flock[SL(cn, j)];
+              if (N->hz > 0 && tnow - N->at <= FLOCK_TTL_US &&
+                  fabs(N->hz - raw_hz) <= best) {
+                best  = fabs(N->hz - raw_hz);
+                L->hz = N->hz;                 /* same tone, keep its pin    */
+              }
             }
           }
         }
+        L->at = tnow;
       }
-      L->at = tnow;
-      const double sig_hz = L->hz;
+      const double sig_hz = L->hz > 0 ? L->hz : raw_hz;
       if (p->dlog) {
         char tbuf[24];
         if (p->offline) {                    /* stream time — deterministic  */
