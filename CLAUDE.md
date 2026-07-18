@@ -183,8 +183,12 @@ tables were speed-contaminated (44× vs 5× lost a third of the table to
 wall-clock flock expiry); verified line-identical on contest block F.
 **Coalescing soak: 74 min contest load, responsive, clean exit** (the
 old build froze at ~75 min — watch one more long live session).
-IQ corpus: 10 recordings + 20 m contest blocks A–H (600 s each,
-2026-07-18) in ~/.local/share/skimmer-for-linux/iq/.
+IQ corpus: DELETED 2026-07-19 at Richard's explicit, informed request
+(12 GB; the warning that off-air captures are unrepeatable and carry
+the hand-truthed validation cases was given and he chose full
+deletion). Decoder improvements are validated LIVE or on freshly
+recorded captures (`skimmer-tci-probe <host> <port> <rate> <secs>
+<dump.cf32>` records a new one in minutes).
 **Phase B — hybrid pane, draft → final (offline-proven 2026-07-18 late).**
 Richard picked the UX: v2 writes the pane live per char; reader word
 commits rewrite the over IN PLACE (continuous text — the streamed aux
