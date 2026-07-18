@@ -88,6 +88,31 @@ duration priors, the lattice search windows and the live-emission clocks
 together; forgetting the dit clock forgets the spacing with it. Converges
 within one CQ call.
 
+### A clock that jumps — QSO turnarounds
+
+A per-mark EMA is the textbook dit tracker, and it has a textbook failure:
+the **other side of a QSO comes back at their own speed**. Within the short
+turnaround gap the fist memory rightly survives, so the new over rides a
+stale clock — and past the 2-dit class boundary the EMA is not just slow,
+it is pulled the **wrong way**: a slower op's dits classify as clean dahs,
+the per-element error stays low, and the misread is self-consistent (live
+on 40 m, an entire ragchew over degenerated before the watchdog caught it).
+
+So the clock doesn't glide, it **re-locks**: a ring of recent raw mark
+durations is re-clustered with the bootstrap's own splitter on every
+commit, and a bimodal ring whose dit cluster leaves the ±25 % band is a
+*new speed*, adopted in one jump. A dit-only stretch is genuinely
+ambiguous ("EEE" at one speed *is* "TTT" at a third of it) — there the
+**spaces testify**: element gaps run 1:1 with dits but 1:3 with dahs, so
+the smallest space class with three consistent members settles which class
+the marks are. Not the minimum (a torn dah drops glitch-length spaces
+below the real gaps) and not the median (dah-heavy text holds more char
+gaps than element gaps and flips it). Loose clusters never jump — that is
+a ragged fist, not a speed change — and matching one-class watchdogs
+(16 dahs / 24 dits) re-bootstrap the rare read that still wedges. On a
+recorded 20 m QSO pair sharing one frequency, the re-lock multiplied
+decoded reports from the turnaround-heavy side sevenfold.
+
 ### A tone splitter — two stations in one channel
 
 Two stations closer than ~60 Hz land in one 125 Hz channel. Their envelopes

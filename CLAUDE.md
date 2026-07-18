@@ -330,9 +330,17 @@ Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
 `SKIM_CW_V2=1 SKIM_TONE_SPLIT=1`). MASTER.SCP can go to
 `~/.config/skimmer-for-linux/master.scp` (the app loads it if present).
 **Release: Richard decided 2026-07-18 — tag v0.1.0 only AFTER his live
-validation session** (v2 + splitter + one more soak), then default
-flips + release. Next: phase B (model owns pane text on solid channels,
-v2 keeps weak); RTTY/PSK backends.
+validation session** (v2 + relock + splitter + one more soak), then
+default flips + release. **Direction (Richard, 2026-07-19): better
+SIGNAL decoding, classically — "AI je mrtvá cesta."** Candidate levers,
+best first: (1) tone-coherent second-stage filtering — the channel is
+125 Hz but a CW signal is ~50 Hz and we already track its exact offset
+(freq locks + phase-slope foff): a narrow filter riding the lock buys
+real dB exactly where stations are lost today; (2) M3 off-air A/B vs
+CW Skimmer/fldigi to MEASURE where we lose; (3) torn-dah merge
+hypotheses in the v2 lattice (QSK chop: 32+8+26 splits seen all over
+the live captures); (4) RTTY/PSK backends; (5) sub-20 Hz joint demod
+for contested slots (far). 
 
 ## Layout
 

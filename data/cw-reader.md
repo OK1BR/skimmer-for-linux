@@ -1,14 +1,23 @@
-# cw-reader.bin — the neural CW reader weights (CWRD v3)
+# cw-reader.bin — the neural CW reader weights (CWRD v3, OFFLINE ONLY)
 
-The in-repo blob the app loads when the **Preferences → CW reader** switch
-is on (default OFF — a plain launch never arms the reader; the decode pane
-belongs to the operator's ear). `SKIM_CW_READER=<path>` still overrides for
-offline analyses. DISPLAY ONLY either way: reader text reaches the pane and
-the decode log as aux lines, never the extractor/spot path.
+**The app does not load this — decoding is classical (decode_cw_v2 +
+clock re-lock + tone splitter).** The live verdict (2026-07-19, after two
+trained generations, margin calibration, dead-air gating and the
+same-shape guard): the reader's confident rewrites degraded more text v2
+had decoded correctly than they fixed, so the neural path was removed
+from the app entirely — no Preferences switch, no arming. The pane shows
+v2's decode, full stop.
+
+What remains is research material: `SKIM_CW_READER=<path>` arms the
+reader in OFFLINE replay analyses only (`skimmer-replay`), where it never
+touched the extractor/spot path to begin with. Whether this blob and the
+neural sources stay in the tree at all is a pending explicit decision —
+git history keeps them either way.
 
 Format: `ml/export_c.py` blob v3 (per-layer bounded lookahead, streaming) —
 loaded by `src/engine/cw_reader.c`. The `cw-reader` gate runs its torch
-parity + stream==batch checks against THIS file on every `meson test`.
+parity + stream==batch checks against THIS file on every `meson test`
+(keeping the dormant code honest while it exists).
 
 ## Provenance — run5, 2026-07-18 (late)
 
