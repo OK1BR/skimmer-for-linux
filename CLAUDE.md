@@ -285,6 +285,30 @@ conflicts where reader and v2 disagree at equal confidence remain
 (~50/600 s accepted, half are reader out-reading v2 fragments) — the
 phase-D witness/consensus design is the answer, not a bigger threshold.
 Reader stays **default OFF until Richard's live look** at the run5 pane.
+**Clock re-lock — fast WPM adaptation (live-driven 2026-07-18 night,
+Richard: "adapt the WPM faster instead of inferring meaning with the
+model").** Both backends: ring of recent raw mark durations re-clustered
+boot-style on every commit (`clock_push`) — a BIMODAL ring whose low
+cluster leaves the ±(20/25) % band is a new speed: JUMP the dit, don't
+glide (the per-mark EMA is pulled the WRONG way past the 2-dit class
+boundary — self-consistently, elem_err stays low). Unimodal rings
+(dits-or-dahs ambiguous) resolve via the SPACE ring: the smallest space
+class with ≥3 members within 1.5× = the element gap; marks 1:1 with it
+are dits, ≥2.2:1 are dahs (est/3). NOT the min (torn-dah glitch pairs
+sit under it) and NOT the median (dah-heavy "MM DE UB7M" flips it to
+char gaps — jumped a clean 24 WPM clock 3× up, replay-caught).
+clk_est sheds one outlier (a torn-dah fragment); looser clusters are a
+FIST, not a speed (σ0.2 jitter false-jumped the pane gate). Rings clear
+at over breaks/pauses (the next over re-locks on ITS marks alone) —
+and the CLEAR MUST RESET THE HEADS: n=0 with a rotated head made evals
+read stale slots (the whole family of "one char late" mysteries).
+v2 adds the mirror clock-lost watchdog (24 dits, no dah — a wrong
+up-jump reads everything as dits and self-confirms). Gate: cw-test
+"QSO turnaround" (18→30 + 26→14 across a 3 s gap, whole-over
+last_over_dist ≤3 incl. the "VVV" warmup gen_env really keys). Real
+A/B: 20 m QSO pair CT3KN/CT3D same-freq — 53 → 365 reports; binec
+NU3EQ→RU3EQ (first char fixed); oper/UB7M/R1AL/9A170NT tables intact
++ OH2BO newly tracked; EA1EYL/EA3BP untouched; 10 gates green.
 Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
 **v2 live session**, **tone splitter live session** (run the app with
 `SKIM_CW_V2=1 SKIM_TONE_SPLIT=1`). MASTER.SCP can go to

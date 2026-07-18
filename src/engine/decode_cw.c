@@ -66,6 +66,8 @@ static void morse_init(void) {
 /* --- per-channel state ------------------------------------------------------ */
 
 #define BOOT_MARKS 8            /* marks buffered while the dit is unlearned  */
+#define CLK_RING 6              /* re-lock ring: raw mark durations           */
+#define CLK_HOLD 3              /* marks between clock jumps                  */
 
 /* A space this many dits long ends the TRANSMISSION (over), not just a word
  * (~2× the nominal 7-dit word space): the decoder emits "· " (UTF-8 middle
@@ -117,6 +119,11 @@ typedef struct {
   double prev_i, prev_q;
   double foff_hz;               /* EMA of the in-channel tone offset          */
   double elem_err;              /* EMA of |run − ideal|/ideal                 */
+
+  float  clk[CLK_RING];         /* last raw mark durations (clock re-lock)    */
+  guint  clk_n, clk_head, clk_hold;
+  float  clk_sp[CLK_RING];      /* last raw space durations (dit/dah witness) */
+  guint  clk_sp_n, clk_sp_head;
 } CwState;
 
 static gpointer cw_channel_new(double sample_rate) {
@@ -140,6 +147,8 @@ static void assembly_reset(CwState *st) {
   st->marks_ok = 0;
   st->dit = 0;
   st->nboot = 0;
+  st->clk_n = st->clk_sp_n = st->clk_head = st->clk_sp_head =
+      st->clk_hold = 0;
   st->char_out = st->word_out = TRUE;   /* no leading space on next signal    */
   st->overlong = FALSE;
 }
@@ -153,6 +162,9 @@ static void assembly_pause(CwState *st) {
   st->nelem = 0;
   st->char_out = st->word_out = TRUE;
   st->overlong = FALSE;
+  st->clk_n = st->clk_sp_n = st->clk_head = st->clk_sp_head =
+      st->clk_hold = 0;  /* next over re-locks on ITS
+                                                 * marks alone               */
 }
 
 static void emit(SkimDecode *out, guint *pos, char c) {
@@ -187,6 +199,124 @@ static void emit_code(CwState *st, SkimDecode *out, guint *pos) {
   st->nelem = 0;
 }
 
+/* Clock re-lock (v2's clock_push, copied — the backends stay independent):
+ * the per-mark EMA glides, a QSO turnaround does not. The OTHER op comes
+ * back inside the pause window at his own speed and the whole first word
+ * rides a stale clock — worse, past the 2-dit class boundary the misread
+ * marks pull the EMA the WRONG way, self-consistently. Re-run the
+ * bootstrap's clustering over a ring of recent raw marks: a bimodal ring
+ * whose low cluster disagrees with the clock by >30 % is a new speed —
+ * JUMP. Unimodal rings only jump while elem_err shows the clock failing
+ * (dit-only text reads clean and must not). Gate: cw-test "QSO turnaround". */
+
+
+/* Robust cluster mean: tight (max ≤ 1.5×min) = trustworthy speed evidence;
+ * one outlier (a torn-dah fragment) may be shed and the rest retried —
+ * looser than that is a FIST, not a speed (σ0.2 jitter false-jumped the
+ * pane gate), and yields no estimate. */
+static gboolean clk_est(const float *v, guint n, double *est) {
+  float s[CLK_RING];
+  memcpy(s, v, n * sizeof(float));
+  for (guint i = 1; i < n; i++) {
+    float x = s[i];
+    guint j = i;
+    while (j > 0 && s[j - 1] > x) { s[j] = s[j - 1]; j--; }
+    s[j] = x;
+  }
+  guint m = n;
+  if (s[m - 1] > 1.5f * s[0]) {
+    if (n < 4 || s[n - 2] > 1.5f * s[0])
+      return FALSE;
+    m = n - 1;                           /* shed the lone outlier            */
+  }
+  double sum = 0.0;
+  for (guint i = 0; i < m; i++) { sum += s[i]; }
+  *est = sum / m;
+  return TRUE;
+}
+
+static void clock_space(CwState *st, double d) {
+  st->clk_sp[st->clk_sp_head++ % CLK_RING] = (float)d;
+  if (st->clk_sp_n < CLK_RING) { st->clk_sp_n++; }
+}
+
+static void clock_push(CwState *st, double d) {
+  st->clk[st->clk_head++ % CLK_RING] = (float)d;
+  if (st->clk_n < CLK_RING) { st->clk_n++; }
+  if (st->clk_hold) { st->clk_hold--; }
+  if (st->clk_n < 4 || st->clk_hold || st->dit <= 0)
+    return;                     /* 4 marks + the space witness already decide */
+  float lo = st->clk[0], hi = st->clk[0];
+  for (guint i = 1; i < st->clk_n; i++) {
+    lo = MIN(lo, st->clk[i]);
+    hi = MAX(hi, st->clk[i]);
+  }
+  double est;
+  if (hi >= 2.0f * lo) {                    /* dits AND dahs in the ring     */
+    const float mid = 0.5f * (lo + hi);
+    float cl[CLK_RING];
+    guint cnt = 0;
+    for (guint i = 0; i < st->clk_n; i++) {
+      if (st->clk[i] < mid) { cl[cnt++] = st->clk[i]; }
+    }
+    if (cnt < 3 || !clk_est(cl, cnt, &est))
+      return;
+  } else {
+    if (!clk_est(st->clk, st->clk_n, &est))
+      return;
+    /* A unimodal ring is dits-or-dahs ambiguous, and the nasty turnaround
+     * reads the new op's dits as PERFECT dahs (elem_err never rises — the
+     * live 40 m trap). The SPACES break the tie: element gaps run 1:1 with
+     * dits but 1:3 with dahs, so the smallest recent space is the witness. */
+    if (st->clk_sp_n >= 3) {
+      /* The ELEMENT-GAP class of the space ring: sort, then the smallest
+       * class with ≥3 members within 1.5× of its floor. Not the min (a
+       * torn dah drops glitch pairs under the real gaps) and not the
+       * median (a dah-heavy stretch — "MM DE UB7M" — holds more char gaps
+       * than element gaps, the median flips class and the witness jumped a
+       * clean 24 WPM clock 3× up; live-replay-caught). */
+      float sp[CLK_RING];
+      memcpy(sp, st->clk_sp, st->clk_sp_n * sizeof(float));
+      for (guint i = 1; i < st->clk_sp_n; i++) {
+        float v = sp[i];
+        guint j = i;
+        while (j > 0 && sp[j - 1] > v) { sp[j] = sp[j - 1]; j--; }
+        sp[j] = v;
+      }
+      float egap = 0.0f;
+      for (guint i = 0; i + 2 < st->clk_sp_n; i++) {
+        if (sp[i + 2] <= 1.5f * sp[i]) {   /* three members = a real class  */
+          double s = 0.0;
+          guint  c = 0;
+          for (guint j = i; j < st->clk_sp_n && sp[j] <= 1.5f * sp[i]; j++) {
+            s += sp[j];
+            c++;
+          }
+          egap = (float)(s / c);
+          break;
+        }
+      }
+      if (egap <= 0.0f)
+        return;
+      const double r = est / egap;
+      if (r > 2.2) {
+        est /= 3.0;                    /* dahs riding element gaps           */
+      } else if (r >= 1.6) {
+        return;                        /* between classes — no verdict       */
+      }
+    } else if (st->elem_err <= 0.30) {
+      return;
+    }
+  }
+  if (est > 0.80 * st->dit && est < 1.25 * st->dit)
+    return;
+  CW_DBG("[clock relock %.1f -> %.1f (err %.2f)]\n", st->dit, est,
+         st->elem_err);
+  st->dit      = CLAMP(est, st->rate * 0.022, st->rate * 0.30);
+  st->elem_err = 0.2;
+  st->clk_hold = CLK_HOLD;
+}
+
 /* A mark run ended: classify it as dot/dash and refine the dit clock. */
 static void classify_mark(CwState *st, double run) {
   if (st->dit <= 0) {
@@ -218,6 +348,7 @@ static void classify_mark(CwState *st, double run) {
   /* Lower dit bound = 55 WPM. Nobody CQs faster; every "80 WPM" trace on
    * the 2026-07-15 contest sample was noise riding the old 0.015 clamp. */
   st->dit       = CLAMP(st->dit, st->rate * 0.022, st->rate * 0.30);
+  clock_push(st, run);
   st->marks_ok++;
   if (st->nelem < 7) {
     st->code  = (st->nelem ? st->code : 1u) << 1 | (dash ? 1u : 0u);
@@ -380,6 +511,9 @@ static gboolean cw_process(gpointer state, const float *iq, guint nframes,
         st->overlong = FALSE;
       } else {
         st->last_space = st->pend_len; /* the space before the current mark  */
+        if (st->dit > 0 && st->pend_len < 5.5 * st->dit) {
+          clock_space(st, st->pend_len);   /* element/char gap — re-lock witness */
+        }
       }
       st->pend_valid = FALSE;
     }
@@ -409,6 +543,11 @@ static gboolean cw_process(gpointer state, const float *iq, guint nframes,
       if (!st->brk_out && st->word_out && st->run > BREAK_DITS * st->dit) {
         st->brk_out = TRUE;                    /* over ended — separator     */
         emit_str(out, &pos, BREAK_MARK);
+        /* The next over may be the OTHER op of a QSO — the re-lock rings
+         * must weigh HIS marks alone (a solid channel skips the pause on a
+         * short turnaround gap, so the pause-side clear never fires). */
+        st->clk_n = st->clk_sp_n = st->clk_head = st->clk_sp_head =
+      st->clk_hold = 0;
       }
     }
   }

@@ -176,6 +176,42 @@ static char *run_decoder(GArray *env, double foff, double snr_db,
 
 /* --- fuzzy matching ----------------------------------------------------------- */
 
+/* Full Levenshtein of `pat` against the LAST over in `txt` (the text after
+ * the final "·" separator, trimmed). Unlike fuzzy_dist the prefix is NOT
+ * free — a stale clock that explodes the over's first word into a dozen
+ * phantom chars must show up in the distance. */
+static int last_over_dist(const char *txt, const char *pat) {
+  const char *seg = txt;
+  for (const char *p = txt; *p; p++) {
+    if ((unsigned char)p[0] == 0xC2 && (unsigned char)p[1] == 0xB7) {
+      const char *q = p + 2;
+      while (*q == ' ') { q++; }
+      if (*q) { seg = q; }                 /* last separator with content   */
+    }
+  }
+  while (*seg == ' ') { seg++; }
+  char *s = g_strdup(seg);
+  char *cut = strstr(s, "\xC2\xB7");     /* the over ends at the next mark  */
+  if (cut) { *cut = '\0'; }
+  g_strchomp(s);
+  size_t n = strlen(s), m = strlen(pat);
+  int *dp = g_new(int, n + 1), *nx = g_new(int, n + 1);
+  for (size_t j = 0; j <= n; j++) { dp[j] = (int)j; }
+  for (size_t i = 1; i <= m; i++) {
+    nx[0] = (int)i;
+    for (size_t j = 1; j <= n; j++) {
+      int sub = dp[j - 1] + (pat[i - 1] != s[j - 1]);
+      nx[j] = MIN(sub, MIN(dp[j] + 1, nx[j - 1] + 1));
+    }
+    memcpy(dp, nx, (n + 1) * sizeof(int));
+  }
+  int d = dp[n];
+  g_free(dp);
+  g_free(nx);
+  g_free(s);
+  return d;
+}
+
 /* Levenshtein distance of `pat` against the best-matching substring of `txt`
  * (free prefix/suffix — the classic fuzzy substring DP). */
 static int fuzzy_dist(const char *txt, const char *pat) {
@@ -271,6 +307,47 @@ static void run_suite(const SkimDecodeBackend *cw) {
     g_array_free(a, TRUE);
     g_array_free(b, TRUE);
     g_free(got);
+  }
+
+  /* -- QSO turnaround: the OTHER op comes back on the same channel -------------
+   * A short pause (< the 8 s fist-forget) keeps the first op's dit, so the
+   * second over starts on a stale clock. A speed-UP is the nastier
+   * direction: the new op's dahs sit under the 2-dit class boundary and
+   * read as dits, so the plain EMA is pulled the WRONG way (live 40 m,
+   * 2026-07-18 — WPM adaptation must re-lock fast, no model involved).
+   * The bar: the second over must copy from its second word on. */
+  {
+    static const struct { double wpm_a, wpm_b; } TURN[] = {
+      { 18, 30 }, { 26, 14 },
+    };
+    GRand *trng = g_rand_new_with_seed(20260718);  /* own stream — the shared
+                                                    * rng feeds later tests   */
+    for (guint c = 0; c < G_N_ELEMENTS(TURN); c++) {
+      GArray *a = gen_env("CQ TEST DE OK1BR OK1BR K", TURN[c].wpm_a,
+                          RATE, 0, trng);
+      GArray *b = gen_env("R R UR 5NN 5NN TU OK1BR K", TURN[c].wpm_b,
+                          RATE, 0, trng);
+      float z = 0.0f;
+      for (guint i = 0; i < (guint)(3.0 * RATE); i++) {
+        g_array_append_val(a, z);
+      }
+      g_array_append_vals(a, b->data, b->len);
+      got = run_decoder(a, 18.0, 30.0, 0, 0, trng, &last);
+      char what[80];
+      g_snprintf(what, sizeof(what),
+                 "QSO turnaround %.0f → %.0f WPM re-locks (whole over ≤3)",
+                 TURN[c].wpm_a, TURN[c].wpm_b);
+      show("turnaround:", got);
+      /* The WHOLE second over against the WHOLE keyed audio (gen_env
+       * prepends a "VVV " warmup), garbage insertions included — a stale
+       * clock that explodes the opening into a dozen phantom chars must
+       * fail here, a clean copy of the warmup must not. */
+      check(what, last_over_dist(got, "VVV R R UR 5NN 5NN TU OK1BR K") <= 3);
+      g_array_free(a, TRUE);
+      g_array_free(b, TRUE);
+      g_free(got);
+    }
+    g_rand_free(trng);
   }
 
   /* -- SQUELCH: pure noise must emit nothing ----------------------------------- */

@@ -118,6 +118,8 @@ enum { K_MARK, K_SPACE, K_EITHER };
  * which move the duration priors, the lattice search windows and the
  * live-emission clocks together. The centres reset with the dit clock —
  * fist forgotten, spacing forgotten. */
+#define CLK_RING 6                      /* re-lock ring: raw mark durations   */
+#define CLK_HOLD 3                      /* marks between clock jumps          */
 #define FIST_RING    24
 #define FIST_MIN_D   1.6                /* below: element space, not a gap    */
 #define FIST_REFIT   4                  /* refit every this many new gaps     */
@@ -162,6 +164,11 @@ typedef struct {
   double elem_err;                      /* EMA of |d − ideal|/ideal           */
   guint  marks_ok;
   guint  dah_streak;                    /* committed dahs since the last dit  */
+  guint  dit_streak;                    /* committed dits since the last dah  */
+  float  clk[CLK_RING];                 /* last raw mark durations (samples)  */
+  guint  clk_n, clk_head, clk_hold;     /* re-lock ring (clock_push)          */
+  float  clk_sp[CLK_RING];              /* last raw space durations (witness) */
+  guint  clk_sp_n, clk_sp_head;
 
   /* --- soft discriminator ---------------------------------------------------- */
   double mu_m, mu_s;                    /* mark / space level trackers        */
@@ -920,6 +927,127 @@ static void lattice_head(const Cw2State *st, guint64 *out_tau,
   *out_mark_ended = mark_ended;
 }
 
+/* --- clock re-lock ---------------------------------------------------------------
+ * The per-mark EMA glides — a QSO turnaround does not (live 40 m,
+ * 2026-07-18: the OTHER op comes back inside the 8 s fist-forget window at
+ * his own speed, and the whole first word rides a stale clock; worse, past
+ * the 2-dit class boundary the misread marks pull the EMA the WRONG way,
+ * self-consistently). So keep a ring of the last raw mark durations and
+ * re-run the bootstrap's own clustering over it on every commit: a BIMODAL
+ * ring whose low cluster disagrees with the clock by >30 % is a new speed,
+ * proven structurally — JUMP, do not glide. A unimodal ring is ambiguous
+ * (dit-only text reads clean) and may only jump while the clock visibly
+ * fails (elem_err), interpreted as dits — the dah-streak watchdog remains
+ * the backstop for the all-dah read. Gate: cw-test "QSO turnaround". */
+
+
+/* Robust cluster mean: tight (max ≤ 1.5×min) = trustworthy speed evidence;
+ * one outlier (a torn-dah fragment) may be shed and the rest retried —
+ * looser than that is a FIST, not a speed (σ0.2 jitter false-jumped the
+ * pane gate), and yields no estimate. */
+static gboolean clk_est(const float *v, guint n, double *est) {
+  float s[CLK_RING];
+  memcpy(s, v, n * sizeof(float));
+  for (guint i = 1; i < n; i++) {
+    float x = s[i];
+    guint j = i;
+    while (j > 0 && s[j - 1] > x) { s[j] = s[j - 1]; j--; }
+    s[j] = x;
+  }
+  guint m = n;
+  if (s[m - 1] > 1.5f * s[0]) {
+    if (n < 4 || s[n - 2] > 1.5f * s[0])
+      return FALSE;
+    m = n - 1;                           /* shed the lone outlier            */
+  }
+  double sum = 0.0;
+  for (guint i = 0; i < m; i++) { sum += s[i]; }
+  *est = sum / m;
+  return TRUE;
+}
+
+static void clock_space(Cw2State *st, double d) {
+  st->clk_sp[st->clk_sp_head++ % CLK_RING] = (float)d;
+  if (st->clk_sp_n < CLK_RING) { st->clk_sp_n++; }
+}
+
+static void clock_push(Cw2State *st, double d) {
+  st->clk[st->clk_head++ % CLK_RING] = (float)d;
+  if (st->clk_n < CLK_RING) { st->clk_n++; }
+  if (st->clk_hold) { st->clk_hold--; }
+  if (st->clk_n < 4 || st->clk_hold || st->dit <= 0)
+    return;                     /* 4 marks + the space witness already decide */
+  float lo = st->clk[0], hi = st->clk[0];
+  for (guint i = 1; i < st->clk_n; i++) {
+    lo = MIN(lo, st->clk[i]);
+    hi = MAX(hi, st->clk[i]);
+  }
+  double est;
+  if (hi >= 2.0f * lo) {                    /* dits AND dahs in the ring     */
+    const float mid = 0.5f * (lo + hi);
+    float cl[CLK_RING];
+    guint cnt = 0;
+    for (guint i = 0; i < st->clk_n; i++) {
+      if (st->clk[i] < mid) { cl[cnt++] = st->clk[i]; }
+    }
+    if (cnt < 3 || !clk_est(cl, cnt, &est))
+      return;
+  } else {
+    if (!clk_est(st->clk, st->clk_n, &est))
+      return;
+    /* A unimodal ring is dits-or-dahs ambiguous, and the nasty turnaround
+     * reads the new op's dits as PERFECT dahs (elem_err never rises — the
+     * live 40 m trap). The SPACES break the tie: element gaps run 1:1 with
+     * dits but 1:3 with dahs, so the smallest recent space is the witness. */
+    if (st->clk_sp_n >= 3) {
+      /* The ELEMENT-GAP class of the space ring: sort, then the smallest
+       * class with ≥3 members within 1.5× of its floor. Not the min (a
+       * torn dah drops glitch pairs under the real gaps) and not the
+       * median (a dah-heavy stretch — "MM DE UB7M" — holds more char gaps
+       * than element gaps, the median flips class and the witness jumped a
+       * clean 24 WPM clock 3× up; live-replay-caught). */
+      float sp[CLK_RING];
+      memcpy(sp, st->clk_sp, st->clk_sp_n * sizeof(float));
+      for (guint i = 1; i < st->clk_sp_n; i++) {
+        float v = sp[i];
+        guint j = i;
+        while (j > 0 && sp[j - 1] > v) { sp[j] = sp[j - 1]; j--; }
+        sp[j] = v;
+      }
+      float egap = 0.0f;
+      for (guint i = 0; i + 2 < st->clk_sp_n; i++) {
+        if (sp[i + 2] <= 1.5f * sp[i]) {   /* three members = a real class  */
+          double s = 0.0;
+          guint  c = 0;
+          for (guint j = i; j < st->clk_sp_n && sp[j] <= 1.5f * sp[i]; j++) {
+            s += sp[j];
+            c++;
+          }
+          egap = (float)(s / c);
+          break;
+        }
+      }
+      if (egap <= 0.0f)
+        return;
+      const double r = est / egap;
+      if (r > 2.2) {
+        est /= 3.0;                         /* dahs riding element gaps      */
+      } else if (r >= 1.6) {
+        return;                             /* between classes — no verdict  */
+      }
+    } else if (st->elem_err <= 0.30) {
+      return;
+    }
+  }
+  if (est > 0.80 * st->dit && est < 1.25 * st->dit)
+    return;                                 /* the clock is already right    */
+  CW2_DBG("[clock relock %.1f -> %.1f (err %.2f)]\n", st->dit, est,
+          st->elem_err);
+  st->dit      = CLAMP(est, st->rate * 0.022, st->rate * 0.30);
+  st->elem_err = 0.2;                       /* neutral — re-measure          */
+  st->clk_hold = CLK_HOLD;
+}
+
 /* Commit the stable prefix of the best path (segments ending ≤ t − lag) and
  * feed it to the character assembly. With lag 0 everything commits (flush). */
 static void lattice_commit(Cw2State *st, double lag_dits, SkimDecode *out,
@@ -976,7 +1104,9 @@ static void lattice_commit(Cw2State *st, double lag_dits, SkimDecode *out,
       const double a = st->elem_err > 0.20 ? 0.30 : 0.15;
       st->dit += a * ((ty == SEG_DAH ? d / 3.0 : d) - st->dit);
       st->dit  = CLAMP(st->dit, st->rate * 0.022, st->rate * 0.30);
+      clock_push(st, d);
       st->dah_streak = ty == SEG_DAH ? st->dah_streak + 1 : 0;
+      st->dit_streak = ty == SEG_DIT ? st->dit_streak + 1 : 0;
     }
       st->marks_ok++;
       if (st->nelem < 7) {
@@ -993,9 +1123,11 @@ static void lattice_commit(Cw2State *st, double lag_dits, SkimDecode *out,
       break;
     case SEG_ESP:
       st->esp = st->esp > 0 ? st->esp + 0.2 * (d - st->esp) : d;
+      clock_space(st, d);
       break;
     case SEG_CSP:
       fist_learn(st, d / st->dit);
+      clock_space(st, d);
       if (!lived) { emit_code(st, out, pos, end - segs_d[i - 1]); }
       st->char_live = st->word_live = FALSE;
       break;
@@ -1054,14 +1186,22 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
    * but not the clock recover, gate-caught 2026-07-16). No real text is
    * dah-only for 16 marks ("0 0 0" is 15), so forget the clock and let the
    * bootstrap relearn it from the very keying that is arriving. */
-  if (st->dah_streak >= 16 && st->dit > 0) {
-    CW2_DBG("[clock lost at t=%lu — %u dahs, no dit; rebootstrap]\n",
-            (unsigned long)st->t, st->dah_streak);
+  /* The mirror trap: a clock stuck a class too SLOW reads everything as
+   * dits (a wrong up-jump lands here — live-replay-caught on UB7M: 24 WPM
+   * jumped to 9 and sat in "IISSESS" for 20 s). Real dit-only text runs
+   * longer than real dah-only text ("5 IS HIS" happens), so the bar sits
+   * higher than the dah watchdog's. */
+  if ((st->dah_streak >= 16 || st->dit_streak >= 24) && st->dit > 0) {
+    CW2_DBG("[clock lost at t=%lu — %u dahs/%u dits one-class; rebootstrap]\n",
+            (unsigned long)st->t, st->dah_streak, st->dit_streak);
     lattice_flush(st, out, &pos);
     st->dit = 0;
     st->nboot = 0;
     st->marks_ok = 0;
     st->dah_streak = 0;
+    st->dit_streak = 0;
+    st->clk_n = st->clk_sp_n = st->clk_head = st->clk_sp_head =
+        st->clk_hold = 0;
     st->fist_csp = FIST_CSP0;
     st->fist_wsp = FIST_WSP0;
     st->ngaps = st->gap_head = st->gap_fresh = 0;
@@ -1182,6 +1322,8 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
           rr_flush_over(st);
           st->code = 0;
           st->nelem = 0;
+          st->clk_n = st->clk_sp_n = st->clk_head = st->clk_sp_head =
+      st->clk_hold = 0;
           st->paused = TRUE;
           st->quiet  = 0.0;
         }
@@ -1190,6 +1332,8 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
           st->dit = 0;
           st->nboot = 0;
           st->marks_ok = 0;
+          st->clk_n = st->clk_sp_n = st->clk_head = st->clk_sp_head =
+              st->clk_hold = 0;
           st->paused = FALSE;
           st->fist_csp = FIST_CSP0;            /* spacing style goes with it */
           st->fist_wsp = FIST_WSP0;
@@ -1402,6 +1546,11 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
           }
           rr_flush_over(st);
           lattice_start(st);
+          /* The next over may be the OTHER op of a QSO — the re-lock rings
+           * must weigh HIS marks alone (a solid channel skips the pause on
+           * a short turnaround gap, so the pause-side clear never fires). */
+          st->clk_n = st->clk_sp_n = st->clk_head = st->clk_sp_head =
+      st->clk_hold = 0;
         }
       }
     }
