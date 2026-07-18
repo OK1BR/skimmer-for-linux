@@ -176,6 +176,15 @@ static gboolean dict_has(const char *call) {
   return s_dict && g_hash_table_contains(s_dict, call);
 }
 
+gboolean skim_callsign_dict_has(const char *call) {
+  if (!s_dict || !call || !call[0] || strlen(call) >= 24)
+    return FALSE;
+  char up[24];
+  g_strlcpy(up, call, sizeof(up));
+  for (char *p = up; *p; p++) { *p = g_ascii_toupper(*p); }
+  return g_hash_table_contains(s_dict, up);
+}
+
 /* --- stateful extractor -------------------------------------------------------- */
 
 /* Enough slots that a rare clean copy of a QSB-mangled call SURVIVES the

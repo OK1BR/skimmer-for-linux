@@ -26,9 +26,15 @@ G_BEGIN_DECLS
 gboolean skim_callsign_is_valid(const char *s);
 
 /* Optional known-call dictionary (MASTER.SCP style: one call per line, '#'
- * comments). Replaces any previously loaded dictionary. Engine-thread only. */
+ * comments). Replaces any previously loaded dictionary. Load on the thread
+ * that owns the pipeline setup (no reload while readers run). */
 gboolean skim_callsign_dict_load(const char *path, GError **error);
 guint    skim_callsign_dict_size(void);
+
+/* TRUE when the loaded dictionary knows this exact call (case-insensitive).
+ * The scorer uses it for its +0.15 boost; the app highlights dictionary
+ * hits in the monitor pane. */
+gboolean skim_callsign_dict_has(const char *call);
 
 /* Stateful per-channel extractor: feed decoded text incrementally (token
  * fragments survive across calls), poll best() for the leading candidate. */

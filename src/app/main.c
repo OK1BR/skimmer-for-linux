@@ -17,6 +17,7 @@
  */
 #include <adwaita.h>
 
+#include "callsign.h"
 #include "pane_log.h"
 #include "pipeline.h"
 
@@ -90,6 +91,8 @@ typedef struct {
   GtkSortListModel *sorted;
   GtkTextBuffer  *tuned;         /* decode text at the tuned frequency        */
   GtkTextTag     *draft_tag;     /* dim: reader may still rewrite this text   */
+  GtkTextTag     *scp_tag;       /* green+underline: MASTER.SCP knows this
+                                  * call (Richard, 2026-07-19)                */
   GtkTextView    *tuned_view;
   GtkLabel       *tuned_label;
   GtkWidget      *tuned_scroll;  /* the decode pane's scroller                */
@@ -251,6 +254,54 @@ static void tail_append(GtkTextView *view, GtkTextBuffer *buf, const char *text)
   buffer_trim_scroll(view, buf);
 }
 
+/* --- dictionary call marking -------------------------------------------------------
+ * Underline-green every COMPLETED token the MASTER.SCP dictionary knows,
+ * scanning the last `back` chars of the tuned pane (Richard, 2026-07-19 —
+ * calls the dictionary vouches for stand out from the decode flow). The
+ * token still growing at the very end of the buffer stays untouched: live
+ * text lands per character, and "YT1" must not light up before its A
+ * arrives — the tag lands when the boundary (space, over mark) does.
+ * Re-tagging an already tagged range is a no-op, so overlapping scans on
+ * consecutive batches are harmless. */
+static gboolean scp_token_char(gunichar c) {
+  return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/';
+}
+
+static void scp_tag_token(App *app, gint s_off, gint e_off) {
+  if (e_off - s_off < 3 || e_off - s_off > 12)
+    return;                              /* no dictionary call is that shape */
+  GtkTextIter s, e;
+  gtk_text_buffer_get_iter_at_offset(app->tuned, &s, s_off);
+  gtk_text_buffer_get_iter_at_offset(app->tuned, &e, e_off);
+  char *tok = gtk_text_buffer_get_text(app->tuned, &s, &e, FALSE);
+  if (skim_callsign_dict_has(tok)) {
+    gtk_text_buffer_apply_tag(app->tuned, app->scp_tag, &s, &e);
+  }
+  g_free(tok);
+}
+
+static void scp_highlight(App *app, gsize back) {
+  if (!skim_callsign_dict_size())
+    return;
+  const gsize total = (gsize)gtk_text_buffer_get_char_count(app->tuned);
+  GtkTextIter it, end;
+  gtk_text_buffer_get_end_iter(app->tuned, &end);
+  it = end;
+  gtk_text_iter_backward_chars(&it, (gint)MIN(back + 16, total));
+  char *slice = gtk_text_buffer_get_text(app->tuned, &it, &end, FALSE);
+  gint off = gtk_text_iter_get_offset(&it);
+  gint tok_start = -1;
+  for (const char *p = slice; *p; p = g_utf8_next_char(p), off++) {
+    const gboolean t = scp_token_char(g_utf8_get_char(p));
+    if (t && tok_start < 0) { tok_start = off; }
+    if (!t && tok_start >= 0) {
+      scp_tag_token(app, tok_start, off);
+      tok_start = -1;
+    }
+  }
+  g_free(slice);                         /* a trailing token is still open   */
+}
+
 /* Swap the pane to the fixed station's history (or, with nothing fixed,
  * to whatever history sits near the VFO). A live over region re-dims its
  * draft tail and re-arms the widget-side region size. */
@@ -265,6 +316,7 @@ static void tuned_pane_reload(App *app) {
   }
   if (fl && skim_pane_log_len(fl->log)) {
     tail_append(app->tuned_view, app->tuned, skim_pane_log_text(fl->log));
+    scp_highlight(app, (gsize)gtk_text_buffer_get_char_count(app->tuned));
     const gsize over = skim_pane_log_over_len(fl->log);
     const gsize fin  = skim_pane_log_final_len(fl->log);
     app->pane_over = over;             /* over text is ASCII: bytes == chars */
@@ -485,8 +537,10 @@ static void apply_state(App *app, gboolean connected, const char *detail) {
 
 static void pane_flush(App *app, GString *pane) {
   if (pane->len) {
+    const gsize n = pane->len;           /* bytes ≥ chars — scan margin      */
     tail_append(app->tuned_view, app->tuned, pane->str);
     g_string_truncate(pane, 0);
+    scp_highlight(app, n);
   }
 }
 
@@ -1201,6 +1255,10 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
    * plain — the over "firms up" in place (phase B, Richard 2026-07-18). */
   app->draft_tag = gtk_text_buffer_create_tag(app->tuned, "draft",
                                               "foreground", "#808080", NULL);
+  app->scp_tag = gtk_text_buffer_create_tag(app->tuned, "scp",
+                                            "foreground", "#44cc44",
+                                            "underline", PANGO_UNDERLINE_SINGLE,
+                                            NULL);
   GtkWidget *tuned_view = gtk_text_view_new_with_buffer(app->tuned);
   app->tuned_view = GTK_TEXT_VIEW(tuned_view);
   gtk_text_view_set_editable(app->tuned_view, FALSE);
