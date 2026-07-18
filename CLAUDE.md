@@ -144,13 +144,35 @@ Spots stay classical until D. Also from the 40 m collection: carrier
 rule 0.8 s floor + v2 clock-lost watchdog (a ~3× mid-stream speed drop
 no longer mutes either backend; gated); pane routes ±60 Hz unfixed /
 ±25 fixed (ear tuning sits off zero-beat); freqlog 1024 slots with
-babble-first eviction. IQ corpus: 10 recordings in
-~/.local/share/skimmer-for-linux/iq/.
+babble-first eviction.
+**Phase A — DONE (offline-proven 2026-07-18).** The reader STREAMS:
+per-layer bounded lookahead (LOOK sums to 22 runs ≈ 2–4 s commit lag,
+left field 230) + causal windowed mark median (31, `MED_WIN` — C and
+train_ctc.py must match). Blob **CWRD v3** carries per-layer `look`
+(v2 loads as look=dil, batch-only). `skim_cw_reader_stream_*` = same
+float ops through per-layer rings — stream output BIT-EQUAL to read()
+(gated, toy + trained). decode_cw_v2 arms the stream mid-over on the
+solid thresholds, feeds the backlog, commits WHOLE WORDS to aux;
+v2 blob → old batch path. EOF loses only the last word now (EA3BP
+ragchew streamed where batch showed nothing). run3 (causal) synthetic
+CER 0.039/0.050 vs run2 0.038/0.047; real A/B: EA3BP 0.086 vs run2
+0.109 (calls exact both), EA1EYL 20 exact calls vs 17. Weights
+/var/tmp/skimmer-cw-ml/run3/cw-reader-run3.bin. Found+fixed on the
+way: **aux-only hits were dragging the freq lock** (no tone measure →
+pin walked 20 Hz once streaming multiplied aux hits; locks now update
+only on decoded-text hits) and **the app UI froze under contest load**
+(one g_idle_add per event → unbounded pending-source list; five
+callbacks now share ONE queue + a single drain idle, batch collapses
+per-station and pane text — live force-quit 2026-07-18, fix soaking).
+Next: phase B (model owns pane text on solid channels, v2 keeps weak).
+IQ corpus: 10 recordings + 20 m contest blocks A–F (600 s each,
+2026-07-18) in ~/.local/share/skimmer-for-linux/iq/.
 Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
 **v2 live session**, **tone splitter live session** (run the app with
-`SKIM_CW_V2=1 SKIM_TONE_SPLIT=1`). MASTER.SCP can go to
+`SKIM_CW_V2=1 SKIM_TONE_SPLIT=1`), **coalescing fix soak** (app on the
+contest band). MASTER.SCP can go to
 `~/.config/skimmer-for-linux/master.scp` (the app loads it if present).
-Next: RTTY/PSK backends; v2 + splitter default flips.
+Next: phase B; RTTY/PSK backends; v2 + splitter default flips.
 
 ## Layout
 
