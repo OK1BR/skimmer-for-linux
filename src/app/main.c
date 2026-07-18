@@ -9,8 +9,9 @@
  * and only on the user's click). No connect button: a scanner probes
  * <host>:40001 (host set in Preferences, persisted) and the pipeline follows
  * the server up and down automatically. Engine callbacks fire on
- * engine/network threads and are marshalled here with g_idle_add — the
- * engine stays GLib-only (src/engine/ has no GTK).
+ * engine/network threads and are coalesced into ONE queue drained by a
+ * single pending idle (see "marshalled engine events") — the engine stays
+ * GLib-only (src/engine/ has no GTK).
  *
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
@@ -98,6 +99,9 @@ typedef struct {
   GtkLabel       *status;
   GtkWindow      *window;
   GPtrArray      *freq_logs;     /* of FreqLog — decode history per frequency */
+  GMutex          evq_lock;      /* guards evq + evq_scheduled                */
+  GPtrArray      *evq;           /* engine events awaiting the main loop      */
+  gboolean        evq_scheduled; /* a drain idle is already pending           */
 } App;
 
 /* The bottom pane's header: the station heard on the tuned frequency (the
@@ -251,21 +255,39 @@ static void tuned_pane_reload(App *app) {
   }
 }
 
-/* --- marshalled engine events ------------------------------------------------------ */
+/* --- marshalled engine events ------------------------------------------------------
+ * Engine threads never touch GTK: every callback lands in ONE mutex-guarded
+ * queue and a SINGLE pending idle drains the whole backlog per dispatch.
+ * The first shape — one g_idle_add per event — melted under contest load:
+ * hundreds of events/s outran the UI work each handler did, the pending
+ * source list grew without bound and every main-loop iteration walked all
+ * of it, until GNOME offered the force-quit dialog (live-caught
+ * 2026-07-18, 20 m contest). Coalescing keeps at most one source alive,
+ * collapses a batch to the LAST report per station, and lands a batch's
+ * pane text in one append. */
+
+typedef enum { EV_STATION, EV_GONE, EV_TEXT, EV_VFO, EV_STATE } EvKind;
 
 typedef struct {
-  App        *app;
-  SkimStation st;
-} StationEvent;
+  EvKind      kind;
+  SkimStation st;                /* EV_STATION / EV_GONE                      */
+  double      hz;                /* EV_TEXT: channel; EV_VFO: tuned freq      */
+  char       *str;               /* EV_TEXT: text; EV_STATE: detail           */
+  gboolean    connected;         /* EV_STATE                                  */
+} Ev;
 
-static gboolean on_station_idle(gpointer data) {
-  StationEvent *ev = data;
-  App *app = ev->app;
+static void ev_free(gpointer data) {
+  Ev *ev = data;
+  g_free(ev->str);
+  g_free(ev);
+}
+
+static void apply_station(App *app, const SkimStation *st) {
   guint n = g_list_model_get_n_items(G_LIST_MODEL(app->stations));
   for (guint i = 0; i < n; i++) {
     SkimRow *r = g_list_model_get_item(G_LIST_MODEL(app->stations), i);
     /* The tracker keeps ONE record per call (QSY moves it) — match by call. */
-    gboolean same = g_strcmp0(r->st.call, ev->st.call) == 0;
+    gboolean same = g_strcmp0(r->st.call, st->call) == 0;
     g_object_unref(r);
     if (same) {
       /* Rows carry no notify — replace to refresh the bound labels. */
@@ -273,87 +295,60 @@ static gboolean on_station_idle(gpointer data) {
       break;
     }
   }
-  g_list_store_append(app->stations, skim_row_new(&ev->st));
+  g_list_store_append(app->stations, skim_row_new(st));
   /* Keep the tuned pane's header fresh if this touches the tuned window —
    * via the sticky resolver, never straight from the event. When the
    * fixation resolves to a (new) station, pull in its history: the first
    * seconds after a retune decoded before the station validated. */
-  if (app->vfo_hz > 0 && ABS(ev->st.freq_hz - app->vfo_hz) <= TUNED_WINDOW_HZ) {
+  if (app->vfo_hz > 0 && ABS(st->freq_hz - app->vfo_hz) <= TUNED_WINDOW_HZ) {
     if (tuned_station_refresh(app)) { tuned_pane_reload(app); }
   }
-  g_free(ev);
-  return G_SOURCE_REMOVE;
 }
 
 /* Station left the tracker (TTL / frequency takeover) — drop its row. */
-typedef struct {
-  App        *app;
-  SkimStation st;
-} GoneEvent;
-
-static gboolean on_gone_idle(gpointer data) {
-  GoneEvent *ev = data;
-  App *app = ev->app;
+static void apply_gone(App *app, const SkimStation *st) {
   guint n = g_list_model_get_n_items(G_LIST_MODEL(app->stations));
   for (guint i = 0; i < n; i++) {
     SkimRow *r = g_list_model_get_item(G_LIST_MODEL(app->stations), i);
-    gboolean same = g_strcmp0(r->st.call, ev->st.call) == 0;
+    gboolean same = g_strcmp0(r->st.call, st->call) == 0;
     g_object_unref(r);
     if (same) {
       g_list_store_remove(app->stations, i);
       break;
     }
   }
-  if (g_strcmp0(ev->st.call, app->tuned_call) == 0) {
+  if (g_strcmp0(st->call, app->tuned_call) == 0) {
     app->tuned_call[0] = '\0';                 /* the fixed station left     */
   }
   if (tuned_station_refresh(app)) { tuned_pane_reload(app); }
-  g_free(ev);
-  return G_SOURCE_REMOVE;
 }
 
-typedef struct {
-  App   *app;
-  double freq_hz;
-  char  *text;
-} TextEvent;
-
-static gboolean on_text_idle(gpointer data) {
-  TextEvent *ev = data;
-  App *app = ev->app;
-  /* Record into the frequency's own history slot... */
-  FreqLog *fl = freqlog_get(app, ev->freq_hz);
-  fl->freq_hz   = ev->freq_hz;               /* follow drift                 */
+/* Record text into the frequency's history slot; the pane-routed part goes
+ * into `pane` — the drain flushes it to the widget once per batch segment. */
+static void apply_text(App *app, double freq_hz, const char *text,
+                       GString *pane) {
+  FreqLog *fl = freqlog_get(app, freq_hz);
+  fl->freq_hz   = freq_hz;                   /* follow drift                 */
   fl->last_seen = g_get_monotonic_time();
-  g_string_append(fl->text, ev->text);
+  g_string_append(fl->text, text);
   if (fl->text->len > FREQLOG_CAP_CHARS) {
     g_string_erase(fl->text, 0,
                    (gssize)(fl->text->len - FREQLOG_CAP_CHARS + 2000));
   }
-  /* ...and live-follow in the pane. The pane belongs to the FIXED station's
+  /* Live-follow in the pane. The pane belongs to the FIXED station's
    * slot — never to "anything near the VFO", which interleaved a neighbour
    * within the window into the tuned station's text. Before a station is
    * resolved (fresh retune to a quiet spot), follow the VFO tightly. */
   const double key = app->tuned_call[0] ? app->tuned_slot_hz : app->vfo_hz;
   const double win = app->tuned_call[0] ? FREQLOG_ROUTE_HZ : FREQLOG_FREE_HZ;
-  if (key > 0 && ABS(ev->freq_hz - key) <= win) {
-    tail_append(app->tuned_view, app->tuned, ev->text);
+  if (key > 0 && ABS(freq_hz - key) <= win) {
+    g_string_append(pane, text);
   }
-  g_free(ev->text);
-  g_free(ev);
-  return G_SOURCE_REMOVE;
 }
 
-typedef struct {
-  App   *app;
-  double vfo_hz;
-} VfoEvent;
-
-static gboolean on_vfo_idle(gpointer data) {
-  VfoEvent *ev = data;
-  App *app = ev->app;
-  if (ev->vfo_hz != app->vfo_hz) {
-    app->vfo_hz = ev->vfo_hz;
+static void apply_vfo(App *app, double vfo_hz) {
+  if (vfo_hz != app->vfo_hz) {
+    app->vfo_hz = vfo_hz;
     /* The sticky resolver keeps the fixed station across small retunes
      * (our own click-tune rounds on the radio's step). But when the new
      * frequency clearly points at a DIFFERENT known station — a spot
@@ -382,21 +377,11 @@ static gboolean on_vfo_idle(gpointer data) {
     tuned_station_refresh(app);
     tuned_pane_reload(app);
   }
-  g_free(ev);
-  return G_SOURCE_REMOVE;
 }
 
-typedef struct {
-  App     *app;
-  gboolean connected;
-  char    *detail;
-} StateEvent;
-
-static gboolean on_state_idle(gpointer data) {
-  StateEvent *ev = data;
-  App *app = ev->app;
-  if (ev->connected) {
-    adw_window_title_set_subtitle(app->title, ev->detail);
+static void apply_state(App *app, gboolean connected, const char *detail) {
+  if (connected) {
+    adw_window_title_set_subtitle(app->title, detail);
   } else if (app->pipeline) {
     /* The server dropped us — tear down; the scanner reconnects when it is
      * back. (App-initiated stops land here with pipeline already NULL.) */
@@ -408,43 +393,108 @@ static gboolean on_state_idle(gpointer data) {
     tuned_label_update(app, NULL);
     adw_window_title_set_subtitle(app->title, "connection lost — searching…");
   }
-  g_free(ev->detail);
-  g_free(ev);
+}
+
+static void pane_flush(App *app, GString *pane) {
+  if (pane->len) {
+    tail_append(app->tuned_view, app->tuned, pane->str);
+    g_string_truncate(pane, 0);
+  }
+}
+
+/* The single drain: steal the whole queue, apply it in order. Pane text
+ * accumulates across consecutive text events and flushes before any event
+ * that could change routing or reload the pane (and once at the end). */
+static gboolean evq_drain(gpointer data) {
+  App *app = data;
+  g_mutex_lock(&app->evq_lock);
+  GPtrArray *batch = app->evq;
+  app->evq = g_ptr_array_new_with_free_func(ev_free);
+  app->evq_scheduled = FALSE;
+  g_mutex_unlock(&app->evq_lock);
+
+  /* Only the LAST report per station builds a row — earlier ones in the
+   * same batch would be replaced within this very dispatch. (Keyed i+1:
+   * a missing hash entry must never alias index 0.) */
+  GHashTable *last = g_hash_table_new(g_str_hash, g_str_equal);
+  for (guint i = 0; i < batch->len; i++) {
+    Ev *ev = g_ptr_array_index(batch, i);
+    if (ev->kind == EV_STATION) {
+      g_hash_table_replace(last, ev->st.call, GUINT_TO_POINTER(i + 1));
+    }
+  }
+  GString *pane = g_string_new(NULL);
+  for (guint i = 0; i < batch->len; i++) {
+    Ev *ev = g_ptr_array_index(batch, i);
+    if (ev->kind != EV_TEXT) { pane_flush(app, pane); }
+    switch (ev->kind) {
+    case EV_STATION:
+      if (GPOINTER_TO_UINT(g_hash_table_lookup(last, ev->st.call)) == i + 1) {
+        apply_station(app, &ev->st);
+      }
+      break;
+    case EV_GONE:
+      apply_gone(app, &ev->st);
+      break;
+    case EV_TEXT:
+      apply_text(app, ev->hz, ev->str, pane);
+      break;
+    case EV_VFO:
+      apply_vfo(app, ev->hz);
+      break;
+    case EV_STATE:
+      apply_state(app, ev->connected, ev->str);
+      break;
+    }
+  }
+  pane_flush(app, pane);
+  g_string_free(pane, TRUE);
+  g_hash_table_unref(last);
+  g_ptr_array_unref(batch);
   return G_SOURCE_REMOVE;
 }
 
-/* Engine-thread callbacks: copy + hop to the main loop. */
+/* Engine-thread side: append + schedule the drain unless one is pending. */
+static void ev_post(App *app, Ev *ev) {
+  g_mutex_lock(&app->evq_lock);
+  g_ptr_array_add(app->evq, ev);
+  const gboolean need = !app->evq_scheduled;
+  app->evq_scheduled = TRUE;
+  g_mutex_unlock(&app->evq_lock);
+  if (need) { g_idle_add(evq_drain, app); }
+}
+
 static void pipe_station_cb(const SkimStation *st, gpointer user) {
-  StationEvent *ev = g_new0(StationEvent, 1);
-  ev->app = user;
-  ev->st  = *st;
-  g_idle_add(on_station_idle, ev);
+  Ev *ev = g_new0(Ev, 1);
+  ev->kind = EV_STATION;
+  ev->st   = *st;
+  ev_post(user, ev);
 }
 static void pipe_text_cb(double freq_hz, const char *text, gpointer user) {
-  TextEvent *ev = g_new0(TextEvent, 1);
-  ev->app     = user;
-  ev->freq_hz = freq_hz;
-  ev->text    = g_strdup(text);
-  g_idle_add(on_text_idle, ev);
+  Ev *ev = g_new0(Ev, 1);
+  ev->kind = EV_TEXT;
+  ev->hz   = freq_hz;
+  ev->str  = g_strdup(text);
+  ev_post(user, ev);
 }
 static void pipe_state_cb(gboolean connected, const char *detail, gpointer user) {
-  StateEvent *ev = g_new0(StateEvent, 1);
-  ev->app       = user;
+  Ev *ev = g_new0(Ev, 1);
+  ev->kind      = EV_STATE;
   ev->connected = connected;
-  ev->detail    = g_strdup(detail);
-  g_idle_add(on_state_idle, ev);
+  ev->str       = g_strdup(detail);
+  ev_post(user, ev);
 }
 static void pipe_vfo_cb(double vfo_hz, gpointer user) {
-  VfoEvent *ev = g_new0(VfoEvent, 1);
-  ev->app    = user;
-  ev->vfo_hz = vfo_hz;
-  g_idle_add(on_vfo_idle, ev);
+  Ev *ev = g_new0(Ev, 1);
+  ev->kind = EV_VFO;
+  ev->hz   = vfo_hz;
+  ev_post(user, ev);
 }
 static void pipe_gone_cb(const SkimStation *st, gpointer user) {
-  GoneEvent *ev = g_new0(GoneEvent, 1);
-  ev->app = user;
-  ev->st  = *st;
-  g_idle_add(on_gone_idle, ev);
+  Ev *ev = g_new0(Ev, 1);
+  ev->kind = EV_GONE;
+  ev->st   = *st;
+  ev_post(user, ev);
 }
 
 /* --- status line -------------------------------------------------------------------- */
@@ -975,6 +1025,8 @@ static void on_row_activated(GtkColumnView *view, guint position, gpointer user)
 static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   (void)user_data;
   App *app = g_new0(App, 1);
+  g_mutex_init(&app->evq_lock);
+  app->evq = g_ptr_array_new_with_free_func(ev_free);
 
   GtkWidget *window = adw_application_window_new(gtk_app);
   gtk_window_set_title(GTK_WINDOW(window), "Skimmer for Linux");
