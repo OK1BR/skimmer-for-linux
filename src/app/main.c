@@ -76,6 +76,7 @@ typedef struct {
   gboolean        rbn_enabled;   /* persisted [rbn]                           */
   char           *rbn_call;      /* spotter callsign (persisted)              */
   int             rbn_port;      /* telnet port (persisted, default 7300)     */
+  gboolean        reader_enabled; /* neural CW reader aux lines (persisted)   */
   int             decode_font;   /* decode pane font size, pt (persisted)     */
   GtkCssProvider *css;           /* carries the decode pane font rule         */
   gboolean        probing;       /* port probe / handshake in flight          */
@@ -595,6 +596,20 @@ static gboolean settings_load_list_visible(void) {
   return v;
 }
 
+static gboolean settings_load_reader(void) {
+  char *path = settings_file();
+  GKeyFile *kf = g_key_file_new();
+  gboolean v = FALSE;                    /* the pane belongs to the ear —    */
+  if (g_key_file_load_from_file(kf, path, /* arming is a conscious opt-in   */
+                                G_KEY_FILE_NONE, NULL) &&
+      g_key_file_has_key(kf, "reader", "enabled", NULL)) {
+    v = g_key_file_get_boolean(kf, "reader", "enabled", NULL);
+  }
+  g_key_file_free(kf);
+  g_free(path);
+  return v;
+}
+
 static void settings_load_rbn(App *app) {
   char *path = settings_file();
   GKeyFile *kf = g_key_file_new();
@@ -629,6 +644,7 @@ static void settings_save(const App *app) {
   g_key_file_set_integer(kf, "rbn", "port", app->rbn_port);
   g_key_file_set_integer(kf, "ui", "decode_font_pt", app->decode_font);
   g_key_file_set_boolean(kf, "ui", "station_list", app->list_visible);
+  g_key_file_set_boolean(kf, "reader", "enabled", app->reader_enabled);
   GError *err = NULL;
   if (!g_key_file_save_to_file(kf, path, &err)) {
     g_warning("settings: %s not saved: %s", path, err ? err->message : "?");
@@ -637,6 +653,59 @@ static void settings_save(const App *app) {
   g_key_file_free(kf);
   g_free(dir);
   g_free(path);
+}
+
+/* --- neural CW reader (Preferences switch, default OFF) --------------------------
+ * Richard's rule (2026-07-16): a plain launch never arms the reader — the
+ * decode pane is checked by EAR, so arming is a conscious opt-in. The
+ * switch resolves the shipped blob and exports SKIM_CW_READER for the next
+ * pipeline (re)connect; the engine stays env-driven and GTK-free. An env
+ * var set in the user's shell always wins and is never cleared at startup. */
+static char *reader_blob_path(void) {
+  char *p = g_build_filename(g_get_user_config_dir(), "skimmer-for-linux",
+                             "cw-reader.bin", NULL);
+  if (g_file_test(p, G_FILE_TEST_EXISTS)) { return p; }
+  g_free(p);
+#ifdef SKIMMER_DATADIR
+  p = g_build_filename(SKIMMER_DATADIR, "cw-reader.bin", NULL);
+  if (g_file_test(p, G_FILE_TEST_EXISTS)) { return p; }
+  g_free(p);
+#endif
+  char *exe = g_file_read_link("/proc/self/exe", NULL);
+  if (exe) {                             /* dev run from build/              */
+    char *dir = g_path_get_dirname(exe);
+    p = g_build_filename(dir, "..", "data", "cw-reader.bin", NULL);
+    g_free(dir);
+    g_free(exe);
+    if (g_file_test(p, G_FILE_TEST_EXISTS)) { return p; }
+    g_free(p);
+  }
+  return NULL;
+}
+
+static void reader_env_apply(App *app, gboolean startup) {
+  if (app->reader_enabled) {
+    if (g_getenv("SKIM_CW_READER"))
+      return;                            /* explicit env wins                */
+    char *blob = reader_blob_path();
+    if (blob) {
+      g_setenv("SKIM_CW_READER", blob, TRUE);
+      g_free(blob);
+    } else {
+      g_warning("CW reader enabled but no cw-reader.bin found "
+                "(config dir, %s, ../data)",
+#ifdef SKIMMER_DATADIR
+                SKIMMER_DATADIR
+#else
+                "-"
+#endif
+      );
+    }
+  } else if (!startup) {
+    g_unsetenv("SKIM_CW_READER");        /* switching OFF clears it; startup
+                                          * with the switch off leaves the
+                                          * user's env alone                 */
+  }
 }
 
 /* (Re)start the RBN telnet server to match the current settings. The feed
@@ -802,6 +871,7 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   GtkWidget *rsw  = g_object_get_data(G_OBJECT(dlg), "rbn-row");
   GtkWidget *rcall = g_object_get_data(G_OBJECT(dlg), "rbn-call-row");
   GtkWidget *rport = g_object_get_data(G_OBJECT(dlg), "rbn-port-row");
+  GtkWidget *nsw  = g_object_get_data(G_OBJECT(dlg), "reader-row");
   const char *h = gtk_editable_get_text(GTK_EDITABLE(row));
   char *host = g_strstrip(g_strdup((h && h[0]) ? h : "127.0.0.1"));
   gboolean cq_only = adw_switch_row_get_active(ADW_SWITCH_ROW(sw));
@@ -815,6 +885,8 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   gboolean rbn_changed  = rbn_enabled != app->rbn_enabled ||
                           g_strcmp0(rbn_call, app->rbn_call) != 0 ||
                           rbn_port != app->rbn_port;
+  gboolean reader_enabled = adw_switch_row_get_active(ADW_SWITCH_ROW(nsw));
+  gboolean reader_changed = reader_enabled != app->reader_enabled;
 
   if (host_changed) {
     g_free(app->host);
@@ -841,12 +913,18 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   } else {
     g_free(rbn_call);
   }
-  if (host_changed || cq_changed || font_changed || rbn_changed) {
+  if (reader_changed) {
+    app->reader_enabled = reader_enabled;
+    reader_env_apply(app, FALSE);
+  }
+  if (host_changed || cq_changed || font_changed || rbn_changed ||
+      reader_changed) {
     settings_save(app);
   }
   /* The pipeline's config carries the feed pointer — an RBN change needs a
-   * fresh pipeline just like a host change does. */
-  if (host_changed || rbn_changed) {
+   * fresh pipeline just like a host change does (and reader arming is read
+   * at channel birth, so it too applies on a reconnect). */
+  if (host_changed || rbn_changed || reader_changed) {
     if (app->pipeline) {
       skim_pipeline_stop(app->pipeline);
       g_clear_pointer(&app->pipeline, skim_pipeline_free);
@@ -912,6 +990,21 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   adw_preferences_page_add(ADW_PREFERENCES_PAGE(page),
                            ADW_PREFERENCES_GROUP(rgrp));
 
+  GtkWidget *ngrp = adw_preferences_group_new();
+  adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(ngrp), "CW reader");
+  adw_preferences_group_set_description(ADW_PREFERENCES_GROUP(ngrp),
+      "Neural re-reader for hand-keyed fists — adds aux lines to the "
+      "decode pane ~2–4 s behind the key. Display only: it never "
+      "feeds the spot path");
+  GtkWidget *nsw = adw_switch_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(nsw), "Enable");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(nsw),
+      "Applies on the next (re)connect");
+  adw_switch_row_set_active(ADW_SWITCH_ROW(nsw), app->reader_enabled);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(ngrp), nsw);
+  adw_preferences_page_add(ADW_PREFERENCES_PAGE(page),
+                           ADW_PREFERENCES_GROUP(ngrp));
+
   GtkWidget *ugrp = adw_preferences_group_new();
   adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(ugrp), "Display");
   GtkWidget *frow = adw_spin_row_new_with_range(8, 32, 1);
@@ -930,6 +1023,7 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   g_object_set_data(G_OBJECT(dlg), "rbn-row", rsw);
   g_object_set_data(G_OBJECT(dlg), "rbn-call-row", rcall);
   g_object_set_data(G_OBJECT(dlg), "rbn-port-row", rport);
+  g_object_set_data(G_OBJECT(dlg), "reader-row", nsw);
   g_signal_connect(dlg, "closed", G_CALLBACK(prefs_closed), app);
   adw_dialog_present(dlg, GTK_WIDGET(app->window));
 }
@@ -1038,6 +1132,8 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   app->list_visible = settings_load_list_visible();
   settings_load_rbn(app);
   rbn_apply(app);                /* the telnet server is up before the radio */
+  app->reader_enabled = settings_load_reader();
+  reader_env_apply(app, TRUE);   /* before the first connect                 */
 
   app->title = ADW_WINDOW_TITLE(adw_window_title_new("Skimmer for Linux", ""));
   GtkWidget *header = adw_header_bar_new();

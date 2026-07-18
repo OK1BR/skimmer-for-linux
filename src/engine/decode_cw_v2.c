@@ -253,7 +253,11 @@ static gpointer cw2_channel_new(double sample_rate) {
   st->fist_csp = FIST_CSP0;
   st->fist_wsp = FIST_WSP0;
   st->rd_on    = g_getenv("SKIM_CW_DUMP_RUNS") != NULL;
-  st->rr_arm   = rr_reader() != NULL;
+  /* Arming follows the env var at CHANNEL BIRTH (a pipeline restart), not
+   * just the first process-wide load — the app's Preferences switch sets
+   * and clears SKIM_CW_READER between connects. Weights stay cached in
+   * rr_reader() once loaded; only the arming toggles. */
+  st->rr_arm   = g_getenv("SKIM_CW_READER") != NULL && rr_reader() != NULL;
   return st;
 }
 

@@ -138,15 +138,17 @@ skimmer_call_test = executable('skimmer-call-test',
 )
 test('callsign', skimmer_call_test, timeout : 60)
 
-# Neural CW reader: C forward pass vs an independent reference (and, with
-# SKIM_READER_BLOB set, vs a real torch export's baked-in test vector).
+# Neural CW reader: C forward pass vs an independent reference, plus the
+# in-repo blob's torch-baked test vector and stream==batch equivalence —
+# the shipped weights are gated on every `meson test`.
 skimmer_reader_test = executable('skimmer-reader-test',
   ['src/reader_test.c'],
   include_directories : include_directories('src'),
   dependencies : engine_deps,
   link_with : engine_lib,
 )
-test('cw-reader', skimmer_reader_test, timeout : 60)
+test('cw-reader', skimmer_reader_test, timeout : 60,
+  env : ['SKIM_READER_BLOB=' + meson.project_source_root() / 'data/cw-reader.bin'])
 
 # M5: offline gate — station tracker units, spot policy units, and the WHOLE
 # pipeline over a real WebSocket against a mock TCI server (spots come back).
@@ -176,4 +178,10 @@ executable('skimmer-for-linux',
   dependencies : [gtk_dep, adw_dep, glib_dep],
   link_with : engine_lib,
   install : true,
+  c_args : ['-DSKIMMER_DATADIR="@0@"'.format(
+    get_option('prefix') / get_option('datadir') / 'skimmer-for-linux')],
 )
+
+# The neural CW reader weights (data/cw-reader.md documents provenance).
+install_data('data/cw-reader.bin',
+  install_dir : get_option('datadir') / 'skimmer-for-linux')
