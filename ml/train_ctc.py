@@ -23,7 +23,7 @@
 # (the degenerate tail this exists for).
 #
 # Offline tooling — not part of the product. GPL-3.0-or-later.
-import argparse, math, os, random, statistics, sys, time
+import argparse, json, math, os, random, statistics, sys, time
 
 import numpy as np
 import torch
@@ -130,10 +130,24 @@ def cer(hyp, ref):
         prev = cur
     return prev[-1] / len(ref)
 
-def make_batch(rng, n, max_runs=320):
+def load_real(paths):
+    """Consensus-labeled real pairs (ml/harvest_real.py) -> [(runs, text)]."""
+    out = []
+    for p in paths:
+        for e in json.load(open(p)):
+            out.append(([(k, d) for k, d in e["runs"]], e["text"]))
+    return out
+
+def make_batch(rng, n, max_runs=320, real=None, real_frac=0.0):
     pairs = []
     while len(pairs) < n:
-        r, t = sample(rng)
+        if real and rng.random() < real_frac:
+            r0, t = real[rng.randrange(len(real))]
+            sp = rng.uniform(0.85, 1.2)      # small pools repeat: re-speed
+            r = [(k, max(1.0, d * sp * math.exp(rng.gauss(0.0, 0.03))))
+                 for k, d in r0]             # + per-run timing jitter
+        else:
+            r, t = sample(rng)
         if 4 <= len(r) <= max_runs and t:         # cap T for CPU throughput
             pairs.append((r, t))
     T = max(len(r) for r, _ in pairs)
@@ -190,6 +204,13 @@ def main():
     ap.add_argument("--batch", type=int, default=48)
     ap.add_argument("--out", default="/var/tmp/skimmer-cw-ml")
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--init", help="warm-start checkpoint (fine-tuning)")
+    ap.add_argument("--lr", type=float, default=2e-3)
+    ap.add_argument("--real", action="append", default=[],
+                    help="harvest_real.py json (repeatable) mixed into batches")
+    ap.add_argument("--real-frac", type=float, default=0.25)
+    ap.add_argument("--real-val", action="append", default=[],
+                    help="held-out real json — CER reported at every eval")
     ap.add_argument("--threads", type=int, default=4)   # small LSTM: more
     a = ap.parse_args()                                  # threads = lock churn
     os.makedirs(a.out, exist_ok=True)
@@ -198,20 +219,29 @@ def main():
 
     model = Reader()
     print(f"params: {sum(p.numel() for p in model.parameters())}")
+    if a.init:
+        model.load_state_dict(torch.load(a.init))
+        print(f"warm start: {a.init}")
     if a.resume and os.path.exists(f"{a.out}/model.pt"):
         model.load_state_dict(torch.load(f"{a.out}/model.pt"))
         print("resumed")
-    opt = torch.optim.Adam(model.parameters(), lr=2e-3)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, a.steps, 2e-4)
+    real = load_real(a.real)
+    rval = load_real(a.real_val)
+    if real or rval:
+        print(f"real pairs: train {len(real)}, val {len(rval)}")
+    opt = torch.optim.Adam(model.parameters(), lr=a.lr)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, a.steps, a.lr / 10)
     ctc = nn.CTCLoss(blank=BLANK, zero_infinity=True)
 
     rng = random.Random(1234)
     vclean = val_set(91, 120, ugly=False)
     vugly = val_set(92, 120, ugly=True)
+    vreal = random.Random(93).sample(rval, min(150, len(rval))) if rval else []
     best = 9e9
     t0 = time.time()
     for step in range(1, a.steps + 1):
-        x, lens, targets, tlens, _ = make_batch(rng, a.batch)
+        x, lens, targets, tlens, _ = make_batch(rng, a.batch, real=real,
+                                                real_frac=a.real_frac)
         logits = model(x, lens)                   # [B, T, C]
         loss = ctc(logits.permute(1, 0, 2).log_softmax(-1),
                    targets, lens, tlens)
@@ -225,10 +255,12 @@ def main():
                   f"[{time.time() - t0:.0f}s]", flush=True)
         if step % 500 == 0 or step == a.steps:
             cc, cu = eval_cer(model, vclean), eval_cer(model, vugly)
+            cr = eval_cer(model, vreal) if vreal else float("nan")
             el = time.time() - t0
             print(f"step {step:6d} loss {loss.item():.3f} "
-                  f"CER clean {cc:.3f} ugly {cu:.3f} [{el:.0f}s]", flush=True)
-            score = cc + cu
+                  f"CER clean {cc:.3f} ugly {cu:.3f} real {cr:.3f} "
+                  f"[{el:.0f}s]", flush=True)
+            score = cc + cu + (cr if vreal else 0.0)
             if score < best:
                 best = score
                 torch.save(model.state_dict(), f"{a.out}/model.pt")
