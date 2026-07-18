@@ -88,6 +88,10 @@ void   skim_pipeline_tune(SkimPipeline *p, double freq_hz);
  * station list still tracks everything. Runtime-switchable, thread-safe. */
 void   skim_pipeline_set_spot_cq_only(SkimPipeline *p, gboolean cq_only);
 
+/* Snap outgoing spot frequencies (panadapter AND telnet feed) to a grid;
+ * 0/1 = exact. Applies live. */
+void   skim_pipeline_set_spot_round_hz(SkimPipeline *p, guint hz);
+
 /* Counters for the status line / gates. */
 guint64 skim_pipeline_frames(const SkimPipeline *p);
 guint64 skim_pipeline_spots(const SkimPipeline *p);

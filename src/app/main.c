@@ -73,6 +73,8 @@ typedef struct {
   SkimPipeline   *starting;      /* pipeline mid-handshake on a worker thread */
   char           *host;          /* TCI server host (persisted preference)    */
   gboolean        cq_only;       /* spot only CALLING stations (persisted)    */
+  guint           spot_round;    /* outgoing spot freq grid Hz, 0=exact
+                                  * (persisted; SDC-style spot accuracy)      */
   SkimRbnFeed    *rbn;           /* RBN telnet server — app-owned so
                                   * aggregator sessions ride out reconnects   */
   gboolean        rbn_enabled;   /* persisted [rbn]                           */
@@ -752,6 +754,20 @@ static gboolean settings_load_list_visible(void) {
   return v;
 }
 
+static guint settings_load_spot_round(void) {
+  char *path = settings_file();
+  GKeyFile *kf = g_key_file_new();
+  guint v = 0;                                 /* exact by default           */
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL) &&
+      g_key_file_has_key(kf, "spots", "round_hz", NULL)) {
+    int r = g_key_file_get_integer(kf, "spots", "round_hz", NULL);
+    if (r >= 0 && r <= 1000) { v = (guint)r; }
+  }
+  g_key_file_free(kf);
+  g_free(path);
+  return v;
+}
+
 static void settings_load_rbn(App *app) {
   char *path = settings_file();
   GKeyFile *kf = g_key_file_new();
@@ -781,6 +797,7 @@ static void settings_save(const App *app) {
   g_key_file_load_from_file(kf, path, G_KEY_FILE_KEEP_COMMENTS, NULL);
   g_key_file_set_string(kf, "tci", "host", app->host);
   g_key_file_set_boolean(kf, "spots", "cq_only", app->cq_only);
+  g_key_file_set_integer(kf, "spots", "round_hz", (gint)app->spot_round);
   g_key_file_set_boolean(kf, "rbn", "enabled", app->rbn_enabled);
   g_key_file_set_string(kf, "rbn", "call", app->rbn_call);
   g_key_file_set_integer(kf, "rbn", "port", app->rbn_port);
@@ -882,6 +899,7 @@ static void start_pipeline_done(GObject *src, GAsyncResult *res, gpointer user) 
   app->pipeline = app->starting;
   app->starting = NULL;
   skim_pipeline_set_spot_cq_only(app->pipeline, app->cq_only);
+  skim_pipeline_set_spot_round_hz(app->pipeline, app->spot_round);
   app->vfo_hz   = skim_pipeline_vfo_hz(app->pipeline);
   tuned_label_update(app, NULL);
 }
@@ -958,6 +976,7 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   App *app = user;
   GtkWidget *row  = g_object_get_data(G_OBJECT(dlg), "host-row");
   GtkWidget *sw   = g_object_get_data(G_OBJECT(dlg), "cq-row");
+  GtkWidget *qrow = g_object_get_data(G_OBJECT(dlg), "round-row");
   GtkWidget *frow = g_object_get_data(G_OBJECT(dlg), "font-row");
   GtkWidget *rsw  = g_object_get_data(G_OBJECT(dlg), "rbn-row");
   GtkWidget *rcall = g_object_get_data(G_OBJECT(dlg), "rbn-call-row");
@@ -965,12 +984,17 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   const char *h = gtk_editable_get_text(GTK_EDITABLE(row));
   char *host = g_strstrip(g_strdup((h && h[0]) ? h : "127.0.0.1"));
   gboolean cq_only = adw_switch_row_get_active(ADW_SWITCH_ROW(sw));
+  static const guint ROUND_VALS[] = { 0, 10, 20, 50, 100 };
+  guint rsel = adw_combo_row_get_selected(ADW_COMBO_ROW(qrow));
+  guint spot_round =
+      ROUND_VALS[MIN(rsel, G_N_ELEMENTS(ROUND_VALS) - 1)];
   int font_pt = (int)adw_spin_row_get_value(ADW_SPIN_ROW(frow));
   gboolean rbn_enabled = adw_switch_row_get_active(ADW_SWITCH_ROW(rsw));
   char *rbn_call = g_strstrip(g_strdup(gtk_editable_get_text(GTK_EDITABLE(rcall))));
   int rbn_port = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rport));
   gboolean host_changed = host[0] && g_strcmp0(host, app->host) != 0;
   gboolean cq_changed   = cq_only != app->cq_only;
+  gboolean round_changed = spot_round != app->spot_round;
   gboolean font_changed = font_pt != app->decode_font;
   gboolean rbn_changed  = rbn_enabled != app->rbn_enabled ||
                           g_strcmp0(rbn_call, app->rbn_call) != 0 ||
@@ -987,6 +1011,12 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
       skim_pipeline_set_spot_cq_only(app->pipeline, cq_only);
     }
   }
+  if (round_changed) {
+    app->spot_round = spot_round;
+    if (app->pipeline) {                       /* applies live               */
+      skim_pipeline_set_spot_round_hz(app->pipeline, spot_round);
+    }
+  }
   if (font_changed) {
     app->decode_font = font_pt;
     decode_font_apply(app);
@@ -1000,7 +1030,8 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   } else {
     g_free(rbn_call);
   }
-  if (host_changed || cq_changed || font_changed || rbn_changed) {
+  if (host_changed || cq_changed || round_changed || font_changed ||
+      rbn_changed) {
     settings_save(app);
   }
   /* The pipeline's config carries the feed pointer — an RBN change needs a
@@ -1044,6 +1075,22 @@ static void prefs_open(GtkButton *btn, gpointer user) {
       "S&P answers stay off the panadapter");
   adw_switch_row_set_active(ADW_SWITCH_ROW(sw), app->cq_only);
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(sgrp), sw);
+  GtkWidget *qrow = adw_combo_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(qrow), "Frequency step");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(qrow),
+      "Snap outgoing spot frequencies (panadapter and telnet feed) to a "
+      "grid — the measured value stays exact inside the app");
+  static const char *STEPS[] = { "Exact", "10 Hz", "20 Hz", "50 Hz",
+                                 "100 Hz", NULL };
+  adw_combo_row_set_model(ADW_COMBO_ROW(qrow),
+                          G_LIST_MODEL(gtk_string_list_new(STEPS)));
+  const guint vals[] = { 0, 10, 20, 50, 100 };
+  guint sel = 0;
+  for (guint i = 0; i < G_N_ELEMENTS(vals); i++) {
+    if (vals[i] == app->spot_round) { sel = i; }
+  }
+  adw_combo_row_set_selected(ADW_COMBO_ROW(qrow), sel);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(sgrp), qrow);
   adw_preferences_page_add(ADW_PREFERENCES_PAGE(page),
                            ADW_PREFERENCES_GROUP(sgrp));
 
@@ -1085,6 +1132,7 @@ static void prefs_open(GtkButton *btn, gpointer user) {
                              ADW_PREFERENCES_PAGE(page));
   g_object_set_data(G_OBJECT(dlg), "host-row", row);
   g_object_set_data(G_OBJECT(dlg), "cq-row", sw);
+  g_object_set_data(G_OBJECT(dlg), "round-row", qrow);
   g_object_set_data(G_OBJECT(dlg), "font-row", frow);
   g_object_set_data(G_OBJECT(dlg), "rbn-row", rsw);
   g_object_set_data(G_OBJECT(dlg), "rbn-call-row", rcall);
@@ -1193,6 +1241,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   app->window       = GTK_WINDOW(window);
   app->host         = settings_load_host();
   app->cq_only      = settings_load_cq_only();
+  app->spot_round   = settings_load_spot_round();
   app->decode_font  = settings_load_decode_font();
   app->list_visible = settings_load_list_visible();
   settings_load_rbn(app);

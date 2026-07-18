@@ -893,6 +893,11 @@ void skim_pipeline_set_spot_cq_only(SkimPipeline *p, gboolean cq_only) {
   g_atomic_int_set(&p->cq_only, cq_only ? 1 : 0);
 }
 
+void skim_pipeline_set_spot_round_hz(SkimPipeline *p, guint hz) {
+  if (p->spots) { skim_spot_out_set_round_hz(p->spots, hz); }
+  if (p->rbn_spots) { skim_spot_out_set_round_hz(p->rbn_spots, hz); }
+}
+
 guint64 skim_pipeline_frames(const SkimPipeline *p) { return p->frames; }
 guint64 skim_pipeline_spots(const SkimPipeline *p) {
   return p->spots ? skim_spot_out_count(p->spots) : p->spots_total;

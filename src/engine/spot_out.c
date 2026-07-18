@@ -38,6 +38,7 @@ struct _SkimSpotOut {
   double      tokens;
   gint64      token_at;
 
+  volatile gint round_hz;              /* outgoing frequency grid (0=exact) */
   SkimSpotSink sink;
   gpointer     sink_user;
   guint64      emitted;
@@ -82,6 +83,10 @@ void skim_spot_out_set_sink(SkimSpotOut *s, SkimSpotSink sink, gpointer user) {
   s->sink_user = user;
 }
 
+void skim_spot_out_set_round_hz(SkimSpotOut *s, guint hz) {
+  g_atomic_int_set(&s->round_hz, (gint)hz);
+}
+
 void skim_spot_out_set_clock(SkimSpotOut *s, SkimNowFn now_fn, gpointer user) {
   s->now_fn   = now_fn;
   s->now_user = user;
@@ -116,15 +121,18 @@ gboolean skim_spot_out_emit(SkimSpotOut *s, const char *call, const char *mode,
     m = g_new0(SpotMemo, 1);
     g_hash_table_insert(s->memo, g_strdup(call), m);
   }
-  m->freq_hz = freq_hz;
+  m->freq_hz = freq_hz;                        /* raw — QSY policy input     */
+  const gint rh = g_atomic_int_get(&s->round_hz);
+  const double out_hz =
+      rh > 1 ? round(freq_hz / rh) * rh : freq_hz;
   m->at      = now;
 
   if (s->tci) {
     char text[48];
     g_snprintf(text, sizeof(text), "%.0f dB", snr_db);
-    skim_tci_client_spot(s->tci, call, mode, freq_hz, SPOT_ARGB, text);
+    skim_tci_client_spot(s->tci, call, mode, out_hz, SPOT_ARGB, text);
   }
-  if (s->sink) { s->sink(call, mode, freq_hz, snr_db, speed, s->sink_user); }
+  if (s->sink) { s->sink(call, mode, out_hz, snr_db, speed, s->sink_user); }
   s->emitted++;
   return TRUE;
 }

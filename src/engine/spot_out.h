@@ -33,6 +33,11 @@ void  skim_spot_out_set_policy(SkimSpotOut *s, guint respot_s,
 typedef gint64 (*SkimNowFn)(gpointer user);
 void  skim_spot_out_set_clock(SkimSpotOut *s, SkimNowFn now_fn, gpointer user);
 
+/* Snap OUTGOING spot frequencies to a grid (Hz); 0/1 = exact (default).
+ * SDC-style "spot accuracy" — dedup/QSY policy always runs on the raw
+ * measured frequency, only what leaves gets rounded. Thread-safe. */
+void  skim_spot_out_set_round_hz(SkimSpotOut *s, guint hz);
+
 /* Optional extra sink (M6 RBN feed, gates): called for every emitted spot.
  * speed is WPM for CW, baud for the digital modes. */
 typedef void (*SkimSpotSink)(const char *call, const char *mode,
