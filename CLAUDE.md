@@ -230,9 +230,28 @@ gap fusion on machine keying — never get trained away). Gate
 skimmer-pane-test runs a jittered HAND fist (σ0.20 — machine keying
 reads confident enough to pass, but the fist exercises both accept and
 reject paths); dlog assertion is containment now, not equality.
-Pending: Richard's live look at the gated pane (app restart).
 IQ: iq-20260718-phaseB-live-192k.cf32 (600 s live 20 m contest,
 centre 14034.156 kHz) joined the corpus.
+**Live VERDICT on the gated pane (2026-07-18 late, Richard):** the
+batch hole fix helped (whole-over garbage rewrites 39 → 3 on the
+capture; the gate also lost its one-shot bypass — reader reaches the
+pane ONLY via streamed, word-gated overs now; a hybrid pane needs a
+v3 blob), but the field result stands: **CORRECT gray v2 draft gets
+broken by the model's "confident" white commits — run4's confidence
+is not calibrated, and confident mutations outnumber real corrections
+on a live band. run4 is NOT usable as a pane rewriter.** Both causes
+confirmed: (1) dirty context — the raw Schmitt run stream reaches the
+model without v2's layered defenses; (2) the model itself — trained
+on synthetic hand fists, and the harvest consensus filter DROPPED
+exactly the chunks it misreads, so fusion errors never trained away.
+The phase B machinery (ops, seam, firming, margin gate) is done,
+gate-proven, and stays; the reader switch stays default OFF and
+should stay off until run5. **run5 plan (next session, phase C):**
+fix harvest to keep disagreement-with-confident-machine-decode chunks
+(the teaching examples); train on contest blocks E-H + the phaseB
+capture (machine keying + chop — clean gaps are facts); calibrate
+RR_MARG_* with a labeled sweep, not a hand fit; A/B the context
+hypothesis (feed the reader only outside v2 squelch vs raw).
 Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
 **v2 live session**, **tone splitter live session** (run the app with
 `SKIM_CW_V2=1 SKIM_TONE_SPLIT=1`). MASTER.SCP can go to
