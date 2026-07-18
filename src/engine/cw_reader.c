@@ -3,13 +3,20 @@
  * blob format this loads.
  *
  * The forward pass mirrors ml/train_ctc.py::Reader exactly: n_conv dilated
- * 1-D convolutions (kernel 3, zero padding, ReLU) with residual adds from the
- * second layer on, then a 1×1 head. Features are computed here the same way
- * training did: [log(dur / median mark dur), key ? +1 : −1].
+ * 1-D convolutions (kernel 3, ReLU) with residual adds from the second layer
+ * on, then a 1×1 head. Kernel taps sit at (look−2d, look−d, look) relative
+ * to the output timestep — `look` is the layer's bounded right context
+ * (CWRD v3; v2 blobs are the symmetric look=d net). Features are computed
+ * here the same way training did.
  *
- * Cost: O(T · ch² · 3 · n_conv) — a 60 s over (~500 runs) is ~170 MFLOP,
- * one-shot per over end, engine thread. No allocations in the hot loop
- * beyond the two ping-pong activation buffers.
+ * Streaming (v3): the bounded lookahead makes the net runnable one run at a
+ * time — per-layer rings hold just enough input history, each push advances
+ * every layer as far as its lookahead allows, and logits become final
+ * sum(look) runs behind the newest input. Same float ops in the same order
+ * as the batch pass, so stream output is bit-identical to read().
+ *
+ * Cost: O(T · ch² · 3 · n_conv) either way — a 60 s over (~500 runs) is
+ * ~170 MFLOP total, ~330 kFLOP per pushed run when streamed. Engine thread.
  *
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
@@ -25,13 +32,14 @@
 #define LN_EPS 1e-5f
 
 typedef struct {
-  guint  in_ch, dil;
+  guint  in_ch, dil, look;             /* look = right context (v2: = dil)   */
   float *gamma, *beta;                 /* pre-norm LayerNorm; NULL = layer 0 */
   float *w;                            /* [ch][in_ch][KERNEL]                */
   float *b;                            /* [ch]                               */
 } Conv;
 
 struct _SkimCwReader {
+  guint  ver;                          /* blob version (2 or 3)              */
   guint  n_conv, ch, n_out, in_dim;
   char  *alphabet;                     /* n_out-1 chars, index 1..n_out-1    */
   Conv  *conv;
@@ -83,9 +91,10 @@ SkimCwReader *skim_cw_reader_load(const char *path, GError **error) {
   }
   SkimCwReader *r = g_new0(SkimCwReader, 1);
   char magic[4];
-  guint ver = 0, alen = 0;
+  guint alen = 0;
   gboolean ok = rd_bytes(f, magic, 4) && memcmp(magic, "CWRD", 4) == 0 &&
-                rd_u32(f, &ver) && ver == 2 && rd_u32(f, &r->n_conv) &&
+                rd_u32(f, &r->ver) && (r->ver == 2 || r->ver == 3) &&
+                rd_u32(f, &r->n_conv) &&
                 rd_u32(f, &r->ch) && rd_u32(f, &r->n_out) &&
                 rd_u32(f, &r->in_dim) && rd_u32(f, &alen) &&
                 alen == r->n_out - 1 && r->n_conv >= 1 && r->n_conv <= 64 &&
@@ -100,8 +109,11 @@ SkimCwReader *skim_cw_reader_load(const char *path, GError **error) {
       Conv *c = &r->conv[i];
       guint has_norm = 0;
       ok = rd_u32(f, &c->in_ch) && rd_u32(f, &c->dil) &&
+           (r->ver == 2 || rd_u32(f, &c->look)) &&
            rd_u32(f, &has_norm) && c->in_ch <= 1024 && c->dil >= 1 &&
            c->dil <= 4096 && has_norm <= 1;
+      if (r->ver == 2) { c->look = c->dil; }     /* symmetric legacy net     */
+      ok = ok && c->look <= 2 * c->dil;
       if (!ok)
         break;
       if (has_norm) {
@@ -136,7 +148,7 @@ SkimCwReader *skim_cw_reader_load(const char *path, GError **error) {
   if (!ok) {
     skim_cw_reader_free(r);
     g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_INVAL,
-                "cw_reader: %s is not a valid CWRD v1 blob", path);
+                "cw_reader: %s is not a valid CWRD v2/v3 blob", path);
     return NULL;
   }
   return r;
@@ -178,7 +190,8 @@ static float *forward(const SkimCwReader *r, const float *x, guint T) {
       float *out = nxt + (gsize)t * ch;
       for (guint o = 0; o < ch; o++) { out[o] = c->b[o]; }
       for (guint k = 0; k < KERNEL; k++) {
-        const gint ts = (gint)t + ((gint)k - 1) * (gint)c->dil;
+        const gint ts = (gint)t + ((gint)k - 2) * (gint)c->dil +
+                        (gint)c->look;
         if (ts < 0 || ts >= (gint)T)
           continue;
         const float *ip = in + (gsize)ts * in_ch;
@@ -221,31 +234,68 @@ static int cmp_double(const void *a, const void *b) {
   return (x > y) - (x < y);
 }
 
+/* --- features --------------------------------------------------------------------
+ * v2 nets normalize by the WHOLE-over mark median (batch only); v3 nets by a
+ * CAUSAL windowed median — the last MED_WIN marks up to and including run i,
+ * exactly what the live stream maintains (mirrors ml/train_ctc.py::features,
+ * incl. the med=100 fallback before the first mark). */
+#define MED_WIN 31
+
+typedef struct {
+  double win[MED_WIN];                 /* ring of recent mark durs (>= 1.0)  */
+  guint  n, pos;
+} FeatMed;
+
+static double featmed_push(FeatMed *m, gboolean key, double d) {
+  if (key) {
+    m->win[m->pos] = d;
+    m->pos = (m->pos + 1) % MED_WIN;
+    if (m->n < MED_WIN) { m->n++; }
+  }
+  if (!m->n)
+    return 100.0;
+  double tmp[MED_WIN];
+  memcpy(tmp, m->win, sizeof(double) * m->n);   /* ring order is irrelevant */
+  qsort(tmp, m->n, sizeof(double), cmp_double);
+  return m->n % 2 ? tmp[m->n / 2]
+                  : 0.5 * (tmp[m->n / 2 - 1] + tmp[m->n / 2]);
+}
+
 char *skim_cw_reader_read(const SkimCwReader *r, const gboolean *key_mark,
                           const double *dur_ms, guint n) {
   if (!r || n < 4 || r->in_dim != 4)
     return g_strdup("");
-  /* Features exactly as in training: log(dur / median mark), key ±1, and
-   * clamped log ratios to the neighbouring runs. */
-  double *marks = g_new(double, n);
-  guint nm = 0;
-  for (guint i = 0; i < n; i++) {
-    if (key_mark[i]) { marks[nm++] = MAX(dur_ms[i], 1.0); }
-  }
-  if (nm == 0) {
-    g_free(marks);
-    return g_strdup("");
-  }
-  qsort(marks, nm, sizeof(double), cmp_double);
-  const double med = nm % 2 ? marks[nm / 2]
-                            : 0.5 * (marks[nm / 2 - 1] + marks[nm / 2]);
-  g_free(marks);
   float *x = g_new(float, (gsize)n * 4);
+  if (r->ver == 2) {
+    double *marks = g_new(double, n);
+    guint nm = 0;
+    for (guint i = 0; i < n; i++) {
+      if (key_mark[i]) { marks[nm++] = MAX(dur_ms[i], 1.0); }
+    }
+    if (nm == 0) {
+      g_free(marks);
+      g_free(x);
+      return g_strdup("");
+    }
+    qsort(marks, nm, sizeof(double), cmp_double);
+    const double med = nm % 2 ? marks[nm / 2]
+                              : 0.5 * (marks[nm / 2 - 1] + marks[nm / 2]);
+    g_free(marks);
+    for (guint i = 0; i < n; i++) {
+      const double d = MAX(dur_ms[i], 1.0);
+      x[4 * i] = (float)log(d / MAX(med, 1.0));
+    }
+  } else {
+    FeatMed med = { { 0 }, 0, 0 };
+    for (guint i = 0; i < n; i++) {
+      const double d = MAX(dur_ms[i], 1.0);
+      x[4 * i] = (float)log(d / featmed_push(&med, key_mark[i], d));
+    }
+  }
   for (guint i = 0; i < n; i++) {
     const double d = MAX(dur_ms[i], 1.0);
     const double dp = i > 0 ? MAX(dur_ms[i - 1], 1.0) : d;
     const double dn = i + 1 < n ? MAX(dur_ms[i + 1], 1.0) : d;
-    x[4 * i]     = (float)log(d / MAX(med, 1.0));
     x[4 * i + 1] = key_mark[i] ? 1.0f : -1.0f;
     x[4 * i + 2] = (float)CLAMP(log(d / dp), -3.0, 3.0);
     x[4 * i + 3] = (float)CLAMP(log(d / dn), -3.0, 3.0);
@@ -279,4 +329,236 @@ double skim_cw_reader_selftest(const SkimCwReader *r) {
   }
   g_free(logits);
   return worst;
+}
+
+/* --- streaming (v3) --------------------------------------------------------------
+ * Per-layer rings of INPUT activations; each push lets every layer advance
+ * as far as its bounded lookahead allows, so logits (and greedy commits)
+ * become final sum(look) runs behind the newest input. stream_step() redoes
+ * the batch forward's float ops in the identical order per timestep —
+ * push+flush output is bit-equal to read() over the same runs. */
+
+struct _SkimCwReaderStream {
+  const SkimCwReader *r;
+  guint    lag;                        /* sum of look over all layers        */
+  /* features */
+  FeatMed  med;
+  guint64  n_in;                       /* runs accepted so far               */
+  gboolean have_pend;                  /* newest run waits for its f3        */
+  float    pend_f[3];                  /* f0, f1, f2 of that run             */
+  double   pend_dur;
+  /* per-layer input rings: row ts lives at (ts % cap[l]) × in_ch */
+  float  **ring;
+  guint   *cap;
+  gint64  *in_avail;                   /* newest input timestep (-1 = none)  */
+  gint64  *out_done;                   /* newest produced output (-1)        */
+  /* CTC greedy */
+  guint    prev_id;
+  GString *text;                       /* committed, not yet handed out      */
+};
+
+SkimCwReaderStream *skim_cw_reader_stream_new(const SkimCwReader *r) {
+  if (!r || r->ver != 3 || r->in_dim != 4)
+    return NULL;
+  SkimCwReaderStream *s = g_new0(SkimCwReaderStream, 1);
+  s->r = r;
+  for (guint l = 0; l < r->n_conv; l++) { s->lag += r->conv[l].look; }
+  s->ring     = g_new0(float *, r->n_conv);
+  s->cap      = g_new(guint, r->n_conv);
+  s->in_avail = g_new(gint64, r->n_conv);
+  s->out_done = g_new(gint64, r->n_conv);
+  for (guint l = 0; l < r->n_conv; l++) {
+    /* the taps' 2d+1-deep window plus the flush backlog (≤ lag rows)       */
+    s->cap[l]  = 2 * r->conv[l].dil + 1 + s->lag;
+    s->ring[l] = g_new(float, (gsize)s->cap[l] * r->conv[l].in_ch);
+    s->in_avail[l] = s->out_done[l] = -1;
+  }
+  s->text = g_string_new(NULL);
+  return s;
+}
+
+void skim_cw_reader_stream_free(SkimCwReaderStream *s) {
+  if (!s)
+    return;
+  for (guint l = 0; l < s->r->n_conv; l++) { g_free(s->ring[l]); }
+  g_free(s->ring);
+  g_free(s->cap);
+  g_free(s->in_avail);
+  g_free(s->out_done);
+  g_string_free(s->text, TRUE);
+  g_free(s);
+}
+
+static const float *st_row(const SkimCwReaderStream *s, guint l, gint64 ts) {
+  return s->ring[l] +
+         (gsize)(ts % (gint64)s->cap[l]) * s->r->conv[l].in_ch;
+}
+
+/* One output timestep t of layer l — forward()'s float ops in the same
+ * order, taps read from the ring; ts outside [0, in_max] are skipped (the
+ * batch zero-pad edges). out[] gets the post-residual activation. */
+static void stream_step(const SkimCwReaderStream *s, guint l, gint64 t,
+                        float *out) {
+  const Conv *c = &s->r->conv[l];
+  const guint ch = s->r->ch, in_ch = c->in_ch;
+  const gint64 in_max = s->in_avail[l];
+  float nrm[1024];                     /* in_ch ≤ 1024 (loader bound)        */
+  for (guint o = 0; o < ch; o++) { out[o] = c->b[o]; }
+  for (guint k = 0; k < KERNEL; k++) {
+    const gint64 ts = t + ((gint)k - 2) * (gint)c->dil + (gint)c->look;
+    if (ts < 0 || ts > in_max)
+      continue;
+    const float *ip = st_row(s, l, ts);
+    if (c->gamma) {                    /* pre-norm, recomputed per tap       */
+      float mean = 0.0f, var = 0.0f;
+      for (guint i = 0; i < in_ch; i++) { mean += ip[i]; }
+      mean /= (float)in_ch;
+      for (guint i = 0; i < in_ch; i++) {
+        const float d = ip[i] - mean;
+        var += d * d;
+      }
+      var /= (float)in_ch;
+      const float inv = 1.0f / sqrtf(var + LN_EPS);
+      for (guint i = 0; i < in_ch; i++) {
+        nrm[i] = (ip[i] - mean) * inv * c->gamma[i] + c->beta[i];
+      }
+    }
+    const float *rp = c->gamma ? nrm : ip;
+    const float *wp = c->w + (gsize)k;
+    for (guint o = 0; o < ch; o++) {
+      const float *wo = wp + (gsize)o * in_ch * KERNEL;
+      float sum = 0.0f;
+      for (guint i = 0; i < in_ch; i++) { sum += wo[i * KERNEL] * rp[i]; }
+      out[o] += sum;
+    }
+  }
+  const float *raw = st_row(s, l, t);  /* still ringed: t ≥ in_max − 2d      */
+  for (guint o = 0; o < ch; o++) {
+    const float v = out[o] > 0.0f ? out[o] : 0.0f;
+    out[o] = c->gamma ? raw[o] + v : v;
+  }
+}
+
+/* Head + greedy commit for one final activation row. */
+static void stream_head(SkimCwReaderStream *s, const float *act) {
+  const SkimCwReader *r = s->r;
+  guint best = 0;
+  float bv = 0.0f;
+  for (guint o = 0; o < r->n_out; o++) {
+    const float *wo = r->head_w + (gsize)o * r->ch;
+    float v = r->head_b[o];
+    for (guint i = 0; i < r->ch; i++) { v += wo[i] * act[i]; }
+    if (o == 0 || v > bv) {            /* first-max, as the batch argmax     */
+      best = o;
+      bv = v;
+    }
+  }
+  if (best != 0 && best != s->prev_id) {
+    g_string_append_c(s->text, r->alphabet[best - 1]);
+  }
+  s->prev_id = best;
+}
+
+/* Append one finalized feature row and advance every layer as far as its
+ * lookahead allows; final-layer rows fall through head+greedy into text. */
+static void stream_feed(SkimCwReaderStream *s, const float *feat) {
+  const SkimCwReader *r = s->r;
+  float out[1024];                     /* ch ≤ 1024 (loader bound)           */
+  s->in_avail[0]++;
+  memcpy(s->ring[0] +
+             (gsize)(s->in_avail[0] % (gint64)s->cap[0]) * r->in_dim,
+         feat, sizeof(float) * r->in_dim);
+  for (guint l = 0; l < r->n_conv; l++) {
+    while (s->out_done[l] <= s->in_avail[l] - 1 - (gint64)r->conv[l].look) {
+      const gint64 t = s->out_done[l] + 1;
+      stream_step(s, l, t, out);
+      s->out_done[l] = t;
+      if (l + 1 < r->n_conv) {
+        s->in_avail[l + 1]++;          /* == t                               */
+        memcpy(s->ring[l + 1] +
+                   (gsize)(t % (gint64)s->cap[l + 1]) * r->ch,
+               out, sizeof(float) * r->ch);
+      } else {
+        stream_head(s, out);
+      }
+    }
+  }
+}
+
+/* read() refuses overs shorter than 4 runs; the stream must match, so text
+ * is withheld until the 4th run arrives (irrelevant with the real ~22-run
+ * lag, decisive for the gate's toy nets). */
+static char *stream_drain(SkimCwReaderStream *s) {
+  if (s->n_in < 4 || !s->text->len)
+    return NULL;
+  char *out = g_string_free(s->text, FALSE);
+  s->text = g_string_new(NULL);
+  return out;
+}
+
+char *skim_cw_reader_stream_push(SkimCwReaderStream *s, gboolean key_mark,
+                                 double dur_ms) {
+  if (!s)
+    return NULL;
+  const double d = MAX(dur_ms, 1.0);
+  if (s->have_pend) {                  /* the newcomer supplies pend's f3    */
+    const float f[4] = { s->pend_f[0], s->pend_f[1], s->pend_f[2],
+                         (float)CLAMP(log(s->pend_dur / d), -3.0, 3.0) };
+    stream_feed(s, f);
+  }
+  const double dp = s->have_pend ? s->pend_dur : d;
+  s->pend_f[0] = (float)log(d / featmed_push(&s->med, key_mark, d));
+  s->pend_f[1] = key_mark ? 1.0f : -1.0f;
+  s->pend_f[2] = (float)CLAMP(log(d / dp), -3.0, 3.0);
+  s->pend_dur  = d;
+  s->have_pend = TRUE;
+  s->n_in++;
+  return stream_drain(s);
+}
+
+char *skim_cw_reader_stream_flush(SkimCwReaderStream *s) {
+  if (!s)
+    return NULL;
+  const SkimCwReader *r = s->r;
+  if (s->have_pend) {                  /* last run: f3 = 0 (batch: dn = d)   */
+    const float f[4] = { s->pend_f[0], s->pend_f[1], s->pend_f[2], 0.0f };
+    stream_feed(s, f);
+  }
+  const gint64 T = s->in_avail[0] + 1;
+  char *txt = NULL;
+  if (T >= 4) {
+    /* right edge: finish every layer to T−1 in order — each layer's input
+     * is complete by the time its turn comes; taps past it are skipped     */
+    float out[1024];
+    for (guint l = 0; l < r->n_conv; l++) {
+      while (s->out_done[l] < T - 1) {
+        const gint64 t = s->out_done[l] + 1;
+        stream_step(s, l, t, out);
+        s->out_done[l] = t;
+        if (l + 1 < r->n_conv) {
+          s->in_avail[l + 1]++;
+          memcpy(s->ring[l + 1] +
+                     (gsize)(t % (gint64)s->cap[l + 1]) * r->ch,
+                 out, sizeof(float) * r->ch);
+        } else {
+          stream_head(s, out);
+        }
+      }
+    }
+    if (s->text->len) {
+      txt = g_string_free(s->text, FALSE);
+      s->text = g_string_new(NULL);
+    }
+  }
+  /* reset for the next over (rings need no wipe: ts < 0 taps are skipped
+   * and every valid row is rewritten before it is read) */
+  for (guint l = 0; l < r->n_conv; l++) {
+    s->in_avail[l] = s->out_done[l] = -1;
+  }
+  memset(&s->med, 0, sizeof(s->med));
+  s->n_in = 0;
+  s->have_pend = FALSE;
+  s->prev_id = 0;
+  g_string_truncate(s->text, 0);
+  return txt;
 }

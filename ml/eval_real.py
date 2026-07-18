@@ -25,9 +25,11 @@ def main():
     ap.add_argument("--t0", type=float)
     ap.add_argument("--t1", type=float)
     ap.add_argument("--truth")
+    ap.add_argument("--legacy", action="store_true",
+                    help="run2-era checkpoint: symmetric net + whole-over median")
     a = ap.parse_args()
 
-    model = Reader()
+    model = Reader(look=Reader.DIL if a.legacy else None)
     model.load_state_dict(torch.load(a.model))
     model.eval()
 
@@ -44,7 +46,8 @@ def main():
         if len(runs) < 4:
             continue
         with torch.no_grad():
-            x = torch.tensor(features(runs)).unsqueeze(0)
+            x = torch.tensor(features(runs, med_win=None) if a.legacy
+                             else features(runs)).unsqueeze(0)
             hyp = greedy(model(x)[0])
         print(f"--- over {i} ({len(runs)} runs, t0 {o['t0_ms']/1000.0:.1f}s)")
         print(f"TRIV : {trivial_decode(runs)}")

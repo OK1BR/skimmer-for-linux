@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-# train_ctc.py — the CW reader prototype: a small bidirectional LSTM + CTC over
-# SYMBOLIC mark/space durations (not audio).
+# train_ctc.py — the CW reader: a dilated TCN + CTC over SYMBOLIC mark/space
+# durations (not audio). Phase A: causal features + bounded lookahead, so the
+# same net streams live with a ~2-4 s commit lag (see Reader.LOOK).
 #
 #   train_ctc.py [--steps 30000] [--out /var/tmp/skimmer-cw-ml]
 #
@@ -10,11 +11,12 @@
 # engine already produces (SKIM_CW_DUMP_RUNS format) and learns timing AND
 # lexical context jointly; CTC handles the unknown alignment.
 #
-# Features per run: [log(dur / median mark dur of the over), key ? +1 : -1].
-# The per-over normalization makes the input speed-invariant; drift within the
-# over stays visible relatively. Model: 2×96 BiLSTM -> linear, ~310k params —
-# small enough for a dependency-free C forward pass later (weights exported as
-# a flat .npz, see export()).
+# Features per run: [log(dur / causal windowed mark median), key ? +1 : -1,
+# clamped log ratios to prev/next run]. The median normalization makes the
+# input speed-invariant; the window (MED_WIN marks) keeps it causal AND
+# tracking mid-over speed changes. Model: 12-layer dilated TCN -> linear,
+# ~310k params — small enough for a dependency-free C forward pass (weights
+# exported as a flat .npz, see export()).
 #
 # Training data is fist_synth.py, generated on the fly (infinite, seeded).
 # Eval prints CER on a fixed validation set: 'clean' (mild fists) vs 'ugly'
@@ -26,6 +28,7 @@ import argparse, math, os, random, statistics, sys, time
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fist_synth import ALPHABET, Fist, gen_text, sample
@@ -35,17 +38,33 @@ CHARS = ALPHABET                                  # index 1.. in CTC space
 C2I = {c: i + 1 for i, c in enumerate(CHARS)}
 I2C = {i + 1: c for i, c in enumerate(CHARS)}
 
-def features(runs):
+MED_WIN = 31                                      # causal mark-median window
+
+def features(runs, med_win=MED_WIN):
     """[log(dur/median mark), key ±1, log ratio to prev, log ratio to next] —
     the ratios hand the net local timing structure (dit vs dah vs gap class)
     it would otherwise have to learn as differencing. Clamped: a glitch next
-    to a word gap is a huge but uninformative ratio."""
-    marks = [d for k, d in runs if k == 1]
-    med = statistics.median(marks) if marks else 100.0
+    to a word gap is a huge but uninformative ratio.
+
+    The mark median is CAUSAL: median of the last med_win marks up to and
+    INCLUDING run i — exactly what streaming C inference can maintain — and
+    a windowed median also follows mid-over speed changes the whole-over one
+    blurred. med_win=None restores the v1 whole-over median (run2 blobs)."""
     ds = [max(d, 1.0) for _, d in runs]
-    out = []
-    for i, (k, d) in enumerate(runs):
-        d = max(d, 1.0)
+    if med_win is None:
+        marks = [d for (k, _), d in zip(runs, ds) if k == 1]
+        med_all = statistics.median(marks) if marks else 100.0
+    out, win = [], []
+    for i, (k, _) in enumerate(runs):
+        d = ds[i]
+        if med_win is None:
+            med = med_all
+        else:
+            if k == 1:
+                win.append(d)
+                if len(win) > med_win:
+                    win.pop(0)
+            med = statistics.median(win) if win else 100.0
         f2 = math.log(d / ds[i - 1]) if i > 0 else 0.0
         f3 = math.log(d / ds[i + 1]) if i + 1 < len(ds) else 0.0
         out.append([math.log(d / med), 1.0 if k == 1 else -1.0,
@@ -53,29 +72,39 @@ def features(runs):
     return out
 
 class Reader(nn.Module):
-    """Dilated TCN, non-causal (sees both directions): receptive field
-    ±~250 runs ≈ ±35 chars — enough lexical context to resolve torn gaps.
-    All-conv on purpose: parallel over T on CPU, and the later C port is a
-    handful of conv loops instead of LSTM gate plumbing. Pre-norm residual
-    blocks (per-timestep LayerNorm over channels) — the un-normed variant
-    plateaued at CER ~0.30."""
-    DIL = (1, 2, 4, 8, 16, 32, 1, 2, 4, 8, 16, 32)
+    """Dilated TCN with a BOUNDED right receptive field (phase A, streaming):
+    kernel-3 taps sit at (-2d, -d, 0) on causal layers and (-d, 0, +d) where
+    LOOK[i] == d. Total lookahead = sum(LOOK) = 22 runs — the commit lag
+    (~2-4 s of keying, fine+mid scales only, budgeted for live streaming) —
+    while the left field grows to ~230 runs ≈ ~35 chars of lexical context.
+    look=DIL restores the v1 symmetric net bit-exactly (run2 blobs).
+    All-conv on purpose: parallel over T on CPU, and the C port is a handful
+    of conv loops instead of LSTM gate plumbing. Pre-norm residual blocks
+    (per-timestep LayerNorm over channels) — the un-normed variant plateaued
+    at CER ~0.30."""
+    DIL  = (1, 2, 4, 8, 16, 32, 1, 2, 4, 8, 16, 32)
+    LOOK = (1, 2, 4, 8, 0,  0,  1, 2, 4, 0,  0,  0)
     IN = 4
 
-    def __init__(self, ch=96):
+    def __init__(self, ch=96, look=None):
         super().__init__()
+        self.look = self.LOOK if look is None else look
         self.convs = nn.ModuleList(
-            nn.Conv1d(self.IN if i == 0 else ch, ch, 3, padding=d, dilation=d)
+            nn.Conv1d(self.IN if i == 0 else ch, ch, 3, dilation=d)
             for i, d in enumerate(self.DIL))
         self.norms = nn.ModuleList(
             nn.LayerNorm(ch) for _ in self.DIL[1:])
         self.head = nn.Conv1d(ch, 1 + len(CHARS), 1)
 
+    def _pad(self, x, i):                         # [B, ch, T] -> padded
+        d, r = self.DIL[i], self.look[i]
+        return F.pad(x, (2 * d - r, r))
+
     def forward(self, x, lens=None):
-        y = torch.relu(self.convs[0](x.transpose(1, 2)))   # [B, ch, T]
+        y = torch.relu(self.convs[0](self._pad(x.transpose(1, 2), 0)))
         for i, conv in enumerate(self.convs[1:].__iter__()):
             z = self.norms[i](y.transpose(1, 2)).transpose(1, 2)
-            y = y + torch.relu(conv(z))
+            y = y + torch.relu(conv(self._pad(z, i + 1)))
         return self.head(y).transpose(1, 2)                # [B, T, C]
 
 def greedy(logits):

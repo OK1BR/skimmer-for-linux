@@ -216,14 +216,21 @@ typedef struct {
   gboolean rd_key, rd_pend_key, rd_pend_valid;
   double   rd_run, rd_pend_len;
 
-  /* --- neural over re-reader (SKIM_CW_READER / cw-reader.bin) ------------------
-   * The same Schmitt run stream, buffered per over; at the over break the
-   * TCN+CTC reader (cw_reader.h) re-reads the WHOLE over with bidirectional
-   * context and the re-read goes to the pane as "<<text>> ". Pane only —
-   * the extractor/spot path never sees it (hallucination guard). */
+  /* --- neural reader (SKIM_CW_READER / cw-reader.bin) --------------------------
+   * The same Schmitt run stream. A v3 blob STREAMS (phase A): once the
+   * channel proves solid the buffered backlog is fed and every further run
+   * pushes through the bounded-lookahead net — text commits ~2-4 s behind
+   * the key and drains to the pane word by word. A v2 blob keeps the old
+   * shape: buffer the over, re-read the whole of it at the break. Pane
+   * only either way — the extractor/spot path never sees reader text
+   * (hallucination guard). */
   gboolean rr_arm;
   GArray  *rr_runs;                     /* RrRun ring of the current over     */
-  GString *rr_out;                      /* pending re-read text to drain      */
+  GString *rr_out;                      /* pending reader text to drain       */
+  SkimCwReaderStream *rr_stream;        /* v3 blobs only (lazy)               */
+  gboolean rr_stream_no;                /* stream_new refused (v2 blob)       */
+  gboolean rr_live;                     /* streaming armed for this over      */
+  GString *rr_word;                     /* committed text short of a word gap */
 } Cw2State;
 
 typedef struct { guint8 key; float dur_ms; } RrRun;
@@ -290,13 +297,72 @@ static SkimCwReader *rr_reader(void) {
   return r;
 }
 
-/* Over break: re-read the buffered runs and queue the text for the pane.
- * Gated on a SOLID channel (learned dit, enough committed marks) — noise
- * channels break "overs" constantly, and a band's worth of them would
- * drown the engine thread in forward passes. */
+/* Move freshly committed stream text into the pane queue, WHOLE WORDS at a
+ * time (up to the last committed space; force=TRUE at the over break sends
+ * the rest too). Word granularity keeps the pane readable and puts the
+ * commit lag on the decode log's own timestamps. */
+static void rr_commit(Cw2State *st, char *txt, gboolean force) {
+  if (txt) {
+    if (!st->rr_word) { st->rr_word = g_string_new(NULL); }
+    g_string_append(st->rr_word, txt);
+    g_free(txt);
+  }
+  if (!st->rr_word || !st->rr_word->len)
+    return;
+  const char *sp = force ? NULL : strrchr(st->rr_word->str, ' ');
+  gsize keep = force ? st->rr_word->len
+                     : (sp ? (gsize)(sp - st->rr_word->str) + 1 : 0);
+  if (!keep && st->rr_word->len >= 24) {   /* spaceless torrent — cap it     */
+    keep = st->rr_word->len;
+  }
+  if (keep) {
+    if (!st->rr_out) { st->rr_out = g_string_new(NULL); }
+    g_string_append_len(st->rr_out, st->rr_word->str, (gssize)keep);
+    g_string_erase(st->rr_word, 0, (gssize)keep);
+  }
+}
+
+/* The moment a channel proves solid mid-over, arm the stream and feed it
+ * the buffered backlog (trimmed to start on a mark, ≥ 40 runs ≈ 8 chars —
+ * the same blip filter the batch path applies). Noise channels never
+ * qualify, so no forward passes burn on them. */
+static void rr_try_arm(Cw2State *st) {
+  if (st->rr_live || st->rr_stream_no || !st->rr_runs ||
+      st->rr_runs->len < 40 || st->dit <= 0 || st->marks_ok < 8 ||
+      st->snr_latch < 12.0)
+    return;
+  if (!st->rr_stream) {
+    st->rr_stream = skim_cw_reader_stream_new(rr_reader());
+    if (!st->rr_stream) {                /* v2 blob — batch at the break     */
+      st->rr_stream_no = TRUE;
+      return;
+    }
+  }
+  st->rr_live = TRUE;
+  const RrRun *v = (const RrRun *)st->rr_runs->data;
+  guint a = 0;
+  while (a < st->rr_runs->len && !v[a].key) { a++; }
+  for (guint i = a; i < st->rr_runs->len; i++) {
+    rr_commit(st, skim_cw_reader_stream_push(st->rr_stream, v[i].key,
+                                             v[i].dur_ms),
+              FALSE);
+  }
+}
+
+/* Over break: land the reader text for the pane. Streaming (v3): flush the
+ * tail — everything already committed word-wise during the over. Batch
+ * (v2): re-read the whole buffered over, gated on a SOLID channel (learned
+ * dit, enough committed marks) — noise channels break "overs" constantly,
+ * and a band's worth of them would drown the engine thread in forwards. */
 static void rr_flush_over(Cw2State *st) {
   if (!st->rr_runs)
     return;
+  if (st->rr_live) {
+    rr_commit(st, skim_cw_reader_stream_flush(st->rr_stream), TRUE);
+    st->rr_live = FALSE;
+    g_array_set_size(st->rr_runs, 0);
+    return;
+  }
   if (st->dit <= 0 || st->marks_ok < 8 || st->snr_latch < 12.0) {
     /* The reader is for STRONG hand-keyed stations (the ear-readable ones).
      * A weak channel's runs are Schmitt noise — the net would faithfully
@@ -351,6 +417,8 @@ static void cw2_channel_free(gpointer state) {
     return;
   if (st->rr_runs) { g_array_free(st->rr_runs, TRUE); }
   if (st->rr_out) { g_string_free(st->rr_out, TRUE); }
+  if (st->rr_word) { g_string_free(st->rr_word, TRUE); }
+  if (st->rr_stream) { skim_cw_reader_stream_free(st->rr_stream); }
   g_free(st->lat);
   g_free(st);
 }
@@ -793,6 +861,13 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
           const RrRun rr = { st->rd_pend_key ? 1 : 0,
                              (float)(st->rd_pend_len * 1000.0 / st->rate) };
           g_array_append_val(st->rr_runs, rr);
+          if (st->rr_live) {                     /* stream keeps pace        */
+            rr_commit(st, skim_cw_reader_stream_push(st->rr_stream,
+                                                     rr.key != 0, rr.dur_ms),
+                      FALSE);
+          } else {
+            rr_try_arm(st);
+          }
         }
         st->rd_pend_valid = FALSE;
       }

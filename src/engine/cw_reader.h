@@ -1,9 +1,17 @@
-/* cw_reader.h — the neural CW reader (prototype): a small dilated-TCN + CTC
- * network over SYMBOLIC mark/space run durations, trained offline on
- * synthetic "fists" (ml/train_ctc.py). It re-reads a whole over at once with
- * bidirectional context — timing chaos a strong hand-keyed operator produces
- * (torn/fused gaps, mid-over speed changes, bug weighting) that the causal
- * per-element decoders cannot resolve.
+/* cw_reader.h — the neural CW reader: a small dilated-TCN + CTC network over
+ * SYMBOLIC mark/space run durations, trained offline on synthetic "fists"
+ * (ml/train_ctc.py). It reads through the timing chaos a strong hand-keyed
+ * operator produces (torn/fused gaps, mid-over speed changes, bug weighting)
+ * that the causal per-element decoders cannot resolve.
+ *
+ * Two ways in:
+ *   - read(): one-shot over a finished over (any blob version);
+ *   - stream (phase A): CWRD v3 blobs are trained with a BOUNDED right
+ *     receptive field (per-layer `look`, ~22 runs total) and causal
+ *     windowed-median features, so the same net runs incrementally — push
+ *     runs as they complete, committed text comes back ~2-4 s behind the
+ *     key. The concatenated stream output is bit-identical to read() over
+ *     the same runs.
  *
  * Text from this reader feeds the DECODE PANE only. It never feeds the spot
  * path: a lexically-primed model can hallucinate plausible callsigns from
@@ -37,6 +45,25 @@ char *skim_cw_reader_read(const SkimCwReader *r, const gboolean *key_mark,
 /* Self-test against the blob's baked-in test vector (max |logit diff|).
  * The offline gate asserts this stays < 1e-3. */
 double skim_cw_reader_selftest(const SkimCwReader *r);
+
+/* --- streaming (CWRD v3 blobs only) ---------------------------------------- */
+
+typedef struct _SkimCwReaderStream SkimCwReaderStream;
+
+/* Per-channel incremental state (~200 kB). NULL for a v2 blob — those nets
+ * are symmetric and cannot stream; fall back to read() at the over break. */
+SkimCwReaderStream *skim_cw_reader_stream_new(const SkimCwReader *r);
+void skim_cw_reader_stream_free(SkimCwReaderStream *s);
+
+/* Push one completed run. Returns text newly committed by the bounded
+ * lookahead (g_free), or NULL when nothing became final yet. */
+char *skim_cw_reader_stream_push(SkimCwReaderStream *s, gboolean key_mark,
+                                 double dur_ms);
+
+/* Over break: commit everything still in flight and reset the stream for
+ * the next over. Returns the tail text (g_free) or NULL. push+flush output
+ * concatenated is bit-identical to read() of the same runs. */
+char *skim_cw_reader_stream_flush(SkimCwReaderStream *s);
 
 G_END_DECLS
 
