@@ -164,15 +164,35 @@ only on decoded-text hits) and **the app UI froze under contest load**
 (one g_idle_add per event → unbounded pending-source list; five
 callbacks now share ONE queue + a single drain idle, batch collapses
 per-station and pane text — live force-quit 2026-07-18, fix soaking).
-Next: phase B (model owns pane text on solid channels, v2 keeps weak).
-IQ corpus: 10 recordings + 20 m contest blocks A–F (600 s each,
+**Phase C data opened + run4 SHIPPED (2026-07-18 evening).**
+`ml/harvest_real.py` mines consensus-labeled pairs from run dumps (label
+= trivial decode on machine keying, the reader model only CHECKS at
+CER ≤ 0.15 — disagreement drops the chunk); train_ctc.py mixes real
+pairs (re-sped + jittered) into synthetic batches (`--real*`, `--init`).
+run4 = run3 + 12k fine-tune steps at 12 % real (contest blocks A–D, 274
+pairs): synthetic 0.029/0.039, held-out blocks F+G CER 0.046 vs run3
+0.059 (labels biased TOWARD run3), EA1EYL 21 exact calls, EA3BP body
+exact. **Blob run4 is IN-REPO: data/cw-reader.bin** (provenance
+data/cw-reader.md); the cw-reader gate runs torch-parity +
+stream==batch on it every `meson test`. App: **Preferences → CW reader,
+default OFF** (Richard 2026-07-18; plain launch never arms — ear rule),
+switch resolves blob + sets SKIM_CW_READER for the next reconnect.
+**Engine clock fix:** offline replay runs TTLs/dedup on STREAM time
+(pipe_now_us; spot_out injectable clock; replay now also prunes) — A/B
+tables were speed-contaminated (44× vs 5× lost a third of the table to
+wall-clock flock expiry); verified line-identical on contest block F.
+**Coalescing soak: 74 min contest load, responsive, clean exit** (the
+old build froze at ~75 min — watch one more long live session).
+IQ corpus: 10 recordings + 20 m contest blocks A–H (600 s each,
 2026-07-18) in ~/.local/share/skimmer-for-linux/iq/.
 Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
 **v2 live session**, **tone splitter live session** (run the app with
-`SKIM_CW_V2=1 SKIM_TONE_SPLIT=1`), **coalescing fix soak** (app on the
-contest band). MASTER.SCP can go to
+`SKIM_CW_V2=1 SKIM_TONE_SPLIT=1`). MASTER.SCP can go to
 `~/.config/skimmer-for-linux/master.scp` (the app loads it if present).
-Next: phase B; RTTY/PSK backends; v2 + splitter default flips.
+**Release: Richard decided 2026-07-18 — tag v0.1.0 only AFTER his live
+validation session** (v2 + splitter + one more soak), then default
+flips + release. Next: phase B (model owns pane text on solid channels,
+v2 keeps weak); RTTY/PSK backends.
 
 ## Layout
 
