@@ -389,7 +389,15 @@ static void rr_commit_stream(Cw2State *st, char *txt, guint *pos,
       sum += m;
       lo = MIN(lo, m);
     }
-    const gboolean sure = sum / (double)wn >= RR_MARG_MEAN &&
+    gsize solid_chars = 0;
+    for (gsize i = at; i < we; i++) {
+      if (st->hy_word->str[i] != ' ') { solid_chars++; }
+    }
+    /* A single char corrects nothing v2 does not already show — E/T chop
+     * fragments read "confidently" and repainted panes one letter at a
+     * time. */
+    const gboolean sure = solid_chars >= 2 &&
+                          sum / (double)wn >= RR_MARG_MEAN &&
                           lo >= RR_MARG_MIN;
     if (g_getenv("SKIM_RR_DBG")) {
       char *w = g_strndup(st->hy_word->str + at, wn);
@@ -536,54 +544,19 @@ static void rr_try_arm(Cw2State *st) {
   }
 }
 
-/* Over break: land the reader text for the pane. Streaming (v3): flush the
- * tail — everything already committed word-wise during the over. Batch
- * (a v2 blob, or a solid over too short to have armed): re-read the whole
- * buffered over and seal the pane region in one OPEN+CLOSE — the same ops
- * channel, so no aux line ever fragments the pane. Gated on a SOLID channel
- * (learned dit, enough committed marks) — noise channels break "overs"
- * constantly, and a band's worth of them would drown the engine thread in
- * forwards. Ops only, never out->text: the first wiring drained reader text
- * into the ordinary text path and the pipeline fed it to the EXTRACTOR
- * (phantom EI55ISI station from a re-read of babble, live 2026-07-16). */
+/* Over break: land the reader text for the pane — STREAMED overs only.
+ * The streaming flush commits the tail through the same per-word margin
+ * gate every mid-over word passed. There is NO batch fallback into the
+ * pane: a one-shot skim_cw_reader_read() carries no margins, and letting
+ * it seal short overs ungated repainted the pane with chop garbage the
+ * word gate exists to stop (live-caught 2026-07-18, second session —
+ * "EE ILE=3ISHRIEN5SFDXEUE" whole-over rewrites). Short overs and v2
+ * blobs keep v2's text; the hybrid pane needs a v3 blob. */
 static void rr_flush_over(Cw2State *st) {
   if (!st->rr_runs)
     return;
   if (st->rr_live) {
     rr_close_over(st);
-    g_array_set_size(st->rr_runs, 0);
-    ov_reset(st);
-    return;
-  }
-  if (st->dit > 0 && st->marks_ok >= 8 && st->snr_latch >= 12.0) {
-    /* The reader is for STRONG hand-keyed stations (the ear-readable ones).
-     * A weak channel's runs are Schmitt noise — the net would faithfully
-     * read garbage; the classical path serves those better. */
-    guint a = 0, b = st->rr_runs->len;
-    const RrRun *v = (const RrRun *)st->rr_runs->data;
-    while (a < b && !v[a].key) { a++; }           /* an over starts and      */
-    while (b > a && !v[b - 1].key) { b--; }       /* ends on a mark          */
-    if (b - a >= 40) {                            /* ~8 chars — skip blips   */
-      const guint n = b - a;
-      gboolean *key = g_new(gboolean, n);
-      double   *dur = g_new(double, n);
-      for (guint i = 0; i < n; i++) {
-        key[i] = v[a + i].key;
-        dur[i] = v[a + i].dur_ms;
-      }
-      char *txt = skim_cw_reader_read(rr_reader(), key, dur, n);
-      if (txt[0]) {
-        const guint flen = (guint)strlen(txt);
-        hy_queue(st, SKIM_PANE_OP_OPEN, st->ov_sent, g_strdup(txt), flen,
-                 NULL);
-        hy_queue(st, SKIM_PANE_OP_CLOSE, 0, g_strdup(txt), flen,
-                 g_strdup(txt));
-        hy_queue(st, SKIM_PANE_OP_APPEND, 0, g_strdup(BREAK_MARK), 0, NULL);
-      }
-      g_free(txt);
-      g_free(key);
-      g_free(dur);
-    }
   }
   g_array_set_size(st->rr_runs, 0);
   ov_reset(st);
