@@ -139,30 +139,16 @@ skimmer_call_test = executable('skimmer-call-test',
 )
 test('callsign', skimmer_call_test, timeout : 60)
 
-# Neural CW reader: C forward pass vs an independent reference, plus the
-# in-repo blob's torch-baked test vector and stream==batch equivalence —
-# the shipped weights are gated on every `meson test`.
-skimmer_reader_test = executable('skimmer-reader-test',
-  ['src/reader_test.c'],
-  include_directories : include_directories('src'),
-  dependencies : engine_deps,
-  link_with : engine_lib,
-)
-test('cw-reader', skimmer_reader_test, timeout : 60,
-  env : ['SKIM_READER_BLOB=' + meson.project_source_root() / 'data/cw-reader.bin'])
-
-# Phase B: offline gate — the hybrid pane (draft → final). SkimPaneLog op
-# semantics, stream char positions vs read(), and the offline pipeline with
-# the streamed reader owning a solid over's pane text — station table must
-# stay identical with the reader off (extractor isolation).
+# Decode pane gate: SkimPaneLog op semantics — the ONE applier the app's
+# decode pane is built on (the neural reader that once fed it richer ops
+# is gone; the units keep the applier honest).
 skimmer_pane_test = executable('skimmer-pane-test',
   ['src/pane_test.c'],
   include_directories : include_directories('src'),
   dependencies : engine_deps,
   link_with : engine_lib,
 )
-test('hybrid-pane', skimmer_pane_test, timeout : 120,
-  env : ['SKIM_READER_BLOB=' + meson.project_source_root() / 'data/cw-reader.bin'])
+test('decode-pane', skimmer_pane_test, timeout : 120)
 
 # M5: offline gate — station tracker units, spot policy units, and the WHOLE
 # pipeline over a real WebSocket against a mock TCI server (spots come back).
@@ -195,7 +181,3 @@ executable('skimmer-for-linux',
   c_args : ['-DSKIMMER_DATADIR="@0@"'.format(
     get_option('prefix') / get_option('datadir') / 'skimmer-for-linux')],
 )
-
-# The neural CW reader weights (data/cw-reader.md documents provenance).
-install_data('data/cw-reader.bin',
-  install_dir : get_option('datadir') / 'skimmer-for-linux')
