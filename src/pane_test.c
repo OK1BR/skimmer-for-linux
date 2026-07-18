@@ -159,7 +159,7 @@ static void run_stream_positions(const char *blob) {
       guint *pp = NULL;
       char  *t = skim_cw_reader_stream_push_pos(
           s, g_array_index(key, gboolean, i), g_array_index(dur, double, i),
-          &pp);
+          &pp, NULL);
       if (t) {
         g_string_append(txt, t);
         g_array_append_vals(pos, pp, (guint)strlen(t));
@@ -168,7 +168,7 @@ static void run_stream_positions(const char *blob) {
       g_free(pp);
     }
     guint *pp = NULL;
-    char  *t = skim_cw_reader_stream_flush_pos(s, &pp);
+    char  *t = skim_cw_reader_stream_flush_pos(s, &pp, NULL);
     if (t) {
       g_string_append(txt, t);
       g_array_append_vals(pos, pp, (guint)strlen(t));
@@ -200,29 +200,40 @@ static void run_stream_positions(const char *blob) {
 
 #define RATE 48000.0
 
+static double gauss(GRand *rng) {
+  double u1 = 1.0 - g_rand_double(rng), u2 = g_rand_double(rng);
+  return sqrt(-2.0 * log(u1)) * cos(2.0 * G_PI * u2);
+}
+
 static void key_run(GArray *env, double samps, float on) {
   guint n = (guint)(samps + 0.5);
   for (guint i = 0; i < n; i++) { g_array_append_val(env, on); }
 }
 
-static GArray *gen_env(const char *payload, double wpm, double rate) {
+/* A HAND fist: every element/gap jittered by exp(σ·N(0,1)). The reader only
+ * takes over chaotic fists (RR_MIN_ERR) — machine keying stays v2's, so the
+ * integration must key like an operator, not like this test's author. */
+static GArray *gen_env(const char *payload, double wpm, double rate,
+                       GRand *rng, double sigma) {
   GArray *env = g_array_new(FALSE, FALSE, sizeof(float));
   char   *text = g_strdup_printf("VVV %s", payload);
   double  dit = 1.2 / wpm * rate;
+#define JIT(d) ((d) * exp(sigma * gauss(rng)))
   key_run(env, 3 * dit, 0.0f);
   for (const char *p = text; *p; p++) {
     if (*p == ' ') {
-      key_run(env, 7 * dit, 0.0f);
+      key_run(env, JIT(7 * dit), 0.0f);
       continue;
     }
     const char *m = morse_of(*p);
     if (!m) { continue; }
     for (const char *e = m; *e; e++) {
-      key_run(env, *e == '-' ? 3 * dit : dit, 1.0f);
-      if (e[1]) { key_run(env, dit, 0.0f); }
+      key_run(env, JIT(*e == '-' ? 3 * dit : dit), 1.0f);
+      if (e[1]) { key_run(env, JIT(dit), 0.0f); }
     }
-    key_run(env, 3 * dit, 0.0f);
+    key_run(env, JIT(3 * dit), 0.0f);
   }
+#undef JIT
   key_run(env, 2.5 * rate, 0.0f);                /* enough for the break     */
   g_free(text);
   return env;
@@ -249,11 +260,6 @@ static void shape_env(GArray *env, double rate) {
   memcpy(src, dst, env->len * sizeof(float));
   g_free(dst);
   g_free(w);
-}
-
-static double gauss(GRand *rng) {
-  double u1 = 1.0 - g_rand_double(rng), u2 = g_rand_double(rng);
-  return sqrt(-2.0 * log(u1)) * cos(2.0 * G_PI * u2);
 }
 
 static float *synth_one(const GArray *env, double f0, double amp,
@@ -372,14 +378,18 @@ static guint count_occ(const char *hay, const char *needle) {
   return n;
 }
 
-/* Concatenate the dlog's aux increments near f0 (kHz match to 0.05). */
-static char *dlog_aux_concat(const char *path, double f0) {
+/* Every dlog aux increment near f0 (kHz match to 0.05) must appear inside
+ * the sealed over — with the per-word confidence gate the close text
+ * interleaves ACCEPTED reader words with draft spans, so equality no
+ * longer holds, containment must. Returns the number of increments, -1 on
+ * a miss. */
+static int dlog_aux_within(const char *path, double f0, const char *over) {
   char *body = NULL;
   if (!g_file_get_contents(path, &body, NULL, NULL))
-    return g_strdup("");
-  GString *out = g_string_new(NULL);
+    return 0;
+  int n = 0;
   char **lines = g_strsplit(body, "\n", -1);
-  for (char **l = lines; *l; l++) {
+  for (char **l = lines; *l && n >= 0; l++) {
     char *aux = strstr(*l, "   aux        |");
     if (!aux)
       continue;
@@ -389,11 +399,15 @@ static char *dlog_aux_concat(const char *path, double f0) {
       continue;
     char *txt = aux + strlen("   aux        |");
     char *bar = strrchr(txt, '|');
-    if (bar) { g_string_append_len(out, txt, bar - txt); }
+    if (!bar)
+      continue;
+    char *inc = g_strndup(txt, (gsize)(bar - txt));
+    n = strstr(over, inc) ? n + 1 : -1;
+    g_free(inc);
   }
   g_strfreev(lines);
   g_free(body);
-  return g_string_free(out, FALSE);
+  return n;
 }
 
 static void run_integration(const char *blob) {
@@ -408,7 +422,7 @@ static void run_integration(const char *blob) {
     if (i) { g_string_append_c(pay, ' '); }
     g_string_append(pay, "CQ TEST OK1BR OK1BR");
   }
-  GArray *env = gen_env(pay->str, 24, RATE);
+  GArray *env = gen_env(pay->str, 24, RATE, rng, 0.20);
   shape_env(env, RATE);
   guint  frames;
   float *iq = synth_one(env, foff, 0.5, 20.0, rng, &frames);
@@ -443,7 +457,7 @@ static void run_integration(const char *blob) {
       check("final prefix within text", !cap.bad_final);
       check("no newline reached the pane", !cap.saw_nl);
       check("reader text carries the calls",
-            count_occ(cap.close_text->str, "OK1BR") >= 8);
+            count_occ(cap.close_text->str, "OK1BR") >= 4);
       check("no live region after the run",
             skim_pane_log_over_len(cap.pl) == 0);
       const char *pane = skim_pane_log_text(cap.pl);
@@ -453,10 +467,8 @@ static void run_integration(const char *blob) {
                     cap.close_text->len + 8);
       check("the over separator follows",
             strstr(pane + cap.close_text->len, "\xC2\xB7") != NULL);
-      char *aux = dlog_aux_concat(dlog, f0);
-      check("decode log increments == the sealed over",
-            strcmp(aux, cap.close_text->str) == 0);
-      g_free(aux);
+      const int nin = dlog_aux_within(dlog, f0, cap.close_text->str);
+      check("decode log increments all inside the sealed over", nin >= 3);
       char *key_on = seen_key(&on), *key_off = seen_key(&off);
       check("station table identical to reader-off (extractor isolation)",
             strcmp(key_on, key_off) == 0);

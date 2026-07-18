@@ -356,6 +356,7 @@ struct _SkimCwReaderStream {
   guint    prev_id;
   GString *text;                       /* committed, not yet handed out      */
   GArray  *pos;                        /* guint run index per text char      */
+  GArray  *marg;                       /* float logit margin per text char   */
 };
 
 SkimCwReaderStream *skim_cw_reader_stream_new(const SkimCwReader *r) {
@@ -376,6 +377,7 @@ SkimCwReaderStream *skim_cw_reader_stream_new(const SkimCwReader *r) {
   }
   s->text = g_string_new(NULL);
   s->pos  = g_array_new(FALSE, FALSE, sizeof(guint));
+  s->marg = g_array_new(FALSE, FALSE, sizeof(float));
   return s;
 }
 
@@ -389,6 +391,7 @@ void skim_cw_reader_stream_free(SkimCwReaderStream *s) {
   g_free(s->out_done);
   g_string_free(s->text, TRUE);
   g_array_free(s->pos, TRUE);
+  g_array_free(s->marg, TRUE);
   g_free(s);
 }
 
@@ -443,24 +446,32 @@ static void stream_step(const SkimCwReaderStream *s, guint l, gint64 t,
 }
 
 /* Head + greedy commit for one final activation row; t is the output
- * timestep (== input run index) the char is attributed to. */
+ * timestep (== input run index) the char is attributed to. The margin —
+ * winning logit minus runner-up at the commit frame — is the net's own
+ * confidence: sharp on clean reads, near zero where classes fight (gap
+ * fusions, babble). The pane's per-word gate rides on it. */
 static void stream_head(SkimCwReaderStream *s, const float *act, gint64 t) {
   const SkimCwReader *r = s->r;
   guint best = 0;
-  float bv = 0.0f;
+  float bv = 0.0f, second = 0.0f;
   for (guint o = 0; o < r->n_out; o++) {
     const float *wo = r->head_w + (gsize)o * r->ch;
     float v = r->head_b[o];
     for (guint i = 0; i < r->ch; i++) { v += wo[i] * act[i]; }
     if (o == 0 || v > bv) {            /* first-max, as the batch argmax     */
+      if (o) { second = bv; }
       best = o;
       bv = v;
+    } else if (o == 1 || v > second) {
+      second = v;
     }
   }
   if (best != 0 && best != s->prev_id) {
     g_string_append_c(s->text, r->alphabet[best - 1]);
     const guint p = (guint)t;
+    const float m = bv - second;
     g_array_append_val(s->pos, p);
+    g_array_append_val(s->marg, m);
   }
   s->prev_id = best;
 }
@@ -495,24 +506,32 @@ static void stream_feed(SkimCwReaderStream *s, const float *feat) {
  * is withheld until the 4th run arrives (irrelevant with the real ~22-run
  * lag, decisive for the gate's toy nets). pos (optional out) receives the
  * per-char run indices, parallel to the returned string. */
-static char *stream_drain(SkimCwReaderStream *s, guint **pos) {
+static char *stream_drain(SkimCwReaderStream *s, guint **pos, float **marg) {
   if (pos) { *pos = NULL; }
+  if (marg) { *marg = NULL; }
   if (s->n_in < 4 || !s->text->len)
     return NULL;
   if (pos) {
     *pos = g_new(guint, s->text->len);
     memcpy(*pos, s->pos->data, sizeof(guint) * s->text->len);
   }
+  if (marg) {
+    *marg = g_new(float, s->text->len);
+    memcpy(*marg, s->marg->data, sizeof(float) * s->text->len);
+  }
   char *out = g_string_free(s->text, FALSE);
   s->text = g_string_new(NULL);
   g_array_set_size(s->pos, 0);
+  g_array_set_size(s->marg, 0);
   return out;
 }
 
 char *skim_cw_reader_stream_push_pos(SkimCwReaderStream *s, gboolean key_mark,
-                                     double dur_ms, guint **pos) {
+                                     double dur_ms, guint **pos,
+                                     float **marg) {
   if (!s) {
     if (pos) { *pos = NULL; }
+    if (marg) { *marg = NULL; }
     return NULL;
   }
   const double d = MAX(dur_ms, 1.0);
@@ -528,16 +547,18 @@ char *skim_cw_reader_stream_push_pos(SkimCwReaderStream *s, gboolean key_mark,
   s->pend_dur  = d;
   s->have_pend = TRUE;
   s->n_in++;
-  return stream_drain(s, pos);
+  return stream_drain(s, pos, marg);
 }
 
 char *skim_cw_reader_stream_push(SkimCwReaderStream *s, gboolean key_mark,
                                  double dur_ms) {
-  return skim_cw_reader_stream_push_pos(s, key_mark, dur_ms, NULL);
+  return skim_cw_reader_stream_push_pos(s, key_mark, dur_ms, NULL, NULL);
 }
 
-char *skim_cw_reader_stream_flush_pos(SkimCwReaderStream *s, guint **pos) {
+char *skim_cw_reader_stream_flush_pos(SkimCwReaderStream *s, guint **pos,
+                                      float **marg) {
   if (pos) { *pos = NULL; }
+  if (marg) { *marg = NULL; }
   if (!s)
     return NULL;
   const SkimCwReader *r = s->r;
@@ -571,6 +592,10 @@ char *skim_cw_reader_stream_flush_pos(SkimCwReaderStream *s, guint **pos) {
         *pos = g_new(guint, s->text->len);
         memcpy(*pos, s->pos->data, sizeof(guint) * s->text->len);
       }
+      if (marg) {
+        *marg = g_new(float, s->text->len);
+        memcpy(*marg, s->marg->data, sizeof(float) * s->text->len);
+      }
       txt = g_string_free(s->text, FALSE);
       s->text = g_string_new(NULL);
     }
@@ -586,9 +611,10 @@ char *skim_cw_reader_stream_flush_pos(SkimCwReaderStream *s, guint **pos) {
   s->prev_id = 0;
   g_string_truncate(s->text, 0);
   g_array_set_size(s->pos, 0);
+  g_array_set_size(s->marg, 0);
   return txt;
 }
 
 char *skim_cw_reader_stream_flush(SkimCwReaderStream *s) {
-  return skim_cw_reader_stream_flush_pos(s, NULL);
+  return skim_cw_reader_stream_flush_pos(s, NULL, NULL);
 }

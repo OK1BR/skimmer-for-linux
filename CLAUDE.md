@@ -205,8 +205,34 @@ pane_log units, positions, offline pipeline — pane == sealed over
 exactly once, dlog increments == over, deterministic, station table
 bit-identical reader on/off) — 10 gates total. Real replay (binec):
 classical decode lines line-identical on/off, station table identical,
-269 streamed increments, EA1EYL reads clean. Pending: Richard's live
-look at the firming-up pane (app restart picks up the new binary).
+EA1EYL reads clean.
+**Per-word confidence gate (live-driven, same evening).** Richard's
+first live look: contest band, the pane full of model drivel — run4
+mangles clean 25 WPM machine keying that v2 copies perfectly (ED1R:
+"TEST EL1R D1R"; E/T babble committed as text) — the model was built
+for hand-fist chaos and the takeover handed it everything solid.
+Channel-stat gates FAILED on measurement (elem_err: EA1EYL's marks are
+CLEAN ~0.05, it's his gaps that tear; gap-chaos EMA: QSK chop + callers
+inflate contest channels above hand fists — neither separates). What
+works: the net's OWN confidence — per-char logit margins (winner minus
+runner-up, `*_pos` API now returns them) measured on binec + a live
+20 m capture separate drivel (mean ~4, worst char ~0) from real words
+(TEST 13+, exact calls 6-10). Gate: a word replaces draft only at
+mean ≥ 6 AND min ≥ 3 (RR_MARG_* in decode_cw_v2.c, run4-calibrated —
+a new blob recalibrates); a rejected word's span keeps v2's draft in
+the over composition, and rejected babble whose span v2 kept silent
+vanishes. Live capture: 16 % of words accepted (EB7KA, OY1CT, EA8QP,
+TEST, 5NN…), EA1EYL keeps its exact calls. Known limit: a CONFIDENT
+mutation ("EA1EKL" min 4.0) still passes — that is run5's job (phase C
+on blocks E-H with the harvest consensus filter fixed: it currently
+DROPS the chunks the model misreads, so its systematic errors — word
+gap fusion on machine keying — never get trained away). Gate
+skimmer-pane-test runs a jittered HAND fist (σ0.20 — machine keying
+reads confident enough to pass, but the fist exercises both accept and
+reject paths); dlog assertion is containment now, not equality.
+Pending: Richard's live look at the gated pane (app restart).
+IQ: iq-20260718-phaseB-live-192k.cf32 (600 s live 20 m contest,
+centre 14034.156 kHz) joined the corpus.
 Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
 **v2 live session**, **tone splitter live session** (run the app with
 `SKIM_CW_V2=1 SKIM_TONE_SPLIT=1`). MASTER.SCP can go to

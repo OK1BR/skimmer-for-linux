@@ -242,6 +242,7 @@ typedef struct {
   guint    ov_covered;                  /* draft bytes superseded by commits  */
   GString *hy_word;                     /* reader chars short of a word gap   */
   GArray  *hy_pos;                      /* run index per hy_word byte         */
+  GArray  *hy_marg;                     /* logit margin per hy_word byte      */
   GString *hy_final;                    /* over's reader-final pane text      */
   GString *hy_fresh;                    /* newly final chars (decode log)     */
   gboolean hy_open;                     /* the pane has a live over region    */
@@ -333,18 +334,23 @@ static void hy_queue(Cw2State *st, SkimPaneOpKind kind, guint erase,
  * and advance the model/draft seam: the last folded char's run maps to an
  * end time, and every draft char whose audio ended by then is superseded. */
 static void rr_commit_stream(Cw2State *st, char *txt, guint *pos,
-                             gboolean force) {
+                             float *marg, gboolean force) {
   if (txt) {
     const gsize n = strlen(txt);
     if (!st->hy_word) {
       st->hy_word = g_string_new(NULL);
       st->hy_pos  = g_array_new(FALSE, FALSE, sizeof(guint));
+      st->hy_marg = g_array_new(FALSE, FALSE, sizeof(float));
     }
     g_string_append(st->hy_word, txt);
-    if (n) { g_array_append_vals(st->hy_pos, pos, (guint)n); }
+    if (n) {
+      g_array_append_vals(st->hy_pos, pos, (guint)n);
+      g_array_append_vals(st->hy_marg, marg, (guint)n);
+    }
   }
   g_free(txt);
   g_free(pos);
+  g_free(marg);
   if (!st->hy_word || !st->hy_word->len)
     return;
   const char *sp = force ? NULL : strrchr(st->hy_word->str, ' ');
@@ -359,23 +365,63 @@ static void rr_commit_stream(Cw2State *st, char *txt, guint *pos,
     st->hy_final = g_string_new(NULL);
     st->hy_fresh = g_string_new(NULL);
   }
-  g_string_append_len(st->hy_final, st->hy_word->str, (gssize)keep);
-  g_string_append_len(st->hy_fresh, st->hy_word->str, (gssize)keep);
-  const guint seam_run =
-      st->rr_base + g_array_index(st->hy_pos, guint, keep - 1);
-  g_string_erase(st->hy_word, 0, (gssize)keep);
-  g_array_remove_range(st->hy_pos, 0, (guint)keep);
-  if (st->ov_txt) {
+  /* Per-word confidence gate (logit margins, run4-calibrated — measured
+   * 2026-07-18 on the binec fist + a live 20 m contest capture): drivel —
+   * E/T babble, gap fusions — reads with soft, flickering posteriors
+   * (mean ~4, worst char ~0), real words with sharp ones (TEST 13+, exact
+   * calls 6-10). A word only replaces the draft when the net is SURE of
+   * it, mean and worst char both; a rejected word's span keeps v2's draft
+   * — the pane loses nothing, it just stays classical there. Rejected
+   * babble whose span v2's squelch kept silent vanishes entirely. A new
+   * blob recalibrates these. */
+#define RR_MARG_MEAN 6.0f
+#define RR_MARG_MIN  3.0f
+  gsize at = 0;
+  while (at < keep) {
+    gsize we = at;
+    while (we < keep && st->hy_word->str[we] != ' ') { we++; }
+    if (we < keep) { we++; }                   /* the trailing space rides  */
+    const gsize wn = we - at;
+    double sum = 0.0;
+    float  lo = 1e9f;
+    for (gsize i = at; i < we; i++) {
+      const float m = g_array_index(st->hy_marg, float, i);
+      sum += m;
+      lo = MIN(lo, m);
+    }
+    const gboolean sure = sum / (double)wn >= RR_MARG_MEAN &&
+                          lo >= RR_MARG_MIN;
+    if (g_getenv("SKIM_RR_DBG")) {
+      char *w = g_strndup(st->hy_word->str + at, wn);
+      fprintf(stderr, "RRWORD %.1f mean=%.2f min=%.2f %s |%s|\n",
+              st->freq_hz, sum / (double)wn, lo, sure ? "OK " : "REJ", w);
+      g_free(w);
+    }
+    const guint seam_run =
+        st->rr_base + g_array_index(st->hy_pos, guint, we - 1);
+    guint64 T = G_MAXUINT64;                   /* runs wiped → cover all    */
     if (seam_run < st->rr_runs->len) {
-      const guint64 T = g_array_index(st->rr_runs, RrRun, seam_run).t_end;
+      T = g_array_index(st->rr_runs, RrRun, seam_run).t_end;
+    }
+    const guint dv0 = st->ov_covered;
+    if (st->ov_txt) {
       while (st->ov_covered < st->ov_txt->len &&
              g_array_index(st->ov_t, guint64, st->ov_covered) <= T) {
         st->ov_covered++;
       }
-    } else {                             /* runs wiped under us — cover all  */
-      st->ov_covered = (guint)st->ov_txt->len;
     }
+    if (sure) {
+      g_string_append_len(st->hy_final, st->hy_word->str + at, (gssize)wn);
+      g_string_append_len(st->hy_fresh, st->hy_word->str + at, (gssize)wn);
+    } else if (st->ov_txt && st->ov_covered > dv0) {
+      g_string_append_len(st->hy_final, st->ov_txt->str + dv0,
+                          (gssize)(st->ov_covered - dv0));
+    }
+    at = we;
   }
+  g_string_erase(st->hy_word, 0, (gssize)keep);
+  g_array_remove_range(st->hy_pos, 0, (guint)keep);
+  g_array_remove_range(st->hy_marg, 0, (guint)keep);
   st->hy_dirty      = TRUE;
   st->pane_own_call = TRUE;
 }
@@ -384,9 +430,10 @@ static void rr_commit_stream(Cw2State *st, char *txt, guint *pos,
  * the reader's text (it owns a solid over; an empty read keeps the draft),
  * follow with the classical over separator, and reset for the next over. */
 static void rr_close_over(Cw2State *st) {
-  guint *pos = NULL;
-  char  *tail = skim_cw_reader_stream_flush_pos(st->rr_stream, &pos);
-  rr_commit_stream(st, tail, pos, TRUE);
+  guint *pos  = NULL;
+  float *marg = NULL;
+  char  *tail = skim_cw_reader_stream_flush_pos(st->rr_stream, &pos, &marg);
+  rr_commit_stream(st, tail, pos, marg, TRUE);
   const char *fin =
       (st->hy_final && st->hy_final->len) ? st->hy_final->str
       : (st->ov_txt ? st->ov_txt->str : "");
@@ -405,6 +452,7 @@ static void rr_close_over(Cw2State *st) {
   st->hy_open = st->hy_dirty = FALSE;
   if (st->hy_word) { g_string_truncate(st->hy_word, 0); }
   if (st->hy_pos) { g_array_set_size(st->hy_pos, 0); }
+  if (st->hy_marg) { g_array_set_size(st->hy_marg, 0); }
   if (st->hy_final) { g_string_truncate(st->hy_final, 0); }
   if (st->hy_fresh) { g_string_truncate(st->hy_fresh, 0); }
 }
@@ -480,10 +528,11 @@ static void rr_try_arm(Cw2State *st) {
   while (a < st->rr_runs->len && !v[a].key) { a++; }
   st->rr_base = a;
   for (guint i = a; i < st->rr_runs->len; i++) {
-    guint *pos = NULL;
+    guint *pos  = NULL;
+    float *marg = NULL;
     char  *txt = skim_cw_reader_stream_push_pos(st->rr_stream, v[i].key,
-                                                v[i].dur_ms, &pos);
-    rr_commit_stream(st, txt, pos, FALSE);
+                                                v[i].dur_ms, &pos, &marg);
+    rr_commit_stream(st, txt, pos, marg, FALSE);
   }
 }
 
@@ -563,6 +612,7 @@ static void cw2_channel_free(gpointer state) {
   if (st->ov_t) { g_array_free(st->ov_t, TRUE); }
   if (st->hy_word) { g_string_free(st->hy_word, TRUE); }
   if (st->hy_pos) { g_array_free(st->hy_pos, TRUE); }
+  if (st->hy_marg) { g_array_free(st->hy_marg, TRUE); }
   if (st->hy_final) { g_string_free(st->hy_final, TRUE); }
   if (st->hy_fresh) { g_string_free(st->hy_fresh, TRUE); }
   if (st->ops) {
@@ -1042,10 +1092,11 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
           g_array_append_val(st->rr_runs, rr);
           if (st->rr_live) {                     /* stream keeps pace        */
             guint *rp = NULL;
+            float *rm = NULL;
             char  *rt = skim_cw_reader_stream_push_pos(st->rr_stream,
                                                        rr.key != 0, rr.dur_ms,
-                                                       &rp);
-            rr_commit_stream(st, rt, rp, FALSE);
+                                                       &rp, &rm);
+            rr_commit_stream(st, rt, rp, rm, FALSE);
           } else {
             rr_try_arm(st);
           }

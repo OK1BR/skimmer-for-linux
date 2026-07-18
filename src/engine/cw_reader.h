@@ -65,15 +65,20 @@ char *skim_cw_reader_stream_push(SkimCwReaderStream *s, gboolean key_mark,
  * concatenated is bit-identical to read() of the same runs. */
 char *skim_cw_reader_stream_flush(SkimCwReaderStream *s);
 
-/* push/flush that also report WHERE each committed char was read: on a
- * non-NULL return, *pos (g_free) holds strlen(text) entries — pos[i] is the
- * 0-based index, among the runs pushed since the last flush, of the run at
- * whose CTC output frame text[i] fired. Monotone non-decreasing. The pane
- * composition (decode_cw_v2 phase B) maps these onto run end-times to seat
- * the model/draft seam exactly. */
+/* push/flush that also report WHERE and HOW SURELY each committed char was
+ * read: on a non-NULL return, *pos (g_free) holds strlen(text) entries —
+ * pos[i] is the 0-based index, among the runs pushed since the last flush,
+ * of the run at whose CTC output frame text[i] fired (monotone
+ * non-decreasing); *marg (g_free) holds the logit margin (winner minus
+ * runner-up) at that frame — the net's own confidence, sharp on clean
+ * reads and near zero where classes fight. The pane composition
+ * (decode_cw_v2 phase B) seats the model/draft seam on pos and gates each
+ * word on marg. Either out may be NULL. */
 char *skim_cw_reader_stream_push_pos(SkimCwReaderStream *s, gboolean key_mark,
-                                     double dur_ms, guint **pos);
-char *skim_cw_reader_stream_flush_pos(SkimCwReaderStream *s, guint **pos);
+                                     double dur_ms, guint **pos,
+                                     float **marg);
+char *skim_cw_reader_stream_flush_pos(SkimCwReaderStream *s, guint **pos,
+                                      float **marg);
 
 G_END_DECLS
 
