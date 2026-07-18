@@ -41,7 +41,14 @@ struct _SkimSpotOut {
   SkimSpotSink sink;
   gpointer     sink_user;
   guint64      emitted;
+
+  SkimNowFn now_fn;                            /* NULL → monotonic           */
+  gpointer  now_user;
 };
+
+static gint64 so_now(const SkimSpotOut *s) {
+  return s->now_fn ? s->now_fn(s->now_user) : g_get_monotonic_time();
+}
 
 SkimSpotOut *skim_spot_out_new(SkimTciClient *tci) {
   SkimSpotOut *s = g_new0(SkimSpotOut, 1);
@@ -75,14 +82,23 @@ void skim_spot_out_set_sink(SkimSpotOut *s, SkimSpotSink sink, gpointer user) {
   s->sink_user = user;
 }
 
+void skim_spot_out_set_clock(SkimSpotOut *s, SkimNowFn now_fn, gpointer user) {
+  s->now_fn   = now_fn;
+  s->now_user = user;
+  s->token_at = so_now(s);         /* never mix clocks in the bucket delta   */
+}
+
 gboolean skim_spot_out_emit(SkimSpotOut *s, const char *call, const char *mode,
                             double freq_hz, double snr_db, double speed) {
   if (!call || !call[0])
     return FALSE;
-  const gint64 now = g_get_monotonic_time();
+  const gint64 now = so_now(s);
+  if (now < s->token_at) {         /* clock re-based (offline start): the    */
+    s->token_at = now;             /* wall-time reference would freeze the   */
+  }                                /* bucket on a huge negative delta        */
 
   SpotMemo *m = g_hash_table_lookup(s->memo, call);
-  if (m &&
+  if (m && now >= m->at &&
       fabs(m->freq_hz - freq_hz) < s->qsy_hz &&
       now - m->at < (gint64)s->respot_s * G_USEC_PER_SEC) {
     return FALSE;                              /* fresh enough already       */

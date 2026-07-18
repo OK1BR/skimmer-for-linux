@@ -78,8 +78,11 @@ typedef void (*SkimStationFunc)(const SkimStation *st, gpointer user_data);
 void   skim_station_table_foreach(SkimStationTable *t, SkimStationFunc f,
                                   gpointer user_data);
 
-/* Drop stations not heard for max_age_us; returns how many were removed. */
-guint  skim_station_table_prune(SkimStationTable *t, gint64 max_age_us);
+/* Drop stations not heard for max_age_us as of now_us (the caller's clock —
+ * monotonic live, stream time in an offline replay); returns how many were
+ * removed. */
+guint  skim_station_table_prune(SkimStationTable *t, gint64 now_us,
+                                gint64 max_age_us);
 
 G_END_DECLS
 

@@ -195,8 +195,9 @@ void skim_station_table_foreach(SkimStationTable *t, SkimStationFunc f,
   }
 }
 
-guint skim_station_table_prune(SkimStationTable *t, gint64 max_age_us) {
-  const gint64 cutoff = g_get_monotonic_time() - max_age_us;
+guint skim_station_table_prune(SkimStationTable *t, gint64 now_us,
+                               gint64 max_age_us) {
+  const gint64 cutoff = now_us - max_age_us;
   guint removed = 0;
   GHashTableIter it;
   gpointer key, val;

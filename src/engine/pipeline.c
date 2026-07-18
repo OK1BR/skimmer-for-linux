@@ -117,6 +117,7 @@ struct _SkimPipeline {
   volatile gint     run;
   gint64            last_prune;
   gboolean          offline;                   /* fed by skim_pipeline_feed  */
+  gint64            stream_us;                 /* stream time (offline clock) */
   volatile gint     cq_only;                   /* spot only CALLING stations */
 
   char             *dlog_path;                 /* decode log (engine thread) */
@@ -139,6 +140,19 @@ struct _SkimPipeline {
 };
 
 /* ---- construction ------------------------------------------------------------ */
+
+/* Engine "now": monotonic live, STREAM time offline. Every TTL and dedup
+ * window in the engine must tick with the recording in a replay, not with
+ * how fast the box chews it — a reader-armed run at 5x vs a bare run at
+ * 44x lost a third of the station table to wall-clock flock expiry alone
+ * (live-caught 2026-07-18, contest block A/B). */
+static gint64 pipe_now_us(const SkimPipeline *p) {
+  return p->offline ? p->stream_us : g_get_monotonic_time();
+}
+
+static gint64 pipe_clock_cb(gpointer user) {
+  return pipe_now_us(user);
+}
 
 /* CW decoder pick: v1 (classical, live-proven) stays the default; the
  * Viterbi v2 arms with SKIM_CW_V2=1 until the replay A/B flips it. One
@@ -171,6 +185,7 @@ SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg) {
     /* Lives for the pipeline's whole life (not per-connection like the TCI
      * sink): the dedup memo rides out reconnects, no re-spot burst. */
     p->rbn_spots = skim_spot_out_new(NULL);
+    skim_spot_out_set_clock(p->rbn_spots, pipe_clock_cb, p);
     skim_spot_out_set_policy(p->rbn_spots, RBN_RESPOT_S, RBN_QSY_HZ,
                              RBN_MAX_PER_S);
     skim_spot_out_set_sink(p->rbn_spots, rbn_sink_fwd, p->cfg.rbn);
@@ -457,6 +472,8 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
 
   skim_channelizer_push(p->bank, b->iq, b->nframes);
   p->frames += b->nframes;
+  p->stream_us = (gint64)((double)p->frames * G_USEC_PER_SEC /
+                          MAX(b->rate, 1.0));
 
   const SkimDecodeBackend *cw = cw_backend();
   float buf[DRAIN_FRAMES * 2];
@@ -540,7 +557,7 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
        * ≥20 Hz apart, so its window tightens or the default 60 Hz would
        * steal the OTHER carrier's pin. */
       FreqLock *L = &p->flock[SL(c, h->slot)];
-      const gint64 tnow = g_get_monotonic_time();
+      const gint64 tnow = pipe_now_us(p);
       if (L->hz > 0 && tnow - L->at > FLOCK_TTL_US) { L->hz = 0; }
       /* Aux-only hits (reader text, no decode) carry NO tone measurement —
        * their eff_off is a zeroed placeholder, and letting them into the
@@ -637,7 +654,7 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
       st.snr_db     = d.snr_db;
       st.score      = score;
       st.cq         = cq;
-      st.last_heard = g_get_monotonic_time();
+      st.last_heard = pipe_now_us(p);
       st.first_heard = st.last_heard;
       const SkimStation *merged = skim_station_table_report(p->stations, &st);
       if (p->station_cb) { p->station_cb(merged, p->station_user); }
@@ -672,7 +689,7 @@ static gpointer engine_thread(gpointer data) {
     const gint64 now = g_get_monotonic_time();
     if (now - p->last_prune > PRUNE_EVERY_US) {
       p->last_prune = now;
-      skim_station_table_prune(p->stations, STATION_TTL_US);
+      skim_station_table_prune(p->stations, now, STATION_TTL_US);
     }
   }
   return NULL;
@@ -695,6 +712,7 @@ gboolean skim_pipeline_start(SkimPipeline *p, GError **error) {
     return FALSE;
   }
   p->spots = skim_spot_out_new(p->tci);
+  skim_spot_out_set_clock(p->spots, pipe_clock_cb, p);
   if (p->dlog_path) {
     p->dlog = fopen(p->dlog_path, "a");
     if (p->dlog) {
@@ -729,6 +747,8 @@ gboolean skim_pipeline_start_offline(SkimPipeline *p, GError **error) {
     return FALSE;
   }
   p->offline = TRUE;
+  p->stream_us  = 0;
+  p->last_prune = 0;
   if (p->dlog_path) {
     p->dlog = fopen(p->dlog_path, "a");
     if (p->dlog) {
@@ -750,6 +770,13 @@ void skim_pipeline_feed(SkimPipeline *p, const float *iq, guint nframes,
     .center_hz = center_hz,
   };
   process_block(p, &b);
+  /* Prune on the STREAM clock — live has the engine thread for this; a
+   * replay that never pruned kept every station forever, which is a
+   * different (also wrong) table than live would show. */
+  if (p->stream_us - p->last_prune > PRUNE_EVERY_US) {
+    p->last_prune = p->stream_us;
+    skim_station_table_prune(p->stations, p->stream_us, STATION_TTL_US);
+  }
 }
 
 void skim_pipeline_stop(SkimPipeline *p) {

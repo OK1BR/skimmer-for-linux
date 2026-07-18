@@ -26,6 +26,13 @@ void         skim_spot_out_free(SkimSpotOut *s);
 void  skim_spot_out_set_policy(SkimSpotOut *s, guint respot_s,
                                double qsy_hz, guint max_per_s);
 
+/* Clock source for the dedup/rate windows. Default: monotonic wall time.
+ * An offline replay injects STREAM time here — policy windows must depend
+ * on the recording, not on how fast the box chews it. Resets the token
+ * bucket to the new clock's now. */
+typedef gint64 (*SkimNowFn)(gpointer user);
+void  skim_spot_out_set_clock(SkimSpotOut *s, SkimNowFn now_fn, gpointer user);
+
 /* Optional extra sink (M6 RBN feed, gates): called for every emitted spot.
  * speed is WPM for CW, baud for the digital modes. */
 typedef void (*SkimSpotSink)(const char *call, const char *mode,

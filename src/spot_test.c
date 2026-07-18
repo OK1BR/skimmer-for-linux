@@ -362,7 +362,7 @@ int main(void) {
           skim_station_table_size(t) == 1);
     check("lookup finds the call", skim_station_table_lookup(t, "OK1BR") != NULL);
     check("prune drops idle stations",
-          skim_station_table_prune(t, 0) == 1 && skim_station_table_size(t) == 0);
+          skim_station_table_prune(t, g_get_monotonic_time(), 0) == 1 && skim_station_table_size(t) == 0);
     skim_station_table_free(t);
   }
 
