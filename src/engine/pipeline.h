@@ -12,6 +12,7 @@
 #define SKIMMER_PIPELINE_H
 
 #include <glib.h>
+#include "decode.h"
 #include "rbn_feed.h"
 #include "station.h"
 
@@ -42,6 +43,13 @@ typedef void (*SkimPipelineStationCb)(const SkimStation *st, gpointer user);
 /* A station left the tracker (TTL, or its frequency was taken over). */
 typedef void (*SkimPipelineStationGoneCb)(const SkimStation *st, gpointer user);
 typedef void (*SkimPipelineTextCb)(double freq_hz, const char *text, gpointer user);
+/* Phase B hybrid pane op (OPEN/SET/CLOSE — APPENDs ride the text cb): the
+ * live over region at freq_hz becomes `text`; its first final_len bytes are
+ * reader-final, the rest live draft. OPEN takes back `erase` bytes of
+ * already-delivered draft first. Display only — never the extractor. */
+typedef void (*SkimPipelineOverCb)(double freq_hz, SkimPaneOpKind kind,
+                                   guint erase, const char *text,
+                                   guint final_len, gpointer user);
 typedef void (*SkimPipelineStateCb)(gboolean connected, const char *detail, gpointer user);
 /* The radio's tuned frequency (vfo:0,0) changed. */
 typedef void (*SkimPipelineVfoCb)(double vfo_hz, gpointer user);
@@ -52,6 +60,7 @@ void          skim_pipeline_free(SkimPipeline *p);
 void skim_pipeline_set_station_cb(SkimPipeline *p, SkimPipelineStationCb cb, gpointer user);
 void skim_pipeline_set_station_gone_cb(SkimPipeline *p, SkimPipelineStationGoneCb cb, gpointer user);
 void skim_pipeline_set_text_cb(SkimPipeline *p, SkimPipelineTextCb cb, gpointer user);
+void skim_pipeline_set_over_cb(SkimPipeline *p, SkimPipelineOverCb cb, gpointer user);
 void skim_pipeline_set_state_cb(SkimPipeline *p, SkimPipelineStateCb cb, gpointer user);
 void skim_pipeline_set_vfo_cb(SkimPipeline *p, SkimPipelineVfoCb cb, gpointer user);
 

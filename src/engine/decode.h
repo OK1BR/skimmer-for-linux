@@ -23,7 +23,36 @@ typedef struct {
   double  freq_offset_hz;             /* signal offset within the channel */
   double  speed;                      /* WPM (CW) or baud (RTTY/PSK) */
   double  snr_db;                     /* estimated SNR of the trace */
+  gboolean pane_own;                  /* backend owns the PANE view of this
+                                       * call's text: the pipeline must not
+                                       * append text[] to the pane (the pane
+                                       * ops carry it); extractor/spot/log
+                                       * paths are unaffected */
 } SkimDecode;
+
+/* --- pane ops (phase B: draft → final hybrid pane) --------------------------
+ * While the neural reader streams on a solid channel, the backend COMPOSES
+ * the pane view of the current over: v2's per-element draft shows live and
+ * every reader word-commit rewrites it in place. The ops are full-state
+ * (SET carries the over's whole text), so a dropped op self-heals at the
+ * next one. Display only — nothing here may ever reach the extractor. */
+typedef enum {
+  SKIM_PANE_OP_APPEND = 0,  /* plain pane append (e.g. the over separator)   */
+  SKIM_PANE_OP_OPEN,        /* erase `erase` bytes of already-shown draft,
+                             * open the over region, append text             */
+  SKIM_PANE_OP_SET,         /* replace the open over region with text        */
+  SKIM_PANE_OP_CLOSE,       /* final replace; the region seals               */
+} SkimPaneOpKind;
+
+typedef struct {
+  SkimPaneOpKind kind;
+  guint  erase;             /* OPEN only: bytes of shown draft to take back  */
+  guint  final_len;         /* prefix of text[] that is reader-final (bytes);
+                             * the rest is live draft (dim in the UI)        */
+  char  *text;              /* g_free; over text, or the APPEND payload      */
+  char  *fresh;             /* g_free, may be NULL: newly final chars — the
+                             * decode log's increment (never re-logs a SET)  */
+} SkimPaneOp;
 
 typedef struct _SkimDecodeBackend SkimDecodeBackend;
 
@@ -64,6 +93,12 @@ struct _SkimDecodeBackend {
    * live-caught 2026-07-16, a phantom "EI55ISI" station row minted from a
    * neural re-read of channel babble. Optional. */
   char *(*take_aux_text)(gpointer state);
+
+  /* Pop one pending pane op (fills *op, returns TRUE) or FALSE when the
+   * queue is empty. The caller owns op->text/op->fresh. Same hallucination
+   * rule as aux text: pane + decode log only, NEVER the extractor.
+   * Optional. */
+  gboolean (*take_pane_op)(gpointer state, SkimPaneOp *op);
 };
 
 G_END_DECLS

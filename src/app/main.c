@@ -17,6 +17,7 @@
  */
 #include <adwaita.h>
 
+#include "pane_log.h"
 #include "pipeline.h"
 
 #ifndef SKIMMER_VERSION
@@ -89,6 +90,7 @@ typedef struct {
   GListStore     *stations;      /* of SkimRow                                */
   GtkSortListModel *sorted;
   GtkTextBuffer  *tuned;         /* decode text at the tuned frequency        */
+  GtkTextTag     *draft_tag;     /* dim: reader may still rewrite this text   */
   GtkTextView    *tuned_view;
   GtkLabel       *tuned_label;
   GtkWidget      *tuned_scroll;  /* the decode pane's scroller                */
@@ -100,6 +102,9 @@ typedef struct {
   GtkLabel       *status;
   GtkWindow      *window;
   GPtrArray      *freq_logs;     /* of FreqLog — decode history per frequency */
+  gsize           pane_over;     /* chars of the widget's live over region at
+                                  * the buffer tail (phase B hybrid); plain
+                                  * appends insert BEFORE it                  */
   GMutex          evq_lock;      /* guards evq + evq_scheduled                */
   GPtrArray      *evq;           /* engine events awaiting the main loop      */
   gboolean        evq_scheduled; /* a drain idle is already pending           */
@@ -124,14 +129,14 @@ static void tuned_label_update(App *app, const SkimStation *st) {
  * tuned pane renders the slot the radio sits on and follows it live. */
 
 typedef struct {
-  double   freq_hz;                          /* follows the signal's drift   */
-  GString *text;
-  gint64   last_seen;
+  double       freq_hz;                      /* follows the signal's drift   */
+  SkimPaneLog *log;                          /* text + live over region      */
+  gint64       last_seen;
 } FreqLog;
 
 static void freqlog_free(gpointer data) {
   FreqLog *fl = data;
-  g_string_free(fl->text, TRUE);
+  skim_pane_log_free(fl->log);
   g_free(fl);
 }
 
@@ -160,8 +165,8 @@ static FreqLog *freqlog_get(App *app, double freq_hz) {
     for (guint i = 1; i < app->freq_logs->len; i++) {
       FreqLog *a = g_ptr_array_index(app->freq_logs, i);
       FreqLog *v = g_ptr_array_index(app->freq_logs, victim);
-      const gboolean ab = a->text->len < FREQLOG_BABBLE;
-      const gboolean vb = v->text->len < FREQLOG_BABBLE;
+      const gboolean ab = skim_pane_log_len(a->log) < FREQLOG_BABBLE;
+      const gboolean vb = skim_pane_log_len(v->log) < FREQLOG_BABBLE;
       if ((ab && !vb) || (ab == vb && a->last_seen < v->last_seen)) {
         victim = i;
       }
@@ -170,7 +175,7 @@ static FreqLog *freqlog_get(App *app, double freq_hz) {
   }
   fl = g_new0(FreqLog, 1);
   fl->freq_hz = freq_hz;
-  fl->text    = g_string_new(NULL);
+  fl->log     = skim_pane_log_new();
   g_ptr_array_add(app->freq_logs, fl);
   return fl;
 }
@@ -223,36 +228,54 @@ static gboolean tuned_station_refresh(App *app) {
   return g_strcmp0(before, app->tuned_call) != 0;
 }
 
-/* Append at the tail of a monitor-style buffer (needs a "tail" mark): insert,
- * trim the head past 20 k chars, keep the view scrolled to the end. */
-static void tail_append(GtkTextView *view, GtkTextBuffer *buf, const char *text) {
-  GtkTextIter end;
-  gtk_text_buffer_get_end_iter(buf, &end);
-  gtk_text_buffer_insert(buf, &end, text, -1);
+/* Trim the head past 20 k chars and keep the view scrolled to the end (the
+ * buffer carries a "tail" mark for that). */
+static void buffer_trim_scroll(GtkTextView *view, GtkTextBuffer *buf) {
   if (gtk_text_buffer_get_char_count(buf) > 20000) {
     GtkTextIter s, e;
     gtk_text_buffer_get_start_iter(buf, &s);
     gtk_text_buffer_get_iter_at_offset(buf, &e, 2000);
     gtk_text_buffer_delete(buf, &s, &e);
   }
+  GtkTextIter end;
   gtk_text_buffer_get_end_iter(buf, &end);
   GtkTextMark *mark = gtk_text_buffer_get_mark(buf, "tail");
   gtk_text_buffer_move_mark(buf, mark, &end);
   gtk_text_view_scroll_mark_onscreen(view, mark);
 }
 
+/* Append at the tail of a monitor-style buffer. */
+static void tail_append(GtkTextView *view, GtkTextBuffer *buf, const char *text) {
+  GtkTextIter end;
+  gtk_text_buffer_get_end_iter(buf, &end);
+  gtk_text_buffer_insert(buf, &end, text, -1);
+  buffer_trim_scroll(view, buf);
+}
+
 /* Swap the pane to the fixed station's history (or, with nothing fixed,
- * to whatever history sits near the VFO). */
+ * to whatever history sits near the VFO). A live over region re-dims its
+ * draft tail and re-arms the widget-side region size. */
 static void tuned_pane_reload(App *app) {
   gtk_text_buffer_set_text(app->tuned, "", -1);
+  app->pane_over = 0;
   FreqLog *fl = NULL;
   if (app->tuned_call[0]) {
     fl = freqlog_find(app, app->tuned_slot_hz, FREQLOG_ROUTE_HZ);
   } else if (app->vfo_hz > 0) {
     fl = freqlog_find(app, app->vfo_hz, TUNED_WINDOW_HZ);
   }
-  if (fl && fl->text->len) {
-    tail_append(app->tuned_view, app->tuned, fl->text->str);
+  if (fl && skim_pane_log_len(fl->log)) {
+    tail_append(app->tuned_view, app->tuned, skim_pane_log_text(fl->log));
+    const gsize over = skim_pane_log_over_len(fl->log);
+    const gsize fin  = skim_pane_log_final_len(fl->log);
+    app->pane_over = over;             /* over text is ASCII: bytes == chars */
+    if (over > fin) {
+      GtkTextIter s, e;
+      gtk_text_buffer_get_end_iter(app->tuned, &e);
+      s = e;
+      gtk_text_iter_backward_chars(&s, (gint)(over - fin));
+      gtk_text_buffer_apply_tag(app->tuned, app->draft_tag, &s, &e);
+    }
   }
 }
 
@@ -267,14 +290,17 @@ static void tuned_pane_reload(App *app) {
  * collapses a batch to the LAST report per station, and lands a batch's
  * pane text in one append. */
 
-typedef enum { EV_STATION, EV_GONE, EV_TEXT, EV_VFO, EV_STATE } EvKind;
+typedef enum { EV_STATION, EV_GONE, EV_TEXT, EV_OVER, EV_VFO, EV_STATE } EvKind;
 
 typedef struct {
   EvKind      kind;
   SkimStation st;                /* EV_STATION / EV_GONE                      */
-  double      hz;                /* EV_TEXT: channel; EV_VFO: tuned freq      */
-  char       *str;               /* EV_TEXT: text; EV_STATE: detail           */
+  double      hz;                /* EV_TEXT/EV_OVER: channel; EV_VFO: tuned   */
+  char       *str;               /* EV_TEXT/EV_OVER: text; EV_STATE: detail   */
   gboolean    connected;         /* EV_STATE                                  */
+  guint       op_kind;           /* EV_OVER: SkimPaneOpKind                   */
+  guint       op_erase;          /* EV_OVER: OPEN's draft take-back           */
+  guint       op_final;          /* EV_OVER: reader-final prefix bytes        */
 } Ev;
 
 static void ev_free(gpointer data) {
@@ -324,27 +350,89 @@ static void apply_gone(App *app, const SkimStation *st) {
   if (tuned_station_refresh(app)) { tuned_pane_reload(app); }
 }
 
+static void pane_flush(App *app, GString *pane);
+
+/* Is this event's frequency routed into the tuned pane? The pane belongs to
+ * the FIXED station's slot — never to "anything near the VFO", which
+ * interleaved a neighbour within the window into the tuned station's text.
+ * Before a station is resolved (fresh retune to a quiet spot), follow the
+ * VFO tightly. */
+static gboolean pane_routed(const App *app, double freq_hz) {
+  const double key = app->tuned_call[0] ? app->tuned_slot_hz : app->vfo_hz;
+  const double win = app->tuned_call[0] ? FREQLOG_ROUTE_HZ : FREQLOG_FREE_HZ;
+  return key > 0 && ABS(freq_hz - key) <= win;
+}
+
 /* Record text into the frequency's history slot; the pane-routed part goes
- * into `pane` — the drain flushes it to the widget once per batch segment. */
+ * into `pane` — the drain flushes it to the widget once per batch segment.
+ * While the widget's tail holds a live over region (phase B), routed text
+ * must land BEFORE it, mirroring skim_pane_log_append. */
 static void apply_text(App *app, double freq_hz, const char *text,
                        GString *pane) {
   FreqLog *fl = freqlog_get(app, freq_hz);
   fl->freq_hz   = freq_hz;                   /* follow drift                 */
   fl->last_seen = g_get_monotonic_time();
-  g_string_append(fl->text, text);
-  if (fl->text->len > FREQLOG_CAP_CHARS) {
-    g_string_erase(fl->text, 0,
-                   (gssize)(fl->text->len - FREQLOG_CAP_CHARS + 2000));
+  skim_pane_log_append(fl->log, text);
+  if (skim_pane_log_len(fl->log) > FREQLOG_CAP_CHARS) {
+    skim_pane_log_trim_head(
+        fl->log, skim_pane_log_len(fl->log) - FREQLOG_CAP_CHARS + 2000);
   }
-  /* Live-follow in the pane. The pane belongs to the FIXED station's
-   * slot — never to "anything near the VFO", which interleaved a neighbour
-   * within the window into the tuned station's text. Before a station is
-   * resolved (fresh retune to a quiet spot), follow the VFO tightly. */
-  const double key = app->tuned_call[0] ? app->tuned_slot_hz : app->vfo_hz;
-  const double win = app->tuned_call[0] ? FREQLOG_ROUTE_HZ : FREQLOG_FREE_HZ;
-  if (key > 0 && ABS(freq_hz - key) <= win) {
-    g_string_append(pane, text);
+  if (pane_routed(app, freq_hz)) {
+    if (app->pane_over > 0) {
+      pane_flush(app, pane);
+      GtkTextIter it;
+      gtk_text_buffer_get_end_iter(app->tuned, &it);
+      gtk_text_iter_backward_chars(&it, (gint)app->pane_over);
+      gtk_text_buffer_insert(app->tuned, &it, text, -1);
+      buffer_trim_scroll(app->tuned_view, app->tuned);
+    } else {
+      g_string_append(pane, text);
+    }
   }
+}
+
+/* Phase B hybrid over op (OPEN/SET/CLOSE): the frequency's history slot
+ * applies it via SkimPaneLog; when routed, the widget mirrors it — the over
+ * region lives at the buffer tail, reader-final text plain, the live draft
+ * tail dim. Full-state ops make every step self-healing. */
+static void apply_over(App *app, double freq_hz, SkimPaneOpKind kind,
+                       guint erase, const char *text, guint final_len) {
+  FreqLog *fl = freqlog_get(app, freq_hz);
+  fl->freq_hz   = freq_hz;
+  fl->last_seen = g_get_monotonic_time();
+  const gsize before = skim_pane_log_over_len(fl->log);
+  const SkimPaneOp op = { kind, erase, final_len, (char *)text, NULL };
+  skim_pane_log_apply(fl->log, &op);
+  if (!pane_routed(app, freq_hz))
+    return;
+  /* Widget mirror: take back the previous region (or, on OPEN, the shown
+   * draft), then insert the new view. Over text is ASCII — bytes == chars. */
+  gsize del = kind == SKIM_PANE_OP_OPEN ? MIN((gsize)erase,
+                                              (gsize)gtk_text_buffer_get_char_count(app->tuned))
+                                        : MIN(app->pane_over, before);
+  if (kind == SKIM_PANE_OP_OPEN && app->pane_over > 0) {
+    del = MIN(del + app->pane_over, /* stale region never sealed — eat both */
+              (gsize)gtk_text_buffer_get_char_count(app->tuned));
+  }
+  GtkTextIter s, e;
+  gtk_text_buffer_get_end_iter(app->tuned, &e);
+  if (del > 0) {
+    s = e;
+    gtk_text_iter_backward_chars(&s, (gint)del);
+    gtk_text_buffer_delete(app->tuned, &s, &e);
+    gtk_text_buffer_get_end_iter(app->tuned, &e);
+  }
+  const gsize tlen = strlen(text);
+  const gsize fin  = MIN((gsize)final_len, tlen);
+  gtk_text_buffer_insert(app->tuned, &e, text, (gint)fin);
+  if (tlen > fin) {
+    gtk_text_buffer_get_end_iter(app->tuned, &e);
+    gtk_text_buffer_insert_with_tags(app->tuned, &e, text + fin,
+                                     (gint)(tlen - fin), app->draft_tag,
+                                     NULL);
+  }
+  buffer_trim_scroll(app->tuned_view, app->tuned);
+  app->pane_over = kind == SKIM_PANE_OP_CLOSE ? 0 : tlen;
 }
 
 static void apply_vfo(App *app, double vfo_hz) {
@@ -440,6 +528,10 @@ static gboolean evq_drain(gpointer data) {
     case EV_TEXT:
       apply_text(app, ev->hz, ev->str, pane);
       break;
+    case EV_OVER:
+      apply_over(app, ev->hz, (SkimPaneOpKind)ev->op_kind, ev->op_erase,
+                 ev->str ? ev->str : "", ev->op_final);
+      break;
     case EV_VFO:
       apply_vfo(app, ev->hz);
       break;
@@ -476,6 +568,17 @@ static void pipe_text_cb(double freq_hz, const char *text, gpointer user) {
   ev->kind = EV_TEXT;
   ev->hz   = freq_hz;
   ev->str  = g_strdup(text);
+  ev_post(user, ev);
+}
+static void pipe_over_cb(double freq_hz, SkimPaneOpKind kind, guint erase,
+                         const char *text, guint final_len, gpointer user) {
+  Ev *ev = g_new0(Ev, 1);
+  ev->kind     = EV_OVER;
+  ev->hz       = freq_hz;
+  ev->str      = g_strdup(text);
+  ev->op_kind  = (guint)kind;
+  ev->op_erase = erase;
+  ev->op_final = final_len;
   ev_post(user, ev);
 }
 static void pipe_state_cb(gboolean connected, const char *detail, gpointer user) {
@@ -837,6 +940,7 @@ static void probe_done(GObject *src, GAsyncResult *res, gpointer user) {
   skim_pipeline_set_station_cb(app->starting, pipe_station_cb, app);
   skim_pipeline_set_station_gone_cb(app->starting, pipe_gone_cb, app);
   skim_pipeline_set_text_cb(app->starting, pipe_text_cb, app);
+  skim_pipeline_set_over_cb(app->starting, pipe_over_cb, app);
   skim_pipeline_set_state_cb(app->starting, pipe_state_cb, app);
   skim_pipeline_set_vfo_cb(app->starting, pipe_vfo_cb, app);
   adw_window_title_set_subtitle(app->title, "connecting…");
@@ -993,9 +1097,10 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   GtkWidget *ngrp = adw_preferences_group_new();
   adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(ngrp), "CW reader");
   adw_preferences_group_set_description(ADW_PREFERENCES_GROUP(ngrp),
-      "Neural re-reader for hand-keyed fists — adds aux lines to the "
-      "decode pane ~2–4 s behind the key. Display only: it never "
-      "feeds the spot path");
+      "Neural reader for hand-keyed fists — on solid signals the pane's "
+      "draft text firms up in place ~2–4 s behind the key (dim = may "
+      "still change); weak signals stay classical. Display only: it "
+      "never feeds the spot path");
   GtkWidget *nsw = adw_switch_row_new();
   adw_preferences_row_set_title(ADW_PREFERENCES_ROW(nsw), "Enable");
   adw_action_row_set_subtitle(ADW_ACTION_ROW(nsw),
@@ -1188,6 +1293,10 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   GtkTextIter end;
   gtk_text_buffer_get_end_iter(app->tuned, &end);
   gtk_text_buffer_create_mark(app->tuned, "tail", &end, FALSE);
+  /* Live draft the reader may still rewrite renders dim; committed text is
+   * plain — the over "firms up" in place (phase B, Richard 2026-07-18). */
+  app->draft_tag = gtk_text_buffer_create_tag(app->tuned, "draft",
+                                              "foreground", "#808080", NULL);
   GtkWidget *tuned_view = gtk_text_view_new_with_buffer(app->tuned);
   app->tuned_view = GTK_TEXT_VIEW(tuned_view);
   gtk_text_view_set_editable(app->tuned_view, FALSE);

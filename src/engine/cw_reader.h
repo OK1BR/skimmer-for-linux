@@ -65,6 +65,16 @@ char *skim_cw_reader_stream_push(SkimCwReaderStream *s, gboolean key_mark,
  * concatenated is bit-identical to read() of the same runs. */
 char *skim_cw_reader_stream_flush(SkimCwReaderStream *s);
 
+/* push/flush that also report WHERE each committed char was read: on a
+ * non-NULL return, *pos (g_free) holds strlen(text) entries — pos[i] is the
+ * 0-based index, among the runs pushed since the last flush, of the run at
+ * whose CTC output frame text[i] fired. Monotone non-decreasing. The pane
+ * composition (decode_cw_v2 phase B) maps these onto run end-times to seat
+ * the model/draft seam exactly. */
+char *skim_cw_reader_stream_push_pos(SkimCwReaderStream *s, gboolean key_mark,
+                                     double dur_ms, guint **pos);
+char *skim_cw_reader_stream_flush_pos(SkimCwReaderStream *s, guint **pos);
+
 G_END_DECLS
 
 #endif /* SKIMMER_CW_READER_H */

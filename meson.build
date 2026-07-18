@@ -43,6 +43,7 @@ engine_sources = [
   'src/engine/decode_cw.c',    # M3: CW backend (implements decode.h)
   'src/engine/decode_cw_v2.c', # CW v2: semi-Markov Viterbi (QSB-proof)
   'src/engine/cw_reader.c',    # neural over re-reader (TCN+CTC, pane-only)
+  'src/engine/pane_log.c',     # phase B: pane text + live over region (ops)
   'src/engine/tone_split.c',   # per-channel carrier splitter (multi-signal)
   'src/engine/station.c',      # M5: per-frequency station tracker
   'src/engine/callsign.c',     # M4: extraction + validation
@@ -148,6 +149,19 @@ skimmer_reader_test = executable('skimmer-reader-test',
   link_with : engine_lib,
 )
 test('cw-reader', skimmer_reader_test, timeout : 60,
+  env : ['SKIM_READER_BLOB=' + meson.project_source_root() / 'data/cw-reader.bin'])
+
+# Phase B: offline gate — the hybrid pane (draft → final). SkimPaneLog op
+# semantics, stream char positions vs read(), and the offline pipeline with
+# the streamed reader owning a solid over's pane text — station table must
+# stay identical with the reader off (extractor isolation).
+skimmer_pane_test = executable('skimmer-pane-test',
+  ['src/pane_test.c'],
+  include_directories : include_directories('src'),
+  dependencies : engine_deps,
+  link_with : engine_lib,
+)
+test('hybrid-pane', skimmer_pane_test, timeout : 120,
   env : ['SKIM_READER_BLOB=' + meson.project_source_root() / 'data/cw-reader.bin'])
 
 # M5: offline gate — station tracker units, spot policy units, and the WHOLE

@@ -220,20 +220,37 @@ typedef struct {
    * The same Schmitt run stream. A v3 blob STREAMS (phase A): once the
    * channel proves solid the buffered backlog is fed and every further run
    * pushes through the bounded-lookahead net — text commits ~2-4 s behind
-   * the key and drains to the pane word by word. A v2 blob keeps the old
-   * shape: buffer the over, re-read the whole of it at the break. Pane
-   * only either way — the extractor/spot path never sees reader text
-   * (hallucination guard). */
+   * the key. A v2 blob keeps the old shape: buffer the over, re-read the
+   * whole of it at the break (aux line). Pane only either way — the
+   * extractor/spot path never sees reader text (hallucination guard). */
   gboolean rr_arm;
   GArray  *rr_runs;                     /* RrRun ring of the current over     */
-  GString *rr_out;                      /* pending reader text to drain       */
   SkimCwReaderStream *rr_stream;        /* v3 blobs only (lazy)               */
   gboolean rr_stream_no;                /* stream_new refused (v2 blob)       */
   gboolean rr_live;                     /* streaming armed for this over      */
-  GString *rr_word;                     /* committed text short of a word gap */
+  guint    rr_base;                     /* rr_runs index of stream input 0    */
+
+  /* --- phase B: draft → final pane composition (streamed reader only) ----------
+   * The pane view of a streamed over is COMPOSED here: reader-final words +
+   * v2's live draft tail, shipped as full-state pane ops (decode.h). The
+   * seam sits on run END TIMES: each draft char remembers when its audio
+   * ended, each reader char reports the run it fired at. d.text itself is
+   * untouched — extractor, station and spot paths stay classical. */
+  GString *ov_txt;                      /* this over's draft chars (pane)     */
+  GArray  *ov_t;                        /* guint64 end time per draft byte    */
+  guint    ov_sent;                     /* draft bytes already SHOWN (pane)   */
+  guint    ov_covered;                  /* draft bytes superseded by commits  */
+  GString *hy_word;                     /* reader chars short of a word gap   */
+  GArray  *hy_pos;                      /* run index per hy_word byte         */
+  GString *hy_final;                    /* over's reader-final pane text      */
+  GString *hy_fresh;                    /* newly final chars (decode log)     */
+  gboolean hy_open;                     /* the pane has a live over region    */
+  gboolean hy_dirty;                    /* op due at the end of this call     */
+  gboolean pane_own_call;               /* this call's d.text is pane-owned   */
+  GArray  *ops;                         /* queued SkimPaneOp                  */
 } Cw2State;
 
-typedef struct { guint8 key; float dur_ms; } RrRun;
+typedef struct { guint8 key; float dur_ms; guint64 t_end; } RrRun;
 
 static SkimCwReader *rr_reader(void);
 
@@ -301,29 +318,144 @@ static SkimCwReader *rr_reader(void) {
   return r;
 }
 
-/* Move freshly committed stream text into the pane queue, WHOLE WORDS at a
- * time (up to the last committed space; force=TRUE at the over break sends
- * the rest too). Word granularity keeps the pane readable and puts the
- * commit lag on the decode log's own timestamps. */
-static void rr_commit(Cw2State *st, char *txt, gboolean force) {
+/* Queue one pane op (owns text/fresh). Queued ops make this call pane-owned:
+ * the pipeline suppresses the direct d.text append, the ops carry the view. */
+static void hy_queue(Cw2State *st, SkimPaneOpKind kind, guint erase,
+                     char *text, guint final_len, char *fresh) {
+  if (!st->ops) { st->ops = g_array_new(FALSE, FALSE, sizeof(SkimPaneOp)); }
+  SkimPaneOp op = { kind, erase, final_len, text, fresh };
+  g_array_append_val(st->ops, op);
+  st->pane_own_call = TRUE;
+}
+
+/* Fold freshly committed stream text into the over's reader-final prefix,
+ * WHOLE WORDS at a time (force=TRUE at the over break folds the rest too),
+ * and advance the model/draft seam: the last folded char's run maps to an
+ * end time, and every draft char whose audio ended by then is superseded. */
+static void rr_commit_stream(Cw2State *st, char *txt, guint *pos,
+                             gboolean force) {
   if (txt) {
-    if (!st->rr_word) { st->rr_word = g_string_new(NULL); }
-    g_string_append(st->rr_word, txt);
-    g_free(txt);
+    const gsize n = strlen(txt);
+    if (!st->hy_word) {
+      st->hy_word = g_string_new(NULL);
+      st->hy_pos  = g_array_new(FALSE, FALSE, sizeof(guint));
+    }
+    g_string_append(st->hy_word, txt);
+    if (n) { g_array_append_vals(st->hy_pos, pos, (guint)n); }
   }
-  if (!st->rr_word || !st->rr_word->len)
+  g_free(txt);
+  g_free(pos);
+  if (!st->hy_word || !st->hy_word->len)
     return;
-  const char *sp = force ? NULL : strrchr(st->rr_word->str, ' ');
-  gsize keep = force ? st->rr_word->len
-                     : (sp ? (gsize)(sp - st->rr_word->str) + 1 : 0);
-  if (!keep && st->rr_word->len >= 24) {   /* spaceless torrent — cap it     */
-    keep = st->rr_word->len;
+  const char *sp = force ? NULL : strrchr(st->hy_word->str, ' ');
+  gsize keep = force ? st->hy_word->len
+                     : (sp ? (gsize)(sp - st->hy_word->str) + 1 : 0);
+  if (!keep && st->hy_word->len >= 24) {   /* spaceless torrent — cap it     */
+    keep = st->hy_word->len;
   }
-  if (keep) {
-    if (!st->rr_out) { st->rr_out = g_string_new(NULL); }
-    g_string_append_len(st->rr_out, st->rr_word->str, (gssize)keep);
-    g_string_erase(st->rr_word, 0, (gssize)keep);
+  if (!keep)
+    return;
+  if (!st->hy_final) {
+    st->hy_final = g_string_new(NULL);
+    st->hy_fresh = g_string_new(NULL);
   }
+  g_string_append_len(st->hy_final, st->hy_word->str, (gssize)keep);
+  g_string_append_len(st->hy_fresh, st->hy_word->str, (gssize)keep);
+  const guint seam_run =
+      st->rr_base + g_array_index(st->hy_pos, guint, keep - 1);
+  g_string_erase(st->hy_word, 0, (gssize)keep);
+  g_array_remove_range(st->hy_pos, 0, (guint)keep);
+  if (st->ov_txt) {
+    if (seam_run < st->rr_runs->len) {
+      const guint64 T = g_array_index(st->rr_runs, RrRun, seam_run).t_end;
+      while (st->ov_covered < st->ov_txt->len &&
+             g_array_index(st->ov_t, guint64, st->ov_covered) <= T) {
+        st->ov_covered++;
+      }
+    } else {                             /* runs wiped under us — cover all  */
+      st->ov_covered = (guint)st->ov_txt->len;
+    }
+  }
+  st->hy_dirty      = TRUE;
+  st->pane_own_call = TRUE;
+}
+
+/* The streamed over ends: flush the stream's tail, seal the pane region with
+ * the reader's text (it owns a solid over; an empty read keeps the draft),
+ * follow with the classical over separator, and reset for the next over. */
+static void rr_close_over(Cw2State *st) {
+  guint *pos = NULL;
+  char  *tail = skim_cw_reader_stream_flush_pos(st->rr_stream, &pos);
+  rr_commit_stream(st, tail, pos, TRUE);
+  const char *fin =
+      (st->hy_final && st->hy_final->len) ? st->hy_final->str
+      : (st->ov_txt ? st->ov_txt->str : "");
+  if (st->hy_open || fin[0]) {
+    const guint flen = (guint)strlen(fin);
+    if (!st->hy_open) {                  /* never shown as a region yet      */
+      hy_queue(st, SKIM_PANE_OP_OPEN, st->ov_sent, g_strdup(fin), flen, NULL);
+      st->hy_open = TRUE;
+    }
+    char *fresh = (st->hy_fresh && st->hy_fresh->len)
+                      ? g_strndup(st->hy_fresh->str, st->hy_fresh->len) : NULL;
+    hy_queue(st, SKIM_PANE_OP_CLOSE, 0, g_strdup(fin), flen, fresh);
+    hy_queue(st, SKIM_PANE_OP_APPEND, 0, g_strdup(BREAK_MARK), 0, NULL);
+  }
+  st->rr_live = FALSE;
+  st->hy_open = st->hy_dirty = FALSE;
+  if (st->hy_word) { g_string_truncate(st->hy_word, 0); }
+  if (st->hy_pos) { g_array_set_size(st->hy_pos, 0); }
+  if (st->hy_final) { g_string_truncate(st->hy_final, 0); }
+  if (st->hy_fresh) { g_string_truncate(st->hy_fresh, 0); }
+}
+
+/* Draft/over bookkeeping resets whenever the reader's over ends (streamed
+ * or not) — the next over starts a fresh draft. */
+static void ov_reset(Cw2State *st) {
+  if (st->ov_txt) { g_string_truncate(st->ov_txt, 0); }
+  if (st->ov_t) { g_array_set_size(st->ov_t, 0); }
+  st->ov_sent = st->ov_covered = 0;
+}
+
+/* End of one process() call: at most ONE composed op ships the over's
+ * current view (reader-final prefix + live draft tail); the first such op
+ * OPENs the region by taking back the draft the pane already shows. When
+ * an over closed mid-call, any draft a NEW over emitted after it must still
+ * reach the (suppressed) pane — as a plain append. Finally the call's
+ * pane ownership lands in out->pane_own and the sent counter catches up. */
+static void hy_call_end(Cw2State *st, SkimDecode *out) {
+  out->pane_own = FALSE;
+  if (!st->rr_arm)
+    return;
+  if (st->rr_live && st->hy_dirty) {
+    GString *view = g_string_new(st->hy_final ? st->hy_final->str : "");
+    const guint flen = (guint)view->len;
+    if (st->ov_txt && st->ov_covered < st->ov_txt->len) {
+      g_string_append_len(view, st->ov_txt->str + st->ov_covered,
+                          (gssize)(st->ov_txt->len - st->ov_covered));
+    }
+    char *fresh = (st->hy_fresh && st->hy_fresh->len)
+                      ? g_strndup(st->hy_fresh->str, st->hy_fresh->len) : NULL;
+    if (st->hy_fresh) { g_string_truncate(st->hy_fresh, 0); }
+    hy_queue(st, st->hy_open ? SKIM_PANE_OP_SET : SKIM_PANE_OP_OPEN,
+             st->hy_open ? 0 : st->ov_sent, g_string_free(view, FALSE), flen,
+             fresh);
+    st->hy_open  = TRUE;
+    st->hy_dirty = FALSE;
+  }
+  if (st->pane_own_call && !st->rr_live && st->ov_txt &&
+      st->ov_txt->len > st->ov_sent) {
+    hy_queue(st, SKIM_PANE_OP_APPEND, 0,
+             g_strndup(st->ov_txt->str + st->ov_sent,
+                       st->ov_txt->len - st->ov_sent),
+             0, NULL);
+    st->ov_sent = (guint)st->ov_txt->len;
+  }
+  out->pane_own = st->pane_own_call;
+  if (!st->pane_own_call) {
+    st->ov_sent = st->ov_txt ? (guint)st->ov_txt->len : 0;
+  }
+  st->pane_own_call = FALSE;
 }
 
 /* The moment a channel proves solid mid-over, arm the stream and feed it
@@ -346,60 +478,66 @@ static void rr_try_arm(Cw2State *st) {
   const RrRun *v = (const RrRun *)st->rr_runs->data;
   guint a = 0;
   while (a < st->rr_runs->len && !v[a].key) { a++; }
+  st->rr_base = a;
   for (guint i = a; i < st->rr_runs->len; i++) {
-    rr_commit(st, skim_cw_reader_stream_push(st->rr_stream, v[i].key,
-                                             v[i].dur_ms),
-              FALSE);
+    guint *pos = NULL;
+    char  *txt = skim_cw_reader_stream_push_pos(st->rr_stream, v[i].key,
+                                                v[i].dur_ms, &pos);
+    rr_commit_stream(st, txt, pos, FALSE);
   }
 }
 
 /* Over break: land the reader text for the pane. Streaming (v3): flush the
  * tail — everything already committed word-wise during the over. Batch
- * (v2): re-read the whole buffered over, gated on a SOLID channel (learned
- * dit, enough committed marks) — noise channels break "overs" constantly,
- * and a band's worth of them would drown the engine thread in forwards. */
+ * (a v2 blob, or a solid over too short to have armed): re-read the whole
+ * buffered over and seal the pane region in one OPEN+CLOSE — the same ops
+ * channel, so no aux line ever fragments the pane. Gated on a SOLID channel
+ * (learned dit, enough committed marks) — noise channels break "overs"
+ * constantly, and a band's worth of them would drown the engine thread in
+ * forwards. Ops only, never out->text: the first wiring drained reader text
+ * into the ordinary text path and the pipeline fed it to the EXTRACTOR
+ * (phantom EI55ISI station from a re-read of babble, live 2026-07-16). */
 static void rr_flush_over(Cw2State *st) {
   if (!st->rr_runs)
     return;
   if (st->rr_live) {
-    rr_commit(st, skim_cw_reader_stream_flush(st->rr_stream), TRUE);
-    st->rr_live = FALSE;
+    rr_close_over(st);
     g_array_set_size(st->rr_runs, 0);
+    ov_reset(st);
     return;
   }
-  if (st->dit <= 0 || st->marks_ok < 8 || st->snr_latch < 12.0) {
+  if (st->dit > 0 && st->marks_ok >= 8 && st->snr_latch >= 12.0) {
     /* The reader is for STRONG hand-keyed stations (the ear-readable ones).
      * A weak channel's runs are Schmitt noise — the net would faithfully
      * read garbage; the classical path serves those better. */
-    g_array_set_size(st->rr_runs, 0);
-    return;
-  }
-  guint a = 0, b = st->rr_runs->len;
-  const RrRun *v = (const RrRun *)st->rr_runs->data;
-  while (a < b && !v[a].key) { a++; }             /* an over starts and      */
-  while (b > a && !v[b - 1].key) { b--; }         /* ends on a mark          */
-  if (b - a >= 40) {                              /* ~8 chars — skip blips   */
-    const guint n = b - a;
-    gboolean *key = g_new(gboolean, n);
-    double   *dur = g_new(double, n);
-    for (guint i = 0; i < n; i++) {
-      key[i] = v[a + i].key;
-      dur[i] = v[a + i].dur_ms;
+    guint a = 0, b = st->rr_runs->len;
+    const RrRun *v = (const RrRun *)st->rr_runs->data;
+    while (a < b && !v[a].key) { a++; }           /* an over starts and      */
+    while (b > a && !v[b - 1].key) { b--; }       /* ends on a mark          */
+    if (b - a >= 40) {                            /* ~8 chars — skip blips   */
+      const guint n = b - a;
+      gboolean *key = g_new(gboolean, n);
+      double   *dur = g_new(double, n);
+      for (guint i = 0; i < n; i++) {
+        key[i] = v[a + i].key;
+        dur[i] = v[a + i].dur_ms;
+      }
+      char *txt = skim_cw_reader_read(rr_reader(), key, dur, n);
+      if (txt[0]) {
+        const guint flen = (guint)strlen(txt);
+        hy_queue(st, SKIM_PANE_OP_OPEN, st->ov_sent, g_strdup(txt), flen,
+                 NULL);
+        hy_queue(st, SKIM_PANE_OP_CLOSE, 0, g_strdup(txt), flen,
+                 g_strdup(txt));
+        hy_queue(st, SKIM_PANE_OP_APPEND, 0, g_strdup(BREAK_MARK), 0, NULL);
+      }
+      g_free(txt);
+      g_free(key);
+      g_free(dur);
     }
-    char *txt = skim_cw_reader_read(rr_reader(), key, dur, n);
-    if (txt[0]) {
-      /* RAW text, no decoration — it leaves via take_aux_text(), never via
-       * out->text: the first wiring drained it into the ordinary text path
-       * and the pipeline fed it to the EXTRACTOR (phantom EI55ISI station
-       * from a re-read of babble, live-caught 2026-07-16 on 40 m). */
-      if (!st->rr_out) { st->rr_out = g_string_new(NULL); }
-      g_string_append(st->rr_out, txt);
-    }
-    g_free(txt);
-    g_free(key);
-    g_free(dur);
   }
   g_array_set_size(st->rr_runs, 0);
+  ov_reset(st);
 }
 
 static void rd_emit(const Cw2State *st, gboolean key, double len) {
@@ -420,21 +558,26 @@ static void cw2_channel_free(gpointer state) {
   if (!st)
     return;
   if (st->rr_runs) { g_array_free(st->rr_runs, TRUE); }
-  if (st->rr_out) { g_string_free(st->rr_out, TRUE); }
-  if (st->rr_word) { g_string_free(st->rr_word, TRUE); }
   if (st->rr_stream) { skim_cw_reader_stream_free(st->rr_stream); }
+  if (st->ov_txt) { g_string_free(st->ov_txt, TRUE); }
+  if (st->ov_t) { g_array_free(st->ov_t, TRUE); }
+  if (st->hy_word) { g_string_free(st->hy_word, TRUE); }
+  if (st->hy_pos) { g_array_free(st->hy_pos, TRUE); }
+  if (st->hy_final) { g_string_free(st->hy_final, TRUE); }
+  if (st->hy_fresh) { g_string_free(st->hy_fresh, TRUE); }
+  if (st->ops) {
+    for (guint i = 0; i < st->ops->len; i++) {
+      SkimPaneOp *op = &g_array_index(st->ops, SkimPaneOp, i);
+      g_free(op->text);
+      g_free(op->fresh);
+    }
+    g_array_free(st->ops, TRUE);
+  }
   g_free(st->lat);
   g_free(st);
 }
 
 /* --- assembly helpers (v1 semantics) ------------------------------------------ */
-
-static void emit(SkimDecode *out, guint *pos, char c) {
-  if (*pos + 1 < SKIM_DECODE_TEXT_MAX) {
-    out->text[(*pos)++] = c;
-    out->text[*pos] = '\0';
-  }
-}
 
 static void emit_str(SkimDecode *out, guint *pos, const char *s) {
   gsize n = strlen(s);
@@ -444,12 +587,39 @@ static void emit_str(SkimDecode *out, guint *pos, const char *s) {
   }
 }
 
-static void emit_code(Cw2State *st, SkimDecode *out, guint *pos) {
+/* Emit one decoded char and, with the reader armed, remember it as this
+ * over's pane DRAFT together with the time its audio ended — the reader's
+ * word commits supersede draft chars by exactly that time (the seam).
+ * Only chars that really reached out->text are tracked (the 64-char cap
+ * must not desync the pane's erase counts). The over separator goes via
+ * emit_str, untracked — it is not part of any over. */
+static void emit(Cw2State *st, SkimDecode *out, guint *pos, char c,
+                 guint64 t_end) {
+  if (*pos + 1 >= SKIM_DECODE_TEXT_MAX)
+    return;
+  out->text[(*pos)++] = c;
+  out->text[*pos] = '\0';
+  if (!st->rr_arm)
+    return;
+  if (!st->ov_txt) {
+    st->ov_txt = g_string_new(NULL);
+    st->ov_t   = g_array_new(FALSE, FALSE, sizeof(guint64));
+  }
+  g_string_append_c(st->ov_txt, c);
+  g_array_append_val(st->ov_t, t_end);
+  if (st->rr_live) {
+    st->hy_dirty      = TRUE;
+    st->pane_own_call = TRUE;
+  }
+}
+
+static void emit_code(Cw2State *st, SkimDecode *out, guint *pos,
+                      guint64 t_end) {
   if (st->nelem && st->code < G_N_ELEMENTS(morse_lut)) {
     char c = morse_lut[st->code];
     gboolean lone_et = st->nelem == 1 &&
                        (st->marks_ok < 4 || st->elem_err > 0.45);
-    if (c && !lone_et) { emit(out, pos, c); }
+    if (c && !lone_et) { emit(st, out, pos, c, t_end); }
   }
   st->code  = 0;
   st->nelem = 0;
@@ -732,16 +902,16 @@ static void lattice_commit(Cw2State *st, double lag_dits, SkimDecode *out,
       break;
     case SEG_CSP:
       fist_learn(st, d / st->dit);
-      if (!lived) { emit_code(st, out, pos); }
+      if (!lived) { emit_code(st, out, pos, end - segs_d[i - 1]); }
       st->char_live = st->word_live = FALSE;
       break;
     case SEG_WSP:
       fist_learn(st, d / st->dit);
       if (!lived) {
-        emit_code(st, out, pos);
-        emit(out, pos, ' ');
+        emit_code(st, out, pos, end - segs_d[i - 1]);
+        emit(st, out, pos, ' ', end);
       } else if (!st->word_live && st->live_had_char) {
-        emit(out, pos, ' ');                   /* live char, space grew      */
+        emit(st, out, pos, ' ', end);          /* live char, space grew      */
       }
       st->char_live = st->word_live = FALSE;
       break;
@@ -769,7 +939,7 @@ static void lattice_flush(Cw2State *st, SkimDecode *out, guint *pos) {
   if (!st->active)
     return;
   lattice_commit(st, 0.0, out, pos);
-  emit_code(st, out, pos);                     /* the char in flight         */
+  emit_code(st, out, pos, st->t);              /* the char in flight         */
   st->active = FALSE;
 }
 
@@ -779,7 +949,9 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
                             SkimDecode *out) {
   Cw2State *st = state;
   guint pos = 0;
-  out->text[0] = '\0';
+  out->text[0]      = '\0';
+  out->pane_own     = FALSE;
+  st->pane_own_call = FALSE;
 
   /* Clock-lost watchdog: a run of committed dahs with not one dit means the
    * dit clock sits a class too fast and the labeling went SELF-CONSISTENT —
@@ -860,15 +1032,20 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
             st->rr_runs = g_array_new(FALSE, FALSE, sizeof(RrRun));
           }
           if (st->rr_runs->len >= 4096) {        /* runaway — start over     */
+            if (st->rr_live) { rr_close_over(st); }
             g_array_set_size(st->rr_runs, 0);
+            ov_reset(st);
           }
           const RrRun rr = { st->rd_pend_key ? 1 : 0,
-                             (float)(st->rd_pend_len * 1000.0 / st->rate) };
+                             (float)(st->rd_pend_len * 1000.0 / st->rate),
+                             st->t };
           g_array_append_val(st->rr_runs, rr);
           if (st->rr_live) {                     /* stream keeps pace        */
-            rr_commit(st, skim_cw_reader_stream_push(st->rr_stream,
-                                                     rr.key != 0, rr.dur_ms),
-                      FALSE);
+            guint *rp = NULL;
+            char  *rt = skim_cw_reader_stream_push_pos(st->rr_stream,
+                                                       rr.key != 0, rr.dur_ms,
+                                                       &rp);
+            rr_commit_stream(st, rt, rp, FALSE);
           } else {
             rr_try_arm(st);
           }
@@ -1106,12 +1283,12 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
           st->char_live     = TRUE;
           st->live_t        = tau;
           st->live_had_char = st->nelem > 0;
-          emit_code(st, out, &pos);
+          emit_code(st, out, &pos, tau);
         }
         if (st->char_live && st->live_had_char && !st->word_live &&
             sp > 1.2 * sqrt(st->fist_csp * st->fist_wsp) * st->dit) {
           st->word_live = TRUE;
-          emit(out, &pos, ' ');
+          emit(st, out, &pos, ' ', tau);
         }
         if (sp > BREAK_DITS * st->dit) {       /* the over is done           */
           CW2_DBG("[break at t=%lu, sp=%.0f]\n", (unsigned long)st->t, sp);
@@ -1127,6 +1304,7 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
     }
   }
 
+  hy_call_end(st, out);
   if (pos == 0)
     return FALSE;
 
@@ -1152,13 +1330,13 @@ static void cw2_set_freq(gpointer state, double freq_hz) {
   ((Cw2State *)state)->freq_hz = freq_hz;
 }
 
-static char *cw2_take_aux_text(gpointer state) {
+static gboolean cw2_take_pane_op(gpointer state, SkimPaneOp *op) {
   Cw2State *st = state;
-  if (!st->rr_out || !st->rr_out->len)
-    return NULL;
-  char *txt = g_string_free(st->rr_out, FALSE);
-  st->rr_out = NULL;
-  return txt;
+  if (!st->ops || !st->ops->len)
+    return FALSE;
+  *op = g_array_index(st->ops, SkimPaneOp, 0);
+  g_array_remove_index(st->ops, 0);
+  return TRUE;
 }
 
 const SkimDecodeBackend *skim_decode_cw_v2(void) {
@@ -1166,7 +1344,7 @@ const SkimDecodeBackend *skim_decode_cw_v2(void) {
     .name           = "cw2",
     .channel_new    = cw2_channel_new,
     .set_freq       = cw2_set_freq,
-    .take_aux_text  = cw2_take_aux_text,
+    .take_pane_op   = cw2_take_pane_op,
     .channel_free   = cw2_channel_free,
     .process        = cw2_process,
     .level          = cw2_level,

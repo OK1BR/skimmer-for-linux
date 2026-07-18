@@ -185,6 +185,28 @@ wall-clock flock expiry); verified line-identical on contest block F.
 old build froze at ~75 min — watch one more long live session).
 IQ corpus: 10 recordings + 20 m contest blocks A–H (600 s each,
 2026-07-18) in ~/.local/share/skimmer-for-linux/iq/.
+**Phase B — hybrid pane, draft → final (offline-proven 2026-07-18 late).**
+Richard picked the UX: v2 writes the pane live per char; reader word
+commits rewrite the over IN PLACE (continuous text — the streamed aux
+"\n…\n" lines had shredded the pane, live-caught). Engine composes:
+`decode.h` pane ops (full-state OPEN/SET/CLOSE + APPEND, self-healing
+on a dropped op), `pane_log.c` = the ONE applier (app + gate share it),
+v2 tracks per-char draft end-times and seats the model/draft seam on
+run end-times (stream API `*_pos` reports the CTC frame per committed
+char). OPEN takes back the shown draft; SET = final prefix + live
+draft tail (app dims the tail via GtkTextTag; reload re-dims); CLOSE
+seals with the reader's text + "· " separator. Batch re-reads (v2
+blob / short solid over) go through the same ops — cw2 emits NO aux
+text at all now. d.text/extractor/spot/flock paths untouched
+(pane_own suppresses only the pane append; v1 has no ops hook —
+uninit-field guard gate-caught). Weak channels never arm = pure v2
+(non-negotiable rule holds). Gate `skimmer-pane-test` (34 checks:
+pane_log units, positions, offline pipeline — pane == sealed over
+exactly once, dlog increments == over, deterministic, station table
+bit-identical reader on/off) — 10 gates total. Real replay (binec):
+classical decode lines line-identical on/off, station table identical,
+269 streamed increments, EA1EYL reads clean. Pending: Richard's live
+look at the firming-up pane (app restart picks up the new binary).
 Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
 **v2 live session**, **tone splitter live session** (run the app with
 `SKIM_CW_V2=1 SKIM_TONE_SPLIT=1`). MASTER.SCP can go to

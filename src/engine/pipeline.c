@@ -85,7 +85,32 @@ typedef struct {
   SkimDecode d;
   char      *aux;       /* display-only text (take_aux_text) — shown, logged,
                          * NEVER fed to the extractor (hallucination guard)  */
+  GArray    *ops;       /* SkimPaneOp queue drained this call (may be NULL);
+                         * display-only exactly like aux                     */
 } Hit;
+
+static GArray *hit_take_ops(const SkimDecodeBackend *cw, gpointer dec) {
+  if (!cw->take_pane_op)
+    return NULL;
+  GArray *ops = NULL;
+  SkimPaneOp op;
+  while (cw->take_pane_op(dec, &op)) {
+    if (!ops) { ops = g_array_new(FALSE, FALSE, sizeof(SkimPaneOp)); }
+    g_array_append_val(ops, op);
+  }
+  return ops;
+}
+
+static void hit_free_ops(GArray *ops) {
+  if (!ops)
+    return;
+  for (guint i = 0; i < ops->len; i++) {
+    SkimPaneOp *op = &g_array_index(ops, SkimPaneOp, i);
+    g_free(op->text);
+    g_free(op->fresh);
+  }
+  g_array_free(ops, TRUE);
+}
 
 struct _SkimPipeline {
   SkimPipelineConfig cfg;
@@ -129,6 +154,8 @@ struct _SkimPipeline {
   gpointer                  gone_user;
   SkimPipelineTextCb    text_cb;
   gpointer              text_user;
+  SkimPipelineOverCb    over_cb;
+  gpointer              over_user;
   SkimPipelineStateCb   state_cb;
   gpointer              state_user;
   SkimPipelineVfoCb     vfo_cb;
@@ -152,6 +179,23 @@ static gint64 pipe_now_us(const SkimPipeline *p) {
 
 static gint64 pipe_clock_cb(gpointer user) {
   return pipe_now_us(user);
+}
+
+/* Decode-log timestamp: STREAM time offline (deterministic replays), wall
+ * clock live. */
+static void pipe_log_stamp(const SkimPipeline *p, const IqBlock *b,
+                           char *buf, gsize n) {
+  if (p->offline) {
+    guint sec = (guint)((double)p->frames / MAX(b->rate, 1.0));
+    g_snprintf(buf, n, "%02u:%02u:%02u", sec / 3600, (sec / 60) % 60,
+               sec % 60);
+  } else {
+    GDateTime *now = g_date_time_new_now_local();
+    char *ts = g_date_time_format(now, "%H:%M:%S");
+    g_strlcpy(buf, ts, n);
+    g_free(ts);
+    g_date_time_unref(now);
+  }
 }
 
 /* CW decoder pick: v1 (classical, live-proven) stays the default; the
@@ -272,6 +316,10 @@ static void station_gone_fwd(const SkimStation *st, gpointer user) {
 void skim_pipeline_set_text_cb(SkimPipeline *p, SkimPipelineTextCb cb, gpointer user) {
   p->text_cb = cb;
   p->text_user = user;
+}
+void skim_pipeline_set_over_cb(SkimPipeline *p, SkimPipelineOverCb cb, gpointer user) {
+  p->over_cb = cb;
+  p->over_user = user;
 }
 void skim_pipeline_set_state_cb(SkimPipeline *p, SkimPipelineStateCb cb, gpointer user) {
   p->state_cb = cb;
@@ -495,11 +543,12 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
         const gboolean got = cw->process(p->dec[SL(c, 0)], buf, n, &d);
         char *aux = cw->take_aux_text
                         ? cw->take_aux_text(p->dec[SL(c, 0)]) : NULL;
-        if (!got && !aux)
+        GArray *ops = hit_take_ops(cw, p->dec[SL(c, 0)]);
+        if (!got && !aux && !ops)
           continue;
         if (!got) { memset(&d, 0, sizeof(d)); }
         Hit h = { .chan = c, .slot = 0, .eff_off = d.freq_offset_hz,
-                  .contested = FALSE, .d = d, .aux = aux };
+                  .contested = FALSE, .d = d, .aux = aux, .ops = ops };
         g_array_append_val(p->hits, h);
         continue;
       }
@@ -517,14 +566,15 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
           const gboolean got = cw->process(p->dec[SL(c, s)], sbuf, m, &d);
           char *aux = cw->take_aux_text
                           ? cw->take_aux_text(p->dec[SL(c, s)]) : NULL;
-          if (!got && !aux)
+          GArray *ops = hit_take_ops(cw, p->dec[SL(c, s)]);
+          if (!got && !aux && !ops)
             continue;
           if (!got) { memset(&d, 0, sizeof(d)); }
           Hit h = { .chan = c, .slot = s,
                     .eff_off = skim_tone_split_slot_hz(sp, s) +
                                d.freq_offset_hz,
                     .contested = skim_tone_split_slot_contested(sp, s),
-                    .d = d, .aux = aux };
+                    .d = d, .aux = aux, .ops = ops };
           g_array_append_val(p->hits, h);
         }
       }
@@ -544,6 +594,7 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
     if (cw->level && ghost_suppressed(p, p->lvl, c, h->slot, h->eff_off)) {
       p->ghosts++;
       g_free(h->aux);
+      hit_free_ops(h->ops);
       continue;
     }
     {
@@ -593,17 +644,7 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
       const double sig_hz = L->hz > 0 ? L->hz : raw_hz;
       if (p->dlog) {
         char tbuf[24];
-        if (p->offline) {                    /* stream time — deterministic  */
-          guint sec = (guint)((double)p->frames / MAX(b->rate, 1.0));
-          g_snprintf(tbuf, sizeof(tbuf), "%02u:%02u:%02u", sec / 3600,
-                     (sec / 60) % 60, sec % 60);
-        } else {
-          GDateTime *now = g_date_time_new_now_local();
-          char *ts = g_date_time_format(now, "%H:%M:%S");
-          g_strlcpy(tbuf, ts, sizeof(tbuf));
-          g_free(ts);
-          g_date_time_unref(now);
-        }
+        pipe_log_stamp(p, b, tbuf, sizeof(tbuf));
         char khz[G_ASCII_DTOSTR_BUF_SIZE];   /* C locale — parseable dot     */
         g_ascii_formatd(khz, sizeof(khz), "%.2f", sig_hz / 1000.0);
         if (d.text[0]) {
@@ -615,7 +656,15 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
         }
         fflush(p->dlog);
       }
-      if (p->text_cb && d.text[0]) { p->text_cb(sig_hz, d.text, p->text_user); }
+      /* pane_own: the backend composed this call's pane view itself (phase
+       * B hybrid) — the ops below carry it; appending d.text too would
+       * double every draft char. Extractor/station/spot paths read d.text
+       * as ever. Only meaningful for backends with the ops hook — v1 never
+       * writes the field (stack garbage otherwise, gate-caught). */
+      const gboolean pane_own = cw->take_pane_op && d.pane_own;
+      if (p->text_cb && d.text[0] && !pane_own) {
+        p->text_cb(sig_hz, d.text, p->text_user);
+      }
       if (h->aux) {
         /* Display-only: pane + log, NEVER the extractor (a lexically primed
          * re-read hallucinates plausible calls from babble — the phantom
@@ -626,6 +675,33 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
           g_free(line);
         }
         g_free(h->aux);
+      }
+      if (h->ops) {
+        /* Pane ops (phase B): the hybrid over view. Same display-only rule
+         * as aux. APPENDs ride the plain text path; OPEN/SET/CLOSE go to
+         * the over callback; the log gets each op's INCREMENT (fresh), so
+         * a full-state SET never re-logs the whole over. */
+        for (guint k = 0; k < h->ops->len; k++) {
+          const SkimPaneOp *op = &g_array_index(h->ops, SkimPaneOp, k);
+          if (p->dlog && op->fresh && op->fresh[0]) {
+            char tbuf2[24];
+            char khz2[G_ASCII_DTOSTR_BUF_SIZE];
+            pipe_log_stamp(p, b, tbuf2, sizeof(tbuf2));
+            g_ascii_formatd(khz2, sizeof(khz2), "%.2f", sig_hz / 1000.0);
+            fprintf(p->dlog, "%s %9s   aux        |%s|\n", tbuf2, khz2,
+                    op->fresh);
+            fflush(p->dlog);
+          }
+          if (op->kind == SKIM_PANE_OP_APPEND) {
+            if (p->text_cb && op->text && op->text[0]) {
+              p->text_cb(sig_hz, op->text, p->text_user);
+            }
+          } else if (p->over_cb) {
+            p->over_cb(sig_hz, op->kind, op->erase,
+                       op->text ? op->text : "", op->final_len, p->over_user);
+          }
+        }
+        hit_free_ops(h->ops);
       }
       if (!d.text[0])
         continue;
