@@ -309,6 +309,22 @@ last_over_dist ≤3 incl. the "VVV" warmup gen_env really keys). Real
 A/B: 20 m QSO pair CT3KN/CT3D same-freq — 53 → 365 reports; binec
 NU3EQ→RU3EQ (first char fixed); oper/UB7M/R1AL/9A170NT tables intact
 + OH2BO newly tracked; EA1EYL/EA3BP untouched; 10 gates green.
+**LIVE VERDIKT run5 + ROZHODNUTÍ (Richard, 2026-07-19 ~00:30): the AI
+comes OUT of decoding.** run5's white commits still degrade text v2 got
+right the first time — two trained generations, calibrated margins,
+gated context and the same-shape guard all failed to make the model a
+net positive on a live band. The app no longer HAS a reader: the
+Preferences switch, settings [reader], blob resolver and env arming are
+all removed from src/app/main.c — a launch can never invoke the model.
+The pane is pure v2 (draft = final, no dim/rewrite in practice; the
+engine's SKIM_CW_READER env path + pane-op machinery still exist for
+OFFLINE replay analyses only, and their gates keep them honest while
+they remain). Phase D (model as spot witness) is dead. The classical
+path (v2 + clock re-lock + tone splitter) is the decoder. Full source
+removal of the neural subsystem (cw_reader.c, pane ops, ml/ training
+tools, data/cw-reader.bin, reader+pane gates) awaits Richard's explicit
+call — it is a lot of gate-proven code and git history keeps it either
+way.
 Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
 **v2 live session**, **tone splitter live session** (run the app with
 `SKIM_CW_V2=1 SKIM_TONE_SPLIT=1`). MASTER.SCP can go to
