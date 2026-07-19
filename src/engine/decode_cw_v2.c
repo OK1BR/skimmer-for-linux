@@ -21,6 +21,8 @@
  *
  * The dit clock bootstraps exactly like v1 (Schmitt run clustering) — the
  * lattice needs a timing anchor before its duration priors mean anything.
+ * A ~2 s pre-roll ring replays the head of an over the gate delay and the
+ * bootstrap consumed (preroll_replay — the squelch attack fix).
  *
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
@@ -177,6 +179,19 @@ typedef struct {
   guint  cont_space;                    /* samples continuously below mid     */
   gboolean carrier;                     /* long solid mark — not keying       */
 
+  /* --- pre-roll ring (squelch attack fix, 2026-07-19) -------------------------
+   * The last ~2 s of post-MA envelope samples, written on EVERY sample —
+   * dead air included. When the channel wakes with a usable dit clock
+   * (reopen from pause, or the moment the bootstrap learns the clock) the
+   * ring is replayed through the soft path, so the head the gate delay and
+   * the bootstrap consumed still decodes. pre_from fences the replayable
+   * window: audio older than the last pause entry (or a watchdog reboot)
+   * was already decoded or squelched — replaying it would duplicate text. */
+  float  *pre;
+  guint   pre_size;                     /* power of two                       */
+  guint   pre_head;                     /* total writes; index = & (size-1)   */
+  guint   pre_from;                     /* replay window fence (write count)  */
+
   /* --- Viterbi lattice (allocated lazily — noise channels never pay) -------- */
   gboolean active;
   guint64  t;                           /* absolute sample index              */
@@ -289,6 +304,12 @@ static gpointer cw2_channel_new(double sample_rate) {
    * or better on every regression, half the candidate words, 2.8× faster).
    * SKIM_CW_READER_RAW=1 restores the raw feed for A/B analyses. */
   st->rr_gate  = g_getenv("SKIM_CW_READER_RAW") == NULL;
+  /* Pre-roll ring ~2 s: long enough for the bootstrap span of a slow fist
+   * (4 marks of a 15 WPM "Y" ≈ 1.2 s) plus its quiet lead-in. */
+  guint n = 1;
+  while (n < (guint)(2.0 * st->rate)) { n <<= 1; }
+  st->pre_size = MIN(n, 4096u);
+  st->pre      = g_new0(float, st->pre_size);
   return st;
 }
 
@@ -673,6 +694,7 @@ static void cw2_channel_free(gpointer state) {
     }
     g_array_free(st->ops, TRUE);
   }
+  g_free(st->pre);
   g_free(st->lat);
   g_free(st);
 }
@@ -1169,6 +1191,243 @@ static void lattice_flush(Cw2State *st, SkimDecode *out, guint *pos) {
   st->active = FALSE;
 }
 
+/* --- soft path: discriminator → llr ring → Viterbi ------------------------------
+ * One sample through the soft path: µ trackers → carrier watch → LLR →
+ * lattice step → lagged commit + live emission. Factored out of the live
+ * loop VERBATIM so the pre-roll replay pushes ring samples through the
+ * exact same float ops a live sample takes. */
+static void soft_step(Cw2State *st, float m, SkimDecode *out, guint *pos) {
+  /* µ_mark is a FAST decaying peak (instant attack, ~0.35 s release): a
+   * QSB trough pulls it down within one fade edge, so faded marks stay
+   * above the midpoint and keep their positive evidence — the fix for
+   * "the fade ate my dits". The µ_s·1.5 floor stops a long pause from
+   * collapsing the midpoint into the noise. µ_space is the below-mid
+   * mean. (An early conditional-update µ_mark got STUCK whenever a fade
+   * dropped marks below the old midpoint — nothing above mid ever
+   * updated it again; the decaying peak cannot stick.) */
+  st->mu_m = m > st->mu_m ? (double)m
+                          : st->mu_m + st->k_m_dn * (m - st->mu_m);
+  st->mu_m = MAX(st->mu_m, MAX(1.5 * st->mu_s, 1e-12));
+  const double mid = 0.5 * (st->mu_m + st->mu_s);
+  if (m > mid) {
+    st->cont_mark++;
+  } else {
+    /* Only CLEARLY space-like samples may teach µ_space. A fade's edge
+     * throws mark samples just under the midpoint — letting them in
+     * drags µ_s (and the midpoint) up under the whole trough until every
+     * faded mark reads as space (the mid-word break cascade). */
+    if (m < st->mu_s + 0.25 * (st->mu_m - st->mu_s)) {
+      st->mu_s += st->k_s * (m - st->mu_s);
+    }
+    st->cont_mark = 0;
+  }
+
+  /* A solid mark far beyond a dash is a carrier, not keying (v1 rule):
+   * drop the assembly and idle until the key finally opens. */
+  if (st->carrier) {
+    if (st->cont_mark == 0) {
+      st->carrier = FALSE;
+      lattice_start(st);
+    }
+    st->t++;
+    return;
+  }
+  if (st->cont_mark > (guint)MAX(8.0 * st->dit, 0.8 * st->rate)) {
+    /* 8 dits alone is NOT carrier-proof against a stale clock: an
+     * operator dropping from ~35 to ~12 WPM makes every dah ~8× the old
+     * dit — the whole slow transmission read as "carrier" and, worse,
+     * dahs never committed so the clock had nothing to relearn from
+     * (live-caught 2026-07-16, 7028.9). A real carrier holds for
+     * seconds; even a 5 WPM dah is 720 ms, so the 0.8 s floor keeps
+     * SLOW keying committing — and one committed slow dah snaps the
+     * elem_err-boosted clock onto the new speed. */
+    st->carrier = TRUE;
+    st->active  = FALSE;                       /* drop the code in flight    */
+    st->code    = 0;
+    st->nelem   = 0;
+    st->t++;
+    return;
+  }
+
+  /* Two llr views, averaged:
+   *  - span: where does m sit between µ_space and µ_mark? Follows QSB,
+   *    but cannot tell a −18 dB notch inside a dash from a real space.
+   *  - Rayleigh: how plausible is m as pure noise? A notch bottoms out
+   *    4–5× ABOVE the noise floor — "not noise" — while a real space
+   *    sits ON it. Anchored to µ_s, blind to fading.
+   * The average lets a sub-dit notch pass with ~zero evidence (duration
+   * priors then carry the dash through), yet keeps real spaces at full
+   * negative weight and low-level QRM in spaces near zero. */
+  const double x = (m - mid) / (st->mu_m - st->mu_s);
+  const double span_llr = CLAMP(LLR_K * x, -LLR_MAX, LLR_MAX);
+  /* Zero crossing at z ≈ 2.8: Rayleigh noise clears that only ~2 % of
+   * samples (no sustained runs — no phantom dits minted from the tail
+   * after an over), while a −18 dB notch (z ≈ 5) and QSB-trough marks
+   * (z ≈ 7) sit far in the positive. */
+  const double z = m / MAX(st->mu_s / 1.2533, 1e-12);
+  const double ray_llr =
+      z <= 1.0 ? -LLR_MAX
+               : CLAMP(3.3 * (0.5 * z * z - log(z) - 2.89),
+                       -LLR_MAX, LLR_MAX);
+  const double llr = 0.5 * (span_llr + ray_llr);
+  if (g_getenv("SKIM_CW2_TRACE")) {
+    fprintf(stderr, "T %lu %.4f %.4f %.4f %.2f\n",
+            (unsigned long)st->t, m, st->mu_m, st->mu_s, llr);
+  }
+  st->t++;
+  st->lat->cum[st->t & WMASK] = st->lat->cum[(st->t - 1) & WMASK] + llr;
+  lattice_step(st);
+
+  if ((st->t & 7) == 0) {                      /* lagged commit, every 8     */
+    /* Healthy signal (discriminator riding near the envelope peak, clock
+     * trusted) → short lag; a fade or a re-lock keeps the full window. */
+    const double lag =
+        (st->mu_m > 0.6 * st->env_hi && st->elem_err < 0.20)
+            ? LAG_DITS_FAST
+            : LAG_DITS;
+    lattice_commit(st, lag, out, pos);
+
+    /* Live emission (v1's rule, model-driven): once the best path says
+     * "a space has been running since commit_t" — everything before it
+     * is committed — the char in flight is DONE: emit it without waiting
+     * for a closing mark (the last char of an over never gets one).
+     * The word space and the over break follow the same clock. */
+    guint64 tau;
+    gboolean space_running;
+    lattice_head(st, &tau, &space_running);
+    if (space_running && tau == st->commit_t) {
+      const double sp = (double)(st->t - tau);
+      /* Live clocks ride the fist centres: char fires at 0.867·csp (the
+       * old 2.6 dits at the 3.0 seed), word at 1.2·√(csp·wsp) (the old
+       * 5.5 at the 3/7 seeds) — a stretched fist gets slower live text
+       * instead of premature word splits. */
+      if (!st->char_live && sp > 0.867 * st->fist_csp * st->dit) {
+        st->char_live     = TRUE;
+        st->live_t        = tau;
+        st->live_had_char = st->nelem > 0;
+        emit_code(st, out, pos, tau);
+      }
+      if (st->char_live && st->live_had_char && !st->word_live &&
+          sp > 1.2 * sqrt(st->fist_csp * st->fist_wsp) * st->dit) {
+        st->word_live = TRUE;
+        emit(st, out, pos, ' ', tau);
+      }
+      if (sp > BREAK_DITS * st->dit) {         /* the over is done           */
+        CW2_DBG("[break at t=%lu, sp=%.0f]\n", (unsigned long)st->t, sp);
+        lattice_flush(st, out, pos);
+        if (!st->brk_out) {
+          st->brk_out = TRUE;
+          emit_str(out, pos, BREAK_MARK);
+        }
+        rr_flush_over(st);
+        lattice_start(st);
+        /* The next over may be the OTHER op of a QSO — the re-lock rings
+         * must weigh HIS marks alone (a solid channel skips the pause on
+         * a short turnaround gap, so the pause-side clear never fires). */
+        st->clk_n = st->clk_sp_n = st->clk_head = st->clk_sp_head =
+            st->clk_hold = 0;
+      }
+    }
+  }
+}
+
+/* --- pre-roll replay (squelch attack fix, 2026-07-19) ---------------------------
+ * The dead-air gate and the dit bootstrap both consume signal from the HEAD
+ * of an over: the keying-duty EMA needs ~0.3 s to concede a cold channel is
+ * keying, and after the 8 s fist-forget the first 4-8 marks are spent
+ * LEARNING the clock, not decoding — "YOTA" logged as "OTA" (Y is exactly
+ * the 4 marks the bootstrap eats; 32 % of the R3OM reference channel's
+ * overs, live 2026-07-19). Every sample lands in the pre ring regardless of
+ * gate state, so when the channel wakes with a usable clock the ring still
+ * holds the head: find the over's onset (first ≥0.55-dit mark run preceded
+ * by ≥2 dits of quiet, inside the pre_from fence) and push the span through
+ * the same soft path live samples take. No onset, or quiet ≥ 14 dits
+ * embedded in the span (that is QRM + a real break, not one over's head) →
+ * no replay — exactly the old behaviour, never worse. */
+static gboolean preroll_replay(Cw2State *st, SkimDecode *out, guint *pos) {
+  if (!st->pre || st->dit <= 0 || !st->active)
+    return FALSE;
+  const guint size = st->pre_size;
+  guint have = MIN(st->pre_head, size);
+  have = MIN(have, st->pre_head - st->pre_from);
+  const float thr =
+      (float)(st->env_lo + 0.45 * (st->env_hi - st->env_lo));
+  const guint qmin    = (guint)MAX(2.0 * st->dit, 0.10 * st->rate);
+  const guint marklen = (guint)MAX(3.0, 0.55 * st->dit);
+  if (have < qmin + marklen)
+    return FALSE;
+  /* Onset: the first above-threshold run ≥ marklen (a real mark, not a
+   * noise pop) whose start follows ≥ qmin of quiet. qmin ≥ 2 dits keeps a
+   * mid-character element gap from ever qualifying — a replay may only
+   * start at a char/word boundary or dead air, so no partial character can
+   * be minted. */
+  guint quiet = 0, run = 0, run_at = 0, onset = 0;
+  gboolean found = FALSE;
+  for (guint k = 0; k < have && !found; k++) {
+    const float v = st->pre[(st->pre_head - have + k) & (size - 1)];
+    if (v > thr) {
+      if (run == 0) { run_at = k; }
+      run++;
+      if (run >= marklen && quiet >= qmin) {
+        onset = run_at;
+        found = TRUE;
+      }
+    } else {
+      if (run) { quiet = 0; }                  /* a pop ended — quiet anew   */
+      quiet++;
+      run = 0;
+    }
+  }
+  if (!found)
+    return FALSE;
+  /* Weak heads keep the old behaviour. The seeded µ midpoint reflects the
+   * WAKE moment; the head of a fading-in over sits under it and reads TORN
+   * (YOTA fixture: 12 dB RV6HV re-read as "ST AEV6HV" where the old code
+   * stayed quiet — and the mutation cost the station its table entry). A
+   * mutated head near the extractor is dearer than a missing one, and the
+   * clip class this fix hunts was measured on strong runners (R3OM 33 dB).
+   * The bar is measured on the RING, onset-run level against the quiet
+   * level before it — the envelope ratio at wake time is useless here: the
+   * gate opens ON the rising edge, so it reads ~4-5× by construction
+   * whatever the station's strength (fixture-measured). 5.6× on the ring
+   * means keeps every strong-channel gain and blocks the 12 dB tear. */
+  {
+    double qsum = 0.0, msum = 0.0;
+    guint  qn = 0, mn = 0;
+    for (guint k = onset > qmin ? onset - qmin : 0; k < onset; k++) {
+      const float v = st->pre[(st->pre_head - have + k) & (size - 1)];
+      if (v <= thr) {
+        qsum += v;
+        qn++;
+      }
+    }
+    for (guint k = onset; k < have && mn < 2 * marklen; k++) {
+      const float v = st->pre[(st->pre_head - have + k) & (size - 1)];
+      if (v > thr) {
+        msum += v;
+        mn++;
+      }
+    }
+    if (!qn || !mn || msum * (double)qn < 5.6 * qsum * (double)mn)
+      return FALSE;
+  }
+  const guint brk = (guint)(14.0 * st->dit);
+  quiet = 0;
+  for (guint k = onset; k < have; k++) {
+    const float v = st->pre[(st->pre_head - have + k) & (size - 1)];
+    quiet = v > thr ? 0 : quiet + 1;
+    if (quiet >= brk)
+      return FALSE;
+  }
+  const guint lead = MIN((guint)(2.0 * st->dit), onset);
+  CW2_DBG("[preroll replay %u samples (onset -%u) at t=%lu]\n",
+          have - (onset - lead), have - onset, (unsigned long)st->t);
+  for (guint k = onset - lead; k < have; k++) {
+    soft_step(st, st->pre[(st->pre_head - have + k) & (size - 1)], out, pos);
+  }
+  return TRUE;
+}
+
 /* --- the backend --------------------------------------------------------------- */
 
 static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
@@ -1207,6 +1466,9 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
     st->ngaps = st->gap_head = st->gap_fresh = 0;
     st->carrier = FALSE;
     st->paused = FALSE;
+    /* The mis-clocked span WAS emitted (badly) — replaying it after the
+     * rebootstrap would duplicate text. Only post-watchdog audio may. */
+    st->pre_from = st->pre_head;
   }
 
   for (guint n = 0; n < nframes; n++) {
@@ -1216,6 +1478,7 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
     st->ma[st->ma_n % 3] = mag;
     st->ma_n++;
     float m = (st->ma[0] + st->ma[1] + st->ma[2]) / (float)MIN(st->ma_n, 3);
+    st->pre[st->pre_head++ & (st->pre_size - 1)] = m;
 
     /* Level trackers + squelch + keying-duty — v1 verbatim. */
     if (st->env_hi < 0) { st->env_hi = st->env_lo = m; }
@@ -1326,6 +1589,9 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
       st->clk_hold = 0;
           st->paused = TRUE;
           st->quiet  = 0.0;
+          /* Everything before this pause was decoded or squelched — the
+           * pre-roll replay may only reach back to here. */
+          st->pre_from = st->pre_head;
         }
         st->quiet += 1.0;
         if (st->quiet > 8.0 * st->rate) {      /* forget the fist            */
@@ -1349,7 +1615,12 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
     if (st->paused) {
       st->paused = FALSE;                      /* signal is back             */
       st->carrier = FALSE;
-      if (st->dit > 0) { lattice_start(st); }
+      if (st->dit > 0) {
+        lattice_start(st);
+        /* The wake lagged the true onset (in a fade re-entry by a lot) —
+         * replay it from the ring; the current sample rides along. */
+        if (preroll_replay(st, out, &pos)) { continue; }
+      }
     }
 
     /* Tone offset from the phase slope, SOLID mark samples only — the 0.55
@@ -1413,6 +1684,12 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
           if (st->dit > 0) {
             CW2_DBG("[boot dit %.1f from %u marks]\n", st->dit, st->nboot);
             lattice_start(st);                 /* hand over to the Viterbi   */
+            /* The bootstrap consumed the over's head to LEARN the clock —
+             * the ring still holds that audio; decode it now. */
+            if (preroll_replay(st, out, &pos)) {
+              st->pend_valid = FALSE;
+              continue;                        /* replay ran through NOW     */
+            }
           }
         }
         st->pend_valid = FALSE;
@@ -1421,139 +1698,7 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
       continue;
     }
 
-    /* --- soft path: discriminator → llr ring → Viterbi -----------------------
-     * µ_mark is a FAST decaying peak (instant attack, ~0.35 s release): a
-     * QSB trough pulls it down within one fade edge, so faded marks stay
-     * above the midpoint and keep their positive evidence — the fix for
-     * "the fade ate my dits". The µ_s·1.5 floor stops a long pause from
-     * collapsing the midpoint into the noise. µ_space is the below-mid
-     * mean. (An early conditional-update µ_mark got STUCK whenever a fade
-     * dropped marks below the old midpoint — nothing above mid ever
-     * updated it again; the decaying peak cannot stick.) */
-    st->mu_m = m > st->mu_m ? (double)m
-                            : st->mu_m + st->k_m_dn * (m - st->mu_m);
-    st->mu_m = MAX(st->mu_m, MAX(1.5 * st->mu_s, 1e-12));
-    const double mid = 0.5 * (st->mu_m + st->mu_s);
-    if (m > mid) {
-      st->cont_mark++;
-    } else {
-      /* Only CLEARLY space-like samples may teach µ_space. A fade's edge
-       * throws mark samples just under the midpoint — letting them in
-       * drags µ_s (and the midpoint) up under the whole trough until every
-       * faded mark reads as space (the mid-word break cascade). */
-      if (m < st->mu_s + 0.25 * (st->mu_m - st->mu_s)) {
-        st->mu_s += st->k_s * (m - st->mu_s);
-      }
-      st->cont_mark = 0;
-    }
-
-    /* A solid mark far beyond a dash is a carrier, not keying (v1 rule):
-     * drop the assembly and idle until the key finally opens. */
-    if (st->carrier) {
-      if (st->cont_mark == 0) {
-        st->carrier = FALSE;
-        lattice_start(st);
-      }
-      st->t++;
-      continue;
-    }
-    if (st->cont_mark > (guint)MAX(8.0 * st->dit, 0.8 * st->rate)) {
-      /* 8 dits alone is NOT carrier-proof against a stale clock: an
-       * operator dropping from ~35 to ~12 WPM makes every dah ~8× the old
-       * dit — the whole slow transmission read as "carrier" and, worse,
-       * dahs never committed so the clock had nothing to relearn from
-       * (live-caught 2026-07-16, 7028.9). A real carrier holds for
-       * seconds; even a 5 WPM dah is 720 ms, so the 0.8 s floor keeps
-       * SLOW keying committing — and one committed slow dah snaps the
-       * elem_err-boosted clock onto the new speed. */
-      st->carrier = TRUE;
-      st->active  = FALSE;                     /* drop the code in flight    */
-      st->code    = 0;
-      st->nelem   = 0;
-      st->t++;
-      continue;
-    }
-
-    /* Two llr views, averaged:
-     *  - span: where does m sit between µ_space and µ_mark? Follows QSB,
-     *    but cannot tell a −18 dB notch inside a dash from a real space.
-     *  - Rayleigh: how plausible is m as pure noise? A notch bottoms out
-     *    4–5× ABOVE the noise floor — "not noise" — while a real space
-     *    sits ON it. Anchored to µ_s, blind to fading.
-     * The average lets a sub-dit notch pass with ~zero evidence (duration
-     * priors then carry the dash through), yet keeps real spaces at full
-     * negative weight and low-level QRM in spaces near zero. */
-    const double x = (m - mid) / (st->mu_m - st->mu_s);
-    const double span_llr = CLAMP(LLR_K * x, -LLR_MAX, LLR_MAX);
-    /* Zero crossing at z ≈ 2.8: Rayleigh noise clears that only ~2 % of
-     * samples (no sustained runs — no phantom dits minted from the tail
-     * after an over), while a −18 dB notch (z ≈ 5) and QSB-trough marks
-     * (z ≈ 7) sit far in the positive. */
-    const double z = m / MAX(st->mu_s / 1.2533, 1e-12);
-    const double ray_llr =
-        z <= 1.0 ? -LLR_MAX
-                 : CLAMP(3.3 * (0.5 * z * z - log(z) - 2.89),
-                         -LLR_MAX, LLR_MAX);
-    const double llr = 0.5 * (span_llr + ray_llr);
-    if (g_getenv("SKIM_CW2_TRACE")) {
-      fprintf(stderr, "T %lu %.4f %.4f %.4f %.2f\n",
-              (unsigned long)st->t, m, st->mu_m, st->mu_s, llr);
-    }
-    st->t++;
-    st->lat->cum[st->t & WMASK] = st->lat->cum[(st->t - 1) & WMASK] + llr;
-    lattice_step(st);
-
-    if ((st->t & 7) == 0) {                    /* lagged commit, every 8     */
-      /* Healthy signal (discriminator riding near the envelope peak, clock
-       * trusted) → short lag; a fade or a re-lock keeps the full window. */
-      const double lag =
-          (st->mu_m > 0.6 * st->env_hi && st->elem_err < 0.20)
-              ? LAG_DITS_FAST
-              : LAG_DITS;
-      lattice_commit(st, lag, out, &pos);
-
-      /* Live emission (v1's rule, model-driven): once the best path says
-       * "a space has been running since commit_t" — everything before it
-       * is committed — the char in flight is DONE: emit it without waiting
-       * for a closing mark (the last char of an over never gets one).
-       * The word space and the over break follow the same clock. */
-      guint64 tau;
-      gboolean space_running;
-      lattice_head(st, &tau, &space_running);
-      if (space_running && tau == st->commit_t) {
-        const double sp = (double)(st->t - tau);
-        /* Live clocks ride the fist centres: char fires at 0.867·csp (the
-         * old 2.6 dits at the 3.0 seed), word at 1.2·√(csp·wsp) (the old
-         * 5.5 at the 3/7 seeds) — a stretched fist gets slower live text
-         * instead of premature word splits. */
-        if (!st->char_live && sp > 0.867 * st->fist_csp * st->dit) {
-          st->char_live     = TRUE;
-          st->live_t        = tau;
-          st->live_had_char = st->nelem > 0;
-          emit_code(st, out, &pos, tau);
-        }
-        if (st->char_live && st->live_had_char && !st->word_live &&
-            sp > 1.2 * sqrt(st->fist_csp * st->fist_wsp) * st->dit) {
-          st->word_live = TRUE;
-          emit(st, out, &pos, ' ', tau);
-        }
-        if (sp > BREAK_DITS * st->dit) {       /* the over is done           */
-          CW2_DBG("[break at t=%lu, sp=%.0f]\n", (unsigned long)st->t, sp);
-          lattice_flush(st, out, &pos);
-          if (!st->brk_out) {
-            st->brk_out = TRUE;
-            emit_str(out, &pos, BREAK_MARK);
-          }
-          rr_flush_over(st);
-          lattice_start(st);
-          /* The next over may be the OTHER op of a QSO — the re-lock rings
-           * must weigh HIS marks alone (a solid channel skips the pause on
-           * a short turnaround gap, so the pause-side clear never fires). */
-          st->clk_n = st->clk_sp_n = st->clk_head = st->clk_sp_head =
-      st->clk_hold = 0;
-        }
-      }
-    }
+    soft_step(st, m, out, &pos);
   }
 
   hy_call_end(st, out);

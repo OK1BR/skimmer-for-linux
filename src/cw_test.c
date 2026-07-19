@@ -65,19 +65,13 @@ static void key_run(GArray *env, double samps, float on, double jitter,
   for (guint i = 0; i < n; i++) { g_array_append_val(env, on); }
 }
 
-/* text → keyed envelope at `rate`, dit = 1.2/wpm s. Leading "VVV " warms up
- * the decoder's dit bootstrap; trailing 1.5 s of silence flushes the tail.
- * csp_dits/wsp_dits set the operator's char/word spacing (ITU: 3/7 — real
- * fists stretch and squeeze them, which is what the fist model is for). */
-static GArray *gen_env_fist(const char *payload, double wpm, double rate,
-                            double jitter, GRand *rng, double csp_dits,
-                            double wsp_dits) {
-  GArray *env = g_array_new(FALSE, FALSE, sizeof(float));
-  char   *text = g_strdup_printf("VVV %s", payload);
-  double  dit = 1.2 / wpm * rate;
-  float   ON = 1.0f, OFF = 0.0f;
-
-  key_run(env, 3 * dit, OFF, 0, rng);
+/* Append `text` keyed verbatim — no warmup, no trailing flush (the second
+ * over of a pause pair, or a cold start whose head is under test). */
+static void gen_env_append(GArray *env, const char *text, double wpm,
+                           double rate, double jitter, GRand *rng,
+                           double csp_dits, double wsp_dits) {
+  double dit = 1.2 / wpm * rate;
+  float  ON = 1.0f, OFF = 0.0f;
   for (const char *p = text; *p; p++) {
     if (*p == ' ') {
       key_run(env, wsp_dits * dit, OFF, jitter, rng);
@@ -91,7 +85,22 @@ static GArray *gen_env_fist(const char *payload, double wpm, double rate,
     }
     key_run(env, csp_dits * dit, OFF, jitter, rng);
   }
-  key_run(env, 1.5 * rate, OFF, 0, rng);
+}
+
+/* text → keyed envelope at `rate`, dit = 1.2/wpm s. Leading "VVV " warms up
+ * the decoder's dit bootstrap; trailing 1.5 s of silence flushes the tail.
+ * csp_dits/wsp_dits set the operator's char/word spacing (ITU: 3/7 — real
+ * fists stretch and squeeze them, which is what the fist model is for). */
+static GArray *gen_env_fist(const char *payload, double wpm, double rate,
+                            double jitter, GRand *rng, double csp_dits,
+                            double wsp_dits) {
+  GArray *env = g_array_new(FALSE, FALSE, sizeof(float));
+  char   *text = g_strdup_printf("VVV %s", payload);
+  double  dit = 1.2 / wpm * rate;
+
+  key_run(env, 3 * dit, 0.0f, 0, rng);
+  gen_env_append(env, text, wpm, rate, jitter, rng, csp_dits, wsp_dits);
+  key_run(env, 1.5 * rate, 0.0f, 0, rng);
   g_free(text);
   return env;
 }
@@ -558,6 +567,78 @@ int main(void) {
     g_free(v2);
     g_array_free(env, TRUE);
     g_rand_free(rng);
+  }
+
+  /* -- squelch attack: the head of an over after dead air --------------------------
+   * The ONE systematic weakness the live A/B against SDC left standing
+   * (2026-07-19): the first 1-2 characters after a longer pause. Reproduced
+   * mechanisms: after the 8 s fist-forget the next over's first 4-8 marks
+   * feed the dit BOOTSTRAP, not the decoder ("YOTA" → "OTA" — Y is exactly
+   * the 4 marks the bootstrap eats; 32 % of the R3OM reference channel's
+   * overs in the live log), and a cold channel pays the keying-duty EMA
+   * ~0.3 s before the gate concedes it is keying. v2 keeps a ~2 s pre-roll
+   * ring of the envelope and replays it through the lattice the moment the
+   * channel wakes with a usable clock — the head must now read WHOLE, at
+   * both speeds, after any pause, and from channel birth. The 4 s pause
+   * guards the solid reopen that already worked. v1 has no ring: info only. */
+  {
+    static const struct { double pause_s, wpm; } CASES[] = {
+      { 10, 33 }, { 10, 20 }, { 4, 33 },
+    };
+    const char *OVER = "YOTA TEST R3OM R3OM";
+    printf("--- squelch attack: over -> pause -> over, head survival ---\n");
+    for (guint c = 0; c < G_N_ELEMENTS(CASES); c++) {
+      char *v1 = NULL, *v2 = NULL;
+      for (guint b = 0; b < 2; b++) {
+        GRand *rng = g_rand_new_with_seed(20260719);
+        /* gen_env's 1.5 s flush tail is part of the pause. */
+        GArray *env = gen_env(OVER, CASES[c].wpm, RATE, 0.0, rng);
+        float z = 0.0f;
+        for (guint i = 0; i < (guint)(CASES[c].pause_s * RATE); i++) {
+          g_array_append_val(env, z);
+        }
+        gen_env_append(env, OVER, CASES[c].wpm, RATE, 0.0, rng, 3.0, 7.0);
+        key_run(env, 1.5 * RATE, 0.0f, 0, rng);
+        g_cw = b ? skim_decode_cw_v2() : skim_decode_cw();
+        char **got = b ? &v2 : &v1;
+        *got = run_decoder(env, 18.0, 25.0, 0, 0, rng, NULL);
+        g_array_free(env, TRUE);
+        g_rand_free(rng);
+      }
+      char what[96];
+      g_snprintf(what, sizeof(what),
+                 "head survives a %.0f s pause at %.0f WPM (2nd over exact)",
+                 CASES[c].pause_s, CASES[c].wpm);
+      show("v1 (info):", v1);
+      show("v2:", v2);
+      check(what, last_over_dist(v2, OVER) == 0);
+      g_free(v1);
+      g_free(v2);
+    }
+
+    /* Cold start: the channel's very first over — no warmup, no history. */
+    char *v1 = NULL, *v2 = NULL;
+    for (guint b = 0; b < 2; b++) {
+      GRand *rng = g_rand_new_with_seed(20260719);
+      GArray *env = g_array_new(FALSE, FALSE, sizeof(float));
+      float z = 0.0f;
+      for (guint i = 0; i < (guint)(3.0 * RATE); i++) {
+        g_array_append_val(env, z);
+      }
+      gen_env_append(env, OVER, 33, RATE, 0.0, rng, 3.0, 7.0);
+      key_run(env, 1.5 * RATE, 0.0f, 0, rng);
+      g_cw = b ? skim_decode_cw_v2() : skim_decode_cw();
+      char **got = b ? &v2 : &v1;
+      *got = run_decoder(env, 18.0, 25.0, 0, 0, rng, NULL);
+      g_array_free(env, TRUE);
+      g_rand_free(rng);
+    }
+    show("v1 (info):", v1);
+    show("v2:", v2);
+    check("cold start decodes from the FIRST character (33 WPM)",
+          last_over_dist(v2, OVER) == 0);
+    g_free(v1);
+    g_free(v2);
   }
 
   printf("\n=== %d checks, %d failures ===\n%s\n", checks, fails,

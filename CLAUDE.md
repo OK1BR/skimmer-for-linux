@@ -354,6 +354,36 @@ Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
 **v2 live session**, **tone splitter + FOCUS live session** (run the app
 with `SKIM_CW_V2=1 SKIM_TONE_FOCUS=1` — focus arms the splitter too). MASTER.SCP can go to
 `~/.config/skimmer-for-linux/master.scp` (the app loads it if present).
+**Squelch attack fixed — pre-roll replay (offline-proven 2026-07-19 late,
+always on, v2 only).** Úkol #4, the ONE weakness the SDC A/B measured:
+the head of an over after dead air. Two consumers: the keying-duty EMA
+(~0.3 s before a cold channel counts as keying) and the dit BOOTSTRAP
+(first 4-8 marks spent learning the clock after the 8 s forget —
+"YOTA"→"OTA" is exactly Y's 4 marks; 32 % of R3OM's overs in the live
+log). Fix in decode_cw_v2: every sample lands in a ~2 s pre-roll ring
+(dead air included); when the channel wakes with a usable clock (pause
+reopen / bootstrap learn) the ring replays through the SAME soft path
+(`soft_step` — the per-sample lattice code, factored verbatim). Guards,
+each fixture-measured: replay starts only at an onset preceded by
+≥2 dits of quiet (a mid-char element gap can never qualify — no partial
+chars minted); `pre_from` fence at pause entry + clock-lost watchdog
+(already-emitted audio never replays — no duplicate text); an embedded
+≥14-dit quiet in the span aborts (that is QRM + a break, not one over);
+and a head-SNR bar 5.6× measured ON THE RING (onset-run mean vs quiet
+mean) — the 12 dB RV6HV head re-read as torn "AEV6HV" where the old
+code stayed quiet, and a mutation near the extractor is dearer than a
+hole. NOTE: the env-ratio at wake time is useless for that bar — the
+gate opens on the rising edge, so it reads 4-5× by construction at any
+station strength. A keying-duty FAST ATTACK was built, measured and
+REMOVED: the replay covers its entire win, and the early wake tore
+marginal heads (fixture) + fed the bootstrap bank-warmup fragments
+(gate). v1 untouched. YOTA fixture A/B: strict textual superset —
+LZ5R 35→37, DF8V 13→14, EA6NB/UX8IX +2, YOTA 33→34, OH2B (the 14100
+NCDXF beacon — pure head-after-pause traffic) newly tracked, NO count
+lower anywhere; station table keeps all 17 + OH2B + EN0IMT. Gate:
+cw-test "squelch attack" section (10 s pause × 33/20 WPM exact, 4 s
+reopen exact, cold start reads from the FIRST char) — 47 checks. Live
+metric still pending: R3OM-class "OTA TEST" rate next live session.
 **Release: Richard decided 2026-07-18 — tag v0.1.0 only AFTER his live
 validation session** (v2 + relock + splitter + one more soak), then
 default flips + release. **Direction (Richard, 2026-07-19): better
