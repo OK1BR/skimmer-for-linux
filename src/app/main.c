@@ -229,6 +229,10 @@ static gboolean tuned_station_refresh(App *app) {
     app->tuned_slot_hz = 0;
   }
   tuned_label_update(app, have ? &hit : NULL);
+  if (g_getenv("SKIM_PANE_DEBUG")) {
+    g_printerr("pane: refresh vfo %.2f fixed '%s'->'%s' slot %.2f\n",
+               app->vfo_hz, before, app->tuned_call, app->tuned_slot_hz);
+  }
   return g_strcmp0(before, app->tuned_call) != 0;
 }
 
@@ -315,6 +319,12 @@ static void tuned_pane_reload(App *app) {
     fl = freqlog_find(app, app->tuned_slot_hz, FREQLOG_ROUTE_HZ);
   } else if (app->vfo_hz > 0) {
     fl = freqlog_find(app, app->vfo_hz, TUNED_WINDOW_HZ);
+  }
+  if (g_getenv("SKIM_PANE_DEBUG")) {
+    g_printerr("pane: reload fixed '%s' slot %.2f vfo %.2f -> %s (%.2f, "
+               "%zu ch)\n", app->tuned_call, app->tuned_slot_hz, app->vfo_hz,
+               fl ? "hit" : "MISS", fl ? fl->freq_hz : 0.0,
+               fl ? skim_pane_log_len(fl->log) : 0);
   }
   if (fl && skim_pane_log_len(fl->log)) {
     tail_append(app->tuned_view, app->tuned, skim_pane_log_text(fl->log));
@@ -413,7 +423,13 @@ static void pane_flush(App *app, GString *pane);
 static gboolean pane_routed(const App *app, double freq_hz) {
   const double key = app->tuned_call[0] ? app->tuned_slot_hz : app->vfo_hz;
   const double win = app->tuned_call[0] ? FREQLOG_ROUTE_HZ : FREQLOG_FREE_HZ;
-  return key > 0 && ABS(freq_hz - key) <= win;
+  const gboolean ok = key > 0 && ABS(freq_hz - key) <= win;
+  if (!ok && g_getenv("SKIM_PANE_DEBUG")) {
+    g_printerr("pane: DROP %.2f (key %.2f win %.0f fixed '%s' slot %.2f "
+               "vfo %.2f)\n", freq_hz, key, win, app->tuned_call,
+               app->tuned_slot_hz, app->vfo_hz);
+  }
+  return ok;
 }
 
 /* Record text into the frequency's history slot; the pane-routed part goes
