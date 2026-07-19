@@ -352,7 +352,9 @@ deltas/mutation suspects (edit distance ≤ 2, MASTER.SCP adjudicates) and
 per-side-only station events; mock-verified, awaiting a live SDC run.
 Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
 **v2 live session**, **tone splitter + FOCUS live session** (run the app
-with `SKIM_CW_V2=1 SKIM_TONE_FOCUS=1` — focus arms the splitter too). MASTER.SCP can go to
+with `SKIM_CW_V2=1 SKIM_TONE_FOCUS=1` — focus arms the splitter too;
+splitter alone briefly live 2026-07-20 post-reground, band died before
+a verdict). MASTER.SCP can go to
 `~/.config/skimmer-for-linux/master.scp` (the app loads it if present).
 **Squelch attack fixed — pre-roll replay (offline-proven 2026-07-19 late,
 always on, v2 only).** Úkol #4, the ONE weakness the SDC A/B measured:
@@ -384,6 +386,47 @@ lower anywhere; station table keeps all 17 + OH2B + EN0IMT. Gate:
 cw-test "squelch attack" section (10 s pause × 33/20 WPM exact, 4 s
 reopen exact, cold start reads from the FIRST char) — 47 checks. Live
 metric still pending: R3OM-class "OTA TEST" rate next live session.
+**Splitter REGROUND (offline-proven 2026-07-20, …77cf12a).** The live
+RG5A class (úkol #3) reproduced on the YOTA fixture — the old splitter
+run lost LZ5R (39 dB, 673 reports) OUTRIGHT, cut IT9JYI to 11/248 and
+minted 4 phantoms — and dissected into FOUR stacked defects, each
+found and fixed by measurement: (1) find_carriers' 8 dB peak bar sat
+over the FULL-BAND median, which the channelizer stopband drags to ~0
+— 3-4 dB noise wiggles engaged 743 splits/600 s (fix: passband lower
+quartile — the exact trap the focus bar had documented); (2) a
+bin-edge carrier scallops BELOW its own keying sidebands, so the
+symmetric pair had no accepted anchor and split ±13 Hz of a 44 dB
+runner — mirrors now test about ANY candidate line ≥ 0.25×; (3) WIDE
+lane — passthrough decoder/extractor/flock moved to a persistent
+per-channel lane (SL(c, SPLIT_MAX)); engage PARKS it, collapse RESUMES
+it warm. Before, one wrong split mid-pileup meant a fresh decoder that
+never re-acquired, LZ5R's own pileup mutations takeover-evicted the
+record (clip rule) and TTL-prune erased it — the vanished-station
+mechanism; (4) utility gate — no engage/focus while the wide lane
+copies SOLIDLY (owner hints per decode at confidence ≥ 0.85 ≈
+elem_err 0.1, 5 s self-decay). Measured: beat garble reports CONFIDENT
+mutations at 0.6-0.7 (why beat text always validated), so the bar sits
+at clean copy and the gate's beat pairs still split. Contested now
+blocks only the extractor FEED — the already-proven candidate keeps
+reporting through pending episodes (181 blocked feeds on one channel
+were starving YO3LW). Fixture after: 3389/3513 baseline reports
+(−3.5 %), ZERO phantoms, IT9JYI/EA6NB/F5UTN/DF8V/SN1T/UX8IX exact,
+RV6HV +34, G3BOY +21; residue OY1CT −74, DL0G −43, LZ5R −35, YO3LW
+−31 (contested episodes). A co-keying (colit) engage gate was built,
+measured (1 of 213 engages differed, table identical) and REMOVED per
+the no-benefit rule. Dead ends (do not retry without new data): power
+delta can't separate (the psd averages duty — the killer engage read
+Δ3.2 dB), colit can't (128 ms windows blur keying into over-level
+overlap — legit pairs read 0.78-1.00 like sidebands), weak-only
+engage bar kills the core comparable-pair case (gate-caught). New
+env-gated debug: SKIM_ST_DEBUG traces the station table (EVICT/FOLD/
+QSY/PRUNE + per-hit cand/report lines); SKIM_TS_DEBUG adds
+contested-drop lines, ENGAGE delta dB and the ts pointer for
+channel↔splitter mapping. 9 gates green; splitter replay 20 % faster
+(a per-hop qsort left with colit). First live launch same night
+(40 m): engages Δ1-6 dB comparable pairs, band went quiet before a
+verdict — splitter live validation STILL OPEN (A/B dataset live5
+reserved for it; live4 = post-squelch-fix, no splitter — don't mix).
 **Release: Richard decided 2026-07-18 — tag v0.1.0 only AFTER his live
 validation session** (v2 + relock + splitter + one more soak), then
 default flips + release. **Direction (Richard, 2026-07-19): better
