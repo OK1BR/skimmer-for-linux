@@ -125,6 +125,7 @@ struct _SkimPipeline {
   SkimToneSplit   **split;                     /* per-channel; NULL = unarmed */
   guint            *sgen;                      /* slot generations last seen */
   gboolean          use_split;
+  double            focus_fc;                  /* single-carrier cutoff; 0=off */
   guint             nchan;
 
   SkimStationTable *stations;
@@ -220,7 +221,15 @@ SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg) {
   p->cfg.host = p->host;
   p->dlog_path = g_strdup(cfg->decode_log_path);
   if (p->cfg.chan_bw_hz <= 0) { p->cfg.chan_bw_hz = 125.0; }
-  p->use_split = g_getenv("SKIM_TONE_SPLIT") != NULL;
+  /* SKIM_TONE_FOCUS arms the splitter too (focus lives inside it): a lone
+   * carrier gets a narrow slot on its own tone (~4 dB of envelope SNR on a
+   * 125 Hz channel). Numeric values ≥ 5 pick the cutoff; "1" = 25 Hz. */
+  const char *fenv = g_getenv("SKIM_TONE_FOCUS");
+  if (fenv) {
+    const double v = g_ascii_strtod(fenv, NULL);
+    p->focus_fc = (v >= 5.0) ? v : 25.0;
+  }
+  p->use_split = g_getenv("SKIM_TONE_SPLIT") != NULL || fenv != NULL;
   p->stations = skim_station_table_new();
   skim_station_table_set_gone_cb(p->stations, station_gone_fwd, p);
   p->queue    = g_async_queue_new();
@@ -387,6 +396,9 @@ static void bank_build(SkimPipeline *p, double rate) {
     p->ext[SL(c, 0)] = skim_callsign_extractor_new();
     if (p->split) {
       p->split[c] = skim_tone_split_new(out_rate);
+      if (p->focus_fc > 0) {
+        skim_tone_split_set_focus(p->split[c], p->focus_fc);
+      }
       p->sgen[SL(c, 0)] = skim_tone_split_slot_gen(p->split[c], 0);
     }
   }
@@ -510,6 +522,9 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
         if (p->split) {                /* fresh detection: old carriers gone */
           skim_tone_split_free(p->split[c]);
           p->split[c] = skim_tone_split_new(out_rate);
+          if (p->focus_fc > 0) {
+            skim_tone_split_set_focus(p->split[c], p->focus_fc);
+          }
           p->sgen[SL(c, 0)] = skim_tone_split_slot_gen(p->split[c], 0);
         }
       }

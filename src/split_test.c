@@ -220,6 +220,7 @@ typedef struct {
   gboolean contested_seen;
   guint8   slots_at[512];             /* topology per second (capped)        */
   guint8   contested_at[512];         /* any slot contested that second      */
+  guint8   focus_at[512];             /* 1 slot AND a nonzero mix = FOCUS    */
 } SplitRun;
 
 /* TRUE if any second in [from, to) had a contested slot. */
@@ -231,8 +232,10 @@ static gboolean contested_between(const SplitRun *r, guint from, guint to) {
 }
 
 static void run_split(const float *iq, guint frames,
-                      const SkimDecodeBackend *cw, SplitRun *r) {
+                      const SkimDecodeBackend *cw, double focus_fc,
+                      SplitRun *r) {
   SkimToneSplit *ts = skim_tone_split_new(RATE);
+  if (focus_fc > 0) { skim_tone_split_set_focus(ts, focus_fc); }
   gpointer dec[SKIM_TONE_SPLIT_MAX] = { NULL };
   guint    gen[SKIM_TONE_SPLIT_MAX] = { 0 };
   memset(r, 0, sizeof(*r));
@@ -250,7 +253,11 @@ static void run_split(const float *iq, guint frames,
     if (ns > 1 && r->t_split < 0) { r->t_split = at / RATE; }
     r->max_slots = MAX(r->max_slots, ns);
     const guint sec = (guint)(at / RATE);
-    if (sec < G_N_ELEMENTS(r->slots_at)) { r->slots_at[sec] = (guint8)ns; }
+    if (sec < G_N_ELEMENTS(r->slots_at)) {
+      r->slots_at[sec] = (guint8)ns;
+      r->focus_at[sec] =
+          (ns == 1 && skim_tone_split_slot_hz(ts, 0) != 0.0) ? 1 : 0;
+    }
     for (guint s = 0; s < ns; s++) {
       const guint g = skim_tone_split_slot_gen(ts, s);
       if (g != gen[s] || !dec[s]) {           /* the pipeline's slot_sync    */
@@ -313,7 +320,7 @@ static void run_suite(const SkimDecodeBackend *cw) {
     float  *iq = synth_two(ea, 15.0, 0.5, eb, 0.0, 0.0, RATE, 25, rng,
                            &frames);
     SplitRun r;
-    run_split(iq, frames, cw, &r);
+    run_split(iq, frames, cw, 0.0, &r);
     show("slot0", r.txt[0]->str);
     check("never split", r.max_slots == 1);
     check("never contested", !r.contested_seen);
@@ -333,7 +340,7 @@ static void run_suite(const SkimDecodeBackend *cw) {
     guint   frames;
     float  *iq = synth_chirpy(ea, 37.0, 0.5, 6.0, 25, rng, &frames);
     SplitRun r;
-    run_split(iq, frames, cw, &r);
+    run_split(iq, frames, cw, 0.0, &r);
     show("slot0", r.txt[0]->str);
     check("chirpy: never split", r.max_slots == 1);
     check("chirpy: contested clears once the OFF-gate has data",
@@ -360,7 +367,7 @@ static void run_suite(const SkimDecodeBackend *cw) {
     float *iq = synth_two(ea, -20.0, 0.5, eb, 30.0, 0.35, RATE, 20, rng,
                           &frames);
     SplitRun r;
-    run_split(iq, frames, cw, &r);
+    run_split(iq, frames, cw, 0.0, &r);
     check("split engaged", r.t_split >= 0);
     check("engaged within 30 s", r.t_split >= 0 && r.t_split <= 30.0);
     check("two slots at end", r.nslots == 2);
@@ -396,7 +403,7 @@ static void run_suite(const SkimDecodeBackend *cw) {
     float *iq = synth_two(ea, -5.0, 0.5, eb, 25.0, 0.4, RATE, 18, rng,
                           &frames);
     SplitRun r;
-    run_split(iq, frames, cw, &r);
+    run_split(iq, frames, cw, 0.0, &r);
     check("split engaged", r.t_split >= 0);
     check("two slots at end", r.nslots == 2);
     const gint sa = slot_near(&r, -5.0), sb = slot_near(&r, 25.0);
@@ -429,7 +436,7 @@ static void run_suite(const SkimDecodeBackend *cw) {
     float *iq = synth_two(ea, 0.0, 0.5, eb, 15.0, 0.45, RATE, 20, rng,
                           &frames);
     SplitRun r;
-    run_split(iq, frames, cw, &r);
+    run_split(iq, frames, cw, 0.0, &r);
     check("never split", r.max_slots == 1);
     check("contested flagged", r.contested_seen);
     run_free(&r);
@@ -454,7 +461,7 @@ static void run_suite(const SkimDecodeBackend *cw) {
     float *iq = synth_two(ea, 0.0, 0.5, eb, 21.0, 0.45, RATE, 20, rng,
                           &frames);
     SplitRun r;
-    run_split(iq, frames, cw, &r);
+    run_split(iq, frames, cw, 0.0, &r);
     check("dead zone: never split", r.max_slots == 1);
     check("dead zone: contested flagged", r.contested_seen);
     run_free(&r);
@@ -484,7 +491,7 @@ static void run_suite(const SkimDecodeBackend *cw) {
     float *iq = synth_two(ea, -18.0, 0.5, eb, 22.0, 0.4, RATE, 20, rng,
                           &frames);
     SplitRun r;
-    run_split(iq, frames, cw, &r);
+    run_split(iq, frames, cw, 0.0, &r);
     check("split engaged (once the OFF-gate warmed)",
           r.t_split >= 0 && r.t_split <= 30.0);
     /* B falls silent at ~50 s; TTL 90 s → collapse lands ≈ 141–143 s. */
@@ -498,6 +505,102 @@ static void run_suite(const SkimDecodeBackend *cw) {
     g_array_free(eb, TRUE);
     g_free(pa);
     g_free(pb1);
+  }
+
+  { /* 6. FOCUS: a weak lone carrier — the narrow slot buys the dB that the
+     *    wide 250 Hz envelope wastes on noise. Same IQ through both paths:
+     *    focus must copy what the passthrough loses. */
+    printf(" [6] FOCUS: weak lone carrier at +37 Hz (wide vs narrow)\n");
+    char   *p = rep("CQ DE OK1BR OK1BR K", 8);
+    GArray *ea = gen_env(p, 24, RATE);
+    shape_env(ea, RATE);
+    GArray *eb = g_array_new(FALSE, FALSE, sizeof(float));
+    guint   frames;
+    float  *iq = synth_two(ea, 37.0, 0.5, eb, 0.0, 0.0, RATE, 6, rng,
+                           &frames);
+    SplitRun rw, rf;
+    run_split(iq, frames, cw, 0.0, &rw);              /* wide passthrough    */
+    run_split(iq, frames, cw, 25.0, &rf);             /* focus armed         */
+    show("wide", rw.txt[0]->str);
+    show("focus", rf.txt[0]->str);
+    const int dw = fuzzy_dist(rw.txt[0]->str, "OK1BR OK1BR K");
+    const int df = fuzzy_dist(rf.txt[0]->str, "OK1BR OK1BR K");
+    check("unarmed run stays passthrough", rw.hz[0] == 0.0);
+    check("focus engaged on the carrier (±6 Hz)", fabs(rf.hz[0] - 37.0) < 6.0);
+    check("focus never splits a lone carrier", rf.max_slots == 1);
+    check("focus copies (≤1 err)", df <= 1);
+    check("focus strictly better than wide", df < dw);
+    run_free(&rw);
+    run_free(&rf);
+    g_free(iq);
+    g_array_free(ea, TRUE);
+    g_array_free(eb, TRUE);
+    g_free(p);
+  }
+
+  { /* 6b. FOCUS release: the station leaves; past the TTL the channel must
+     *     return to the verbatim passthrough (fresh detection for whoever
+     *     shows up next — possibly elsewhere in the channel). */
+    printf(" [6b] FOCUS TTL: station leaves for 110 s\n");
+    char   *p = rep("CQ DE OK1BR OK1BR K", 4);
+    GArray *ea = gen_env(p, 24, RATE);
+    shape_env(ea, RATE);
+    env_fit(ea, ea->len + (guint)(110.0 * RATE));     /* long silence        */
+    GArray *eb = g_array_new(FALSE, FALSE, sizeof(float));
+    guint   frames;
+    float  *iq = synth_two(ea, 37.0, 0.5, eb, 0.0, 0.0, RATE, 20, rng,
+                           &frames);
+    SplitRun r;
+    run_split(iq, frames, cw, 25.0, &r);
+    check("focus engaged while keying", r.focus_at[20] == 1);
+    check("focus released after TTL (passthrough back)", r.hz[0] == 0.0);
+    check("one slot throughout", r.max_slots == 1);
+    run_free(&r);
+    g_free(iq);
+    g_array_free(ea, TRUE);
+    g_array_free(eb, TRUE);
+    g_free(p);
+  }
+
+  { /* 7. FOCUS → SPLIT: a second station appears next to a focused one; the
+     *    focus slot must keep its stream (no reset) while a real split
+     *    spawns for the newcomer. */
+    printf(" [7] FOCUS → SPLIT: B (+30 Hz) joins a focused A (−20 Hz) at 40 s\n");
+    char   *pa = rep("CQ TEST OK1BR OK1BR", 12);
+    GArray *ea = gen_env(pa, 22, RATE);
+    shape_env(ea, RATE);
+    char   *pb = rep("CQ DE 9A5K 9A5K K", 8);
+    GArray *eb = g_array_new(FALSE, FALSE, sizeof(float));
+    key_run(eb, 40.0 * RATE, 0.0f);                   /* B silent until 40 s */
+    GArray *eb1 = gen_env(pb, 27, RATE);
+    shape_env(eb1, RATE);
+    g_array_append_vals(eb, eb1->data, eb1->len);
+    g_array_free(eb1, TRUE);
+    env_fit(ea, eb->len);
+    guint  frames;
+    float *iq = synth_two(ea, -20.0, 0.5, eb, 30.0, 0.4, RATE, 20, rng,
+                          &frames);
+    SplitRun r;
+    run_split(iq, frames, cw, 25.0, &r);
+    check("focused on A before B keys", r.focus_at[30] == 1);
+    check("split engaged after B appears", r.t_split >= 40.0 && r.t_split <= 75.0);
+    check("two slots at end", r.nslots == 2);
+    const gint sa = slot_near(&r, -20.0), sb = slot_near(&r, 30.0);
+    check("slot mixes on both carriers (±6 Hz)", sa >= 0 && sb >= 0 && sa != sb);
+    if (sa >= 0 && sb >= 0) {
+      show("slot A", r.txt[sa]->str);
+      show("slot B", r.txt[sb]->str);
+      check("A rode through the transition (≤1 err)",
+            fuzzy_dist(r.txt[sa]->str, "CQ TEST OK1BR OK1BR") <= 1);
+      check("B copies (≤1 err)",
+            fuzzy_dist(r.txt[sb]->str, "CQ DE 9A5K 9A5K K") <= 1);
+    }
+    run_free(&r);
+    g_free(iq);
+    g_array_free(ea, TRUE);
+    g_array_free(eb, TRUE);
+    g_free(pa);
+    g_free(pb);
   }
 
   g_rand_free(rng);
@@ -526,9 +629,12 @@ static void station_cb(const SkimStation *st, gpointer user) {
   }
 }
 
-static void run_integration(void) {
-  printf("--- integration: offline pipeline, SKIM_TONE_SPLIT=1 ---\n");
-  g_setenv("SKIM_TONE_SPLIT", "1", TRUE);
+/* Two stations in one channel through the whole pipeline. Runs once armed
+ * via SKIM_TONE_SPLIT and once via SKIM_TONE_FOCUS — focus implies the
+ * splitter, and a genuine pair must still split with only focus armed. */
+static void run_integration(const char *env) {
+  printf("--- integration: offline pipeline, %s=1 ---\n", env);
+  g_setenv(env, "1", TRUE);
 
   const double rate = 48000.0, center = 14050000.0;
   /* Channel 96 sits at +12 kHz; carriers at −10 Hz and +40 Hz inside it. */
@@ -581,14 +687,67 @@ static void run_integration(void) {
   g_free(pa);
   g_free(pb);
   g_rand_free(rng);
-  g_unsetenv("SKIM_TONE_SPLIT");
+  g_unsetenv(env);
+}
+
+/* A WEAK lone station end-to-end: with focus armed the tracker gets the
+ * callsign on the right absolute frequency; the wide baseline loses it at
+ * this SNR (that asymmetry IS the milestone). Same IQ both runs. */
+static void run_integration_weak(void) {
+  printf("--- integration: weak lone station, baseline vs SKIM_TONE_FOCUS=1 ---\n");
+  const double rate = 48000.0, center = 14050000.0;
+  const double fa = 12037.0;                   /* channel 96, +37 Hz inside  */
+  GRand *rng = g_rand_new_with_seed(20260719);
+  char   *pa = rep("CQ DE OK1BR OK1BR K", 10);
+  GArray *ea = gen_env(pa, 24, rate);
+  shape_env(ea, rate);
+  GArray *eb = g_array_new(FALSE, FALSE, sizeof(float));
+  guint  frames;
+  float *iq = synth_two(ea, fa, 0.5, eb, 0.0, 0.0, rate, -17, rng, &frames);
+
+  gboolean tracked[2] = { FALSE, FALSE };      /* [0] baseline, [1] focus    */
+  for (guint arm = 0; arm < 2; arm++) {
+    if (arm) { g_setenv("SKIM_TONE_FOCUS", "1", TRUE); }
+    SkimPipelineConfig cfg = { 0 };
+    cfg.chan_bw_hz = 125.0;
+    SkimPipeline *p = skim_pipeline_new(&cfg);
+    Seen seen = { .n = 0 };
+    skim_pipeline_set_station_cb(p, station_cb, &seen);
+    GError *err = NULL;
+    if (!skim_pipeline_start_offline(p, &err)) { g_clear_error(&err); }
+    for (guint at = 0; at < frames; at += 4800) {
+      const guint n = MIN(4800u, frames - at);
+      skim_pipeline_feed(p, iq + 2 * at, n, rate, center);
+    }
+    skim_pipeline_stop(p);
+    for (guint i = 0; i < seen.n; i++) {
+      printf("       %-8s station %-10s %.1f Hz\n", arm ? "focus" : "wide",
+             seen.calls[i], seen.hz[i]);
+      if (strcmp(seen.calls[i], "OK1BR") == 0 &&
+          fabs(seen.hz[i] - (center + fa)) < 20.0) {
+        tracked[arm] = TRUE;
+      }
+    }
+    skim_pipeline_free(p);
+    if (arm) { g_unsetenv("SKIM_TONE_FOCUS"); }
+  }
+  check("focus: weak station tracked on its carrier", tracked[1]);
+  check("wide baseline loses it at this SNR", !tracked[0]);
+
+  g_free(iq);
+  g_array_free(ea, TRUE);
+  g_array_free(eb, TRUE);
+  g_free(pa);
+  g_rand_free(rng);
 }
 
 int main(void) {
   printf("=== tone splitter gate (offline, synthetic) ===\n");
   run_suite(skim_decode_cw());
   run_suite(skim_decode_cw_v2());
-  run_integration();
+  run_integration("SKIM_TONE_SPLIT");
+  run_integration("SKIM_TONE_FOCUS");
+  run_integration_weak();
   printf("=== %d checks, %d failures ===\n", checks, fails);
   return fails ? 1 : 0;
 }

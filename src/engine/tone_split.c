@@ -117,6 +117,9 @@ struct _SkimToneSplit {
   double         eval_due;                  /* samples until next eval       */
   guint          hold;
   double         hold_hz[2];
+  double         focus_fc;                  /* single-carrier cutoff; 0 = off */
+  guint          fhold;                     /* focus stability counter       */
+  double         fhold_hz;
   TsSlot         slot[SKIM_TONE_SPLIT_MAX];
   guint          nslots;
   gboolean       split;                     /* narrow slots engaged          */
@@ -144,6 +147,10 @@ SkimToneSplit *skim_tone_split_new(double sample_rate) {
   ts->eval_due = TS_EVAL_S * sample_rate;
   ts->debug = g_getenv("SKIM_TS_DEBUG") != NULL;
   return ts;
+}
+
+void skim_tone_split_set_focus(SkimToneSplit *ts, double fc_hz) {
+  ts->focus_fc = fc_hz;
 }
 
 void skim_tone_split_free(SkimToneSplit *ts) {
@@ -217,7 +224,8 @@ static void slot_start(SkimToneSplit *ts, TsSlot *sl, double hz) {
 }
 
 /* Cutoffs ride the CURRENT spacing: two slots drifting toward each other
- * narrow their filters, drifting apart widens them back. */
+ * narrow their filters, drifting apart widens them back. A single engaged
+ * slot has no neighbour — that is FOCUS mode, and it gets the focus cutoff. */
 static void retap_all(SkimToneSplit *ts) {
   if (!ts->split)
     return;
@@ -228,7 +236,9 @@ static void retap_all(SkimToneSplit *ts) {
         continue;
       dmin = MIN(dmin, fabs(ts->slot[o].mix_hz - ts->slot[s].mix_hz));
     }
-    const double fc = CLAMP(0.55 * dmin, TS_CUT_MIN, TS_CUT_MAX);
+    const double fc = (ts->nslots == 1)
+                          ? ts->focus_fc
+                          : CLAMP(0.55 * dmin, TS_CUT_MIN, TS_CUT_MAX);
     if (fabs(fc - ts->slot[s].fc_hz) > TS_RETAP_HZ) {
       slot_design_fir(&ts->slot[s], ts->rate, fc);
     }
@@ -397,11 +407,30 @@ static void engage(SkimToneSplit *ts, const Peak *c, guint nc) {
   ts->split  = TRUE;
   ts->nslots = n;
   ts->hold   = 0;
+  ts->fhold  = 0;
   for (guint s = 0; s < n; s++) { slot_start(ts, &ts->slot[s], hz[s]); }
   retap_all(ts);
   if (ts->debug) {
     g_printerr("tone-split %p: ENGAGE %u slots (%+.1f / %+.1f%s) Hz\n",
                (void *)ts, n, hz[0], hz[1], n > 2 ? " / +1" : "");
+  }
+}
+
+/* Focus: the narrow path with ONE slot — same machinery, no second carrier.
+ * From here the split-mode eval logic runs: the slot tracks its carrier, a
+ * genuinely new second line spawns a real split, the TTL releases back to
+ * passthrough. Entering costs a slot generation (decoder reset) — the wide
+ * state a weak station accumulated was noise-fed anyway. */
+static void focus_engage(SkimToneSplit *ts, double hz) {
+  ts->split  = TRUE;
+  ts->nslots = 1;
+  ts->hold   = 0;
+  ts->fhold  = 0;
+  slot_start(ts, &ts->slot[0], hz);
+  retap_all(ts);
+  if (ts->debug) {
+    g_printerr("tone-split %p: FOCUS %+.1f Hz (fc %.0f)\n", (void *)ts, hz,
+               ts->focus_fc);
   }
 }
 
@@ -461,8 +490,22 @@ static void eval_topology(SkimToneSplit *ts) {
       ts->hold_hz[0] = lo;
       ts->hold_hz[1] = hi;
       if (ts->hold >= TS_HOLD) { engage(ts, c, nc); }
-    } else {
+      ts->fhold = 0;
+    } else if (ts->focus_fc > 0 && nc == 1 && !ts->slot[0].contested) {
+      /* Exactly one clean, stable carrier: tighten onto it. Contested (or
+       * pending-unverifiable) channels keep the wide passthrough — focus
+       * cannot separate what the splitter already refused to. */
       ts->hold = 0;
+      if (ts->fhold > 0 && fabs(c[0].hz - ts->fhold_hz) <= TS_STABLE_HZ) {
+        ts->fhold++;
+      } else {
+        ts->fhold = 1;
+      }
+      ts->fhold_hz = c[0].hz;
+      if (ts->fhold >= TS_HOLD) { focus_engage(ts, c[0].hz); }
+    } else {
+      ts->hold  = 0;
+      ts->fhold = 0;
     }
     return;
   }
@@ -494,9 +537,12 @@ static void eval_topology(SkimToneSplit *ts) {
   }
 
   /* Unclaimed peaks: far from every slot → a NEW station gets a slot;
-   * close to a slot → that slot's band holds two lines → contested. */
+   * close to a slot → that slot's band holds two lines → contested. In
+   * FOCUS (one slot) a pending-unverifiable candidate counts as evidence
+   * too: its position is unknown, and the narrow filter would happily pass
+   * a beat the wide passthrough at least flagged. */
   for (guint s = 0; s < ts->nslots; s++) {
-    gboolean crowd = FALSE;
+    gboolean crowd = (ts->nslots == 1) && pending;
     for (guint k = 0; k < nc; k++) {
       if (!claimed[k] &&
           fabs(c[k].hz - ts->slot[s].mix_hz) < TS_ENGAGE_HZ) {
@@ -537,7 +583,12 @@ static void eval_topology(SkimToneSplit *ts) {
     ts->nslots--;
     ts->slot[ts->nslots].active = FALSE;
   }
-  if (ts->nslots == 1) {
+  /* One slot left with focus armed = focus mode: stay narrow (retap gives it
+   * the focus cutoff). Without focus, one slot = the old collapse. Zero
+   * slots (all carriers dead — possible when both TTLs expire in the same
+   * eval, which used to leave the channel DARK forever) always revives the
+   * passthrough. */
+  if (ts->nslots == 0 || (ts->nslots == 1 && ts->focus_fc <= 0)) {
     collapse(ts);
     return;
   }

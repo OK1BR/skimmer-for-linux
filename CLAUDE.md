@@ -329,9 +329,30 @@ removal of the neural subsystem (cw_reader.c, pane ops, ml/ training
 tools, data/cw-reader.bin, reader+pane gates) awaits Richard's explicit
 call — it is a lot of gate-proven code and git history keeps it either
 way.
+**Tone FOCUS — narrow slot on a lone carrier (offline-proven 2026-07-19,
+opt-in `SKIM_TONE_FOCUS=1`).** Lever #1 of the classical-decoding plan:
+the envelope used to integrate the whole 125 Hz channel while a CW signal
+is ~50 Hz wide — ~4 dB of noise paid for nothing. Focus = the splitter's
+slot machinery with ONE slot: a channel showing exactly one stable carrier
+for 2 evals tightens slot 0 onto it (NCO + FIR; cutoff = env value ≥ 5 Hz,
+plain `=1` → 25 Hz). The slot tracks the carrier (claim radius + EMA), the
+TTL releases back to passthrough, a genuine second carrier spawns a real
+split with the focus slot riding through UNRESET; contested/pending
+channels never focus, and in focus mode a pending-unverifiable second line
+counts as contested evidence (the narrow filter would pass a beat the wide
+path at least flagged). `SKIM_TONE_FOCUS` implies the splitter machinery;
+fixed on the way: all slots dying in one eval used to leave the channel
+dark forever (no passthrough revival). Gate `skimmer-split-test` now 90
+checks × both backends incl. the weak-lone-carrier A/B — same IQ, wide
+envelope decodes NOTHING (squelch), focus copies ≤ 1 err; end-to-end the
+tracker gets OK1BR on the right absolute Hz only with focus armed. Also
+new: **A/B spot harness `tools/ab_spots.py`** (plan lever #2) — collects
+our telnet feed and SDC's side by side (JSONL), reports who-first/freq
+deltas/mutation suspects (edit distance ≤ 2, MASTER.SCP adjudicates) and
+per-side-only station events; mock-verified, awaiting a live SDC run.
 Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
-**v2 live session**, **tone splitter live session** (run the app with
-`SKIM_CW_V2=1 SKIM_TONE_SPLIT=1`). MASTER.SCP can go to
+**v2 live session**, **tone splitter + FOCUS live session** (run the app
+with `SKIM_CW_V2=1 SKIM_TONE_FOCUS=1` — focus arms the splitter too). MASTER.SCP can go to
 `~/.config/skimmer-for-linux/master.scp` (the app loads it if present).
 **Release: Richard decided 2026-07-18 — tag v0.1.0 only AFTER his live
 validation session** (v2 + relock + splitter + one more soak), then

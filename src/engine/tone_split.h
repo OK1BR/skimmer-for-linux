@@ -31,6 +31,18 @@ typedef struct _SkimToneSplit SkimToneSplit;
 SkimToneSplit *skim_tone_split_new(double sample_rate);
 void           skim_tone_split_free(SkimToneSplit *ts);
 
+/* Single-carrier FOCUS (0 = off, the default). A channel showing exactly ONE
+ * stable carrier tightens slot 0 onto it — the same NCO mix + FIR as a split
+ * slot, cutoff fc_hz — instead of the verbatim passthrough. The envelope then
+ * integrates ~2·fc_hz of noise instead of the whole channel: ~4 dB of SNR at
+ * fc = 25 Hz on a 125 Hz channel, exactly where weak stations are lost today.
+ * The slot tracks the carrier like any split slot (claim radius, EMA), falls
+ * back to passthrough when the carrier stays unseen past the TTL, and a
+ * second carrier ≥ the engage spacing spawns a real split as ever. Focus
+ * engages only on a clean channel — a contested or unverifiable second line
+ * keeps the wide passthrough (and its candidate block) untouched. */
+void skim_tone_split_set_focus(SkimToneSplit *ts, double fc_hz);
+
 /* Feed one block of channel IQ (interleaved I/Q floats). Runs detection and
  * routes the samples into the slot rings. */
 void skim_tone_split_push(SkimToneSplit *ts, const float *iq, guint nframes);
