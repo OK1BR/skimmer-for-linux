@@ -32,16 +32,24 @@ SkimToneSplit *skim_tone_split_new(double sample_rate);
 void           skim_tone_split_free(SkimToneSplit *ts);
 
 /* Single-carrier FOCUS (0 = off, the default). A channel showing exactly ONE
- * stable carrier tightens slot 0 onto it — the same NCO mix + FIR as a split
- * slot, cutoff fc_hz — instead of the verbatim passthrough. The envelope then
- * integrates ~2·fc_hz of noise instead of the whole channel: ~4 dB of SNR at
- * fc = 25 Hz on a 125 Hz channel, exactly where weak stations are lost today.
- * The slot tracks the carrier like any split slot (claim radius, EMA), falls
- * back to passthrough when the carrier stays unseen past the TTL, and a
- * second carrier ≥ the engage spacing spawns a real split as ever. Focus
- * engages only on a clean channel — a contested or unverifiable second line
- * keeps the wide passthrough (and its candidate block) untouched. */
+ * stable WEAK carrier (≤ ~30 dB over the channel's noise floor — strong
+ * stations decode fine wide and only stand to lose edges) tightens slot 0
+ * onto it — the same NCO mix + FIR as a split slot — instead of the verbatim
+ * passthrough. The envelope then integrates the cutoff's bandwidth of noise
+ * instead of the whole channel: several dB of SNR exactly where weak
+ * stations are lost today. The actual cutoff rides the decoded speed
+ * (1.3 × WPM Hz — below the keying's 3rd harmonic the softened edges fuse
+ * dits into dahs, live-caught 2026-07-19); fc_hz sets its MINIMUM. The slot
+ * tracks the carrier like any split slot (claim radius, EMA), falls back to
+ * passthrough when the carrier stays unseen past the TTL, and a second
+ * carrier ≥ the engage spacing spawns a real split as ever. Focus engages
+ * only on a clean channel — a contested or unverifiable second line keeps
+ * the wide passthrough (and its candidate block) untouched. */
 void skim_tone_split_set_focus(SkimToneSplit *ts, double fc_hz);
+
+/* Decoded-speed feedback for the focus cutoff (the pipeline calls this on
+ * every decode hit). Harmless on split slots — spacing rules their cutoff. */
+void skim_tone_split_slot_hint_wpm(SkimToneSplit *ts, guint slot, double wpm);
 
 /* Feed one block of channel IQ (interleaved I/Q floats). Runs detection and
  * routes the samples into the slot rings. */

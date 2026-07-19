@@ -81,6 +81,26 @@
 #define TS_CUT_MIN   10.0                   /* slot FIR cutoff clamp (Hz)    */
 #define TS_CUT_MAX   32.0
 #define TS_RETAP_HZ  2.0                    /* cutoff moved this far → retap */
+/* FOCUS guards (live-caught 2026-07-19, F5IN @ 26 dB / 25 WPM): a 25 Hz
+ * cutoff sits UNDER the keying's 3rd harmonic (~1.25×WPM Hz) — the softened
+ * edges filled inter-element gaps and dit·gap·dit fused into a dah (F5IN →
+ * G5IN, TEST → TENT), while the strong station never needed the filter in
+ * the first place. Focus now engages only on carriers ≤ TS_FOCUS_MAX_DB
+ * over the median floor (the weak ones the wide envelope actually loses,
+ * ≈ 15 dB in-channel), and the cutoff rides the decoded speed:
+ * 1.3 × WPM Hz, floored by the configured minimum, capped near the channel
+ * edge. Bootstrap before any decode assumes 25 WPM (32.5 Hz).
+ * The floor for THIS bar is the lower quartile of the PASSBAND bins (the
+ * full-band median is dragged down by the channelizer stopband, and a
+ * strong carrier's sidebands pollute anything above the quartile). The
+ * ratio COMPRESSES at the top — sidebands lift the floor with the carrier
+ * — so the measured table is what sets the bar (gate, ratio dump):
+ * SNR 6→15-18, 8→15-19, 10→9-21, 12→18-24, 25-26→23-28 dB. 21 keeps the
+ * weak side solidly under (2 consecutive evals must clear it) and the
+ * strong side out. */
+#define TS_FOCUS_MAX_DB 21.0                /* carrier over passband quartile */
+#define TS_FOCUS_FC_MAX 55.0                /* never wider than the channel  */
+#define TS_FOCUS_WPM0   25.0                /* cutoff bootstrap speed        */
 
 typedef struct {
   gboolean active;
@@ -94,6 +114,7 @@ typedef struct {
   double   unseen_s;                        /* carrier absent this long      */
   gboolean contested;
   guint    clean;                           /* contested-free evals in a row */
+  double   wpm_hint;                        /* decoded speed; 0 = none yet   */
   float    ring[2 * TS_RING];
   guint    rw, rr;                          /* free-running frame counters   */
 } TsSlot;
@@ -151,6 +172,10 @@ SkimToneSplit *skim_tone_split_new(double sample_rate) {
 
 void skim_tone_split_set_focus(SkimToneSplit *ts, double fc_hz) {
   ts->focus_fc = fc_hz;
+}
+
+void skim_tone_split_slot_hint_wpm(SkimToneSplit *ts, guint slot, double wpm) {
+  if (slot < ts->nslots && wpm > 0) { ts->slot[slot].wpm_hint = wpm; }
 }
 
 void skim_tone_split_free(SkimToneSplit *ts) {
@@ -217,6 +242,7 @@ static void slot_start(SkimToneSplit *ts, TsSlot *sl, double hz) {
   sl->unseen_s  = 0.0;
   sl->contested = FALSE;
   sl->clean     = 0;
+  sl->wpm_hint  = 0.0;
   sl->dpos      = 0;
   sl->fc_hz     = 0.0;                      /* forces the first retap        */
   memset(sl->dl, 0, sizeof(sl->dl));
@@ -236,9 +262,14 @@ static void retap_all(SkimToneSplit *ts) {
         continue;
       dmin = MIN(dmin, fabs(ts->slot[o].mix_hz - ts->slot[s].mix_hz));
     }
-    const double fc = (ts->nslots == 1)
-                          ? ts->focus_fc
-                          : CLAMP(0.55 * dmin, TS_CUT_MIN, TS_CUT_MAX);
+    double fc;
+    if (ts->nslots == 1) {                  /* FOCUS: ride the decoded speed */
+      const double wpm = ts->slot[0].wpm_hint > 0 ? ts->slot[0].wpm_hint
+                                                  : TS_FOCUS_WPM0;
+      fc = CLAMP(1.3 * wpm, ts->focus_fc, TS_FOCUS_FC_MAX);
+    } else {
+      fc = CLAMP(0.55 * dmin, TS_CUT_MIN, TS_CUT_MAX);
+    }
     if (fabs(fc - ts->slot[s].fc_hz) > TS_RETAP_HZ) {
       slot_design_fir(&ts->slot[s], ts->rate, fc);
     }
@@ -326,10 +357,25 @@ static int dbl_cmp(const void *a, const void *b) {
  * because the OFF-gate has no data yet: unverifiable, so the caller should
  * treat the channel as contested rather than clean. */
 static guint find_carriers(const SkimToneSplit *ts, Peak *out, guint max,
-                           gboolean *pending) {
+                           gboolean *pending, double *floor_out) {
   double tmp[TS_FFT];
   memcpy(tmp, ts->psd, sizeof(tmp));
   qsort(tmp, TS_FFT, sizeof(double), dbl_cmp);
+  /* Focus-bar floor: lower quartile of the PASSBAND bins only. The channel
+   * is 2× oversampled — the outer bins are the channelizer's stopband, and
+   * a full-band quantile reads that filtered near-nothing as "the noise",
+   * inflating every carrier ratio past any bar (gate-caught on the 48 kHz
+   * integration). The quartile also dodges the keying sidebands a strong
+   * carrier lifts around itself. */
+  if (floor_out) {
+    double pb[TS_FFT];
+    guint  npb = 0;
+    for (gint i = 0; i < TS_FFT; i++) {
+      if (fabs(bin_hz(ts, i)) <= TS_EDGE_HZ) { pb[npb++] = ts->psd[i]; }
+    }
+    qsort(pb, npb, sizeof(double), dbl_cmp);
+    *floor_out = pb[npb / 4];
+  }
   const double thr = tmp[TS_FFT / 2] * pow(10.0, TS_FLOOR_DB / 10.0);
 
   Peak cand[16];
@@ -465,7 +511,9 @@ static void eval_topology(SkimToneSplit *ts) {
     return;
   Peak     c[SKIM_TONE_SPLIT_MAX + 1];
   gboolean pending = FALSE;
-  guint    nc = find_carriers(ts, c, SKIM_TONE_SPLIT_MAX + 1, &pending);
+  double   floor_med = 0.0;
+  guint    nc = find_carriers(ts, c, SKIM_TONE_SPLIT_MAX + 1, &pending,
+                              &floor_med);
 
   /* The strongest accepted line gates the OFF periodogram from now on. */
   if (nc > 0) {
@@ -473,6 +521,14 @@ static void eval_topology(SkimToneSplit *ts) {
     ts->prim_bin = ((b % TS_FFT) + TS_FFT) % TS_FFT;
   }
 
+  /* SKIM_TS_RATIO=1 dumps the focus-bar measurements — this is how
+   * TS_FOCUS_MAX_DB gets calibrated (offline table in the header comment;
+   * live recalibration will want the same dump). VERY verbose in the app. */
+  if (g_getenv("SKIM_TS_RATIO") && nc > 0) {
+    g_printerr("ts-ratio %p: nc=%u c0=%.1f Hz ratio=%.1f dB split=%d\n",
+               (void *)ts, nc, c[0].hz,
+               10.0 * log10(c[0].pw / MAX(floor_med, 1e-30)), ts->split);
+  }
   if (!ts->split) {
     /* Two lines below the separable spacing — or an unverifiable second
      * line (OFF-gate still warming): flag, don't split. */
@@ -491,10 +547,12 @@ static void eval_topology(SkimToneSplit *ts) {
       ts->hold_hz[1] = hi;
       if (ts->hold >= TS_HOLD) { engage(ts, c, nc); }
       ts->fhold = 0;
-    } else if (ts->focus_fc > 0 && nc == 1 && !ts->slot[0].contested) {
-      /* Exactly one clean, stable carrier: tighten onto it. Contested (or
-       * pending-unverifiable) channels keep the wide passthrough — focus
-       * cannot separate what the splitter already refused to. */
+    } else if (ts->focus_fc > 0 && nc == 1 && !ts->slot[0].contested &&
+               c[0].pw < floor_med * pow(10.0, TS_FOCUS_MAX_DB / 10.0)) {
+      /* Exactly one clean, stable, WEAK carrier: tighten onto it. Strong
+       * stations decode fine wide and only stand to lose (the F5IN fusion).
+       * Contested (or pending-unverifiable) channels keep the wide
+       * passthrough — focus cannot separate what the splitter refused to. */
       ts->hold = 0;
       if (ts->fhold > 0 && fabs(c[0].hz - ts->fhold_hz) <= TS_STABLE_HZ) {
         ts->fhold++;

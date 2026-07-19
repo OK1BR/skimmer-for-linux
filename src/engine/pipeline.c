@@ -579,6 +579,9 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
         guint m;
         while ((m = skim_tone_split_read(sp, s, sbuf, DRAIN_FRAMES)) > 0) {
           const gboolean got = cw->process(p->dec[SL(c, s)], sbuf, m, &d);
+          if (got && d.speed > 0) {          /* focus cutoff rides the WPM   */
+            skim_tone_split_slot_hint_wpm(sp, s, d.speed);
+          }
           char *aux = cw->take_aux_text
                           ? cw->take_aux_text(p->dec[SL(c, s)]) : NULL;
           GArray *ops = hit_take_ops(cw, p->dec[SL(c, s)]);

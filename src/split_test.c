@@ -273,6 +273,9 @@ static void run_split(const float *iq, guint frames,
       guint m;
       while ((m = skim_tone_split_read(ts, s, out, 64)) > 0) {
         if (cw->process(dec[s], out, m, &d)) {
+          if (d.speed > 0) {                /* the pipeline's WPM feedback   */
+            skim_tone_split_slot_hint_wpm(ts, s, d.speed);
+          }
           g_string_append(r->txt[s], d.text);
         }
       }
@@ -548,14 +551,72 @@ static void run_suite(const SkimDecodeBackend *cw) {
     env_fit(ea, ea->len + (guint)(110.0 * RATE));     /* long silence        */
     GArray *eb = g_array_new(FALSE, FALSE, sizeof(float));
     guint   frames;
-    float  *iq = synth_two(ea, 37.0, 0.5, eb, 0.0, 0.0, RATE, 20, rng,
-                           &frames);
+    float  *iq = synth_two(ea, 37.0, 0.5, eb, 0.0, 0.0, RATE, 8, rng,
+                           &frames);                  /* weak: under the bar */
     SplitRun r;
     run_split(iq, frames, cw, 25.0, &r);
     check("focus engaged while keying", r.focus_at[20] == 1);
     check("focus released after TTL (passthrough back)", r.hz[0] == 0.0);
     check("one slot throughout", r.max_slots == 1);
     run_free(&r);
+    g_free(iq);
+    g_array_free(ea, TRUE);
+    g_array_free(eb, TRUE);
+    g_free(p);
+  }
+
+  { /* 6c. FOCUS on a weak FAST station: the cutoff must ride the decoded
+     *     WPM (a fixed 25 Hz sits under the 3rd keying harmonic at 30 WPM
+     *     and fuses dits — the F5IN failure mode, just weaker). */
+    printf(" [6c] FOCUS: weak 30 WPM carrier — WPM-riding cutoff\n");
+    char   *p = rep("CQ DE 9A5K 9A5K K", 10);
+    GArray *ea = gen_env(p, 30, RATE);
+    shape_env(ea, RATE);
+    GArray *eb = g_array_new(FALSE, FALSE, sizeof(float));
+    guint   frames;
+    float  *iq = synth_two(ea, 37.0, 0.5, eb, 0.0, 0.0, RATE, 8, rng,
+                           &frames);
+    SplitRun r;
+    run_split(iq, frames, cw, 25.0, &r);
+    show("focus", r.txt[0]->str);
+    check("fast: focus engaged (±6 Hz)", fabs(r.hz[0] - 37.0) < 6.0);
+    check("fast: copies (≤2 err, no dit fusion)",
+          fuzzy_dist(r.txt[0]->str, "CQ DE 9A5K 9A5K K") <= 2);
+    run_free(&r);
+    g_free(iq);
+    g_array_free(ea, TRUE);
+    g_array_free(eb, TRUE);
+    g_free(p);
+  }
+
+  { /* 8. FOCUS must NOT touch a STRONG station (live-caught 2026-07-19:
+     *    F5IN @ 26 dB / 25 WPM read "G5IN … YOTA TENT" through the narrow
+     *    slot — dit·gap·dit fused into a dah. Strong carriers stay on the
+     *    wide passthrough; they decode exactly as with focus unarmed). */
+    printf(" [8] FOCUS: strong carrier stays WIDE (F5IN regression)\n");
+    char   *p = rep("F5IN F5IN YOTA TEST", 6);
+    GArray *ea = gen_env(p, 25, RATE);
+    shape_env(ea, RATE);
+    GArray *eb = g_array_new(FALSE, FALSE, sizeof(float));
+    guint   frames;
+    float  *iq = synth_two(ea, 37.0, 0.5, eb, 0.0, 0.0, RATE, 26, rng,
+                           &frames);
+    SplitRun rw, rf;
+    run_split(iq, frames, cw, 0.0, &rw);
+    run_split(iq, frames, cw, 25.0, &rf);
+    show("wide", rw.txt[0]->str);
+    show("focus-armed", rf.txt[0]->str);
+    gboolean focused = FALSE;
+    for (guint s = 0; s < G_N_ELEMENTS(rf.focus_at); s++) {
+      if (rf.focus_at[s]) { focused = TRUE; }
+    }
+    check("strong: focus never engages", !focused);
+    check("strong: armed run copies exactly",
+          fuzzy_dist(rf.txt[0]->str, "F5IN F5IN YOTA TEST") == 0);
+    check("strong: armed == unarmed text",
+          strcmp(rw.txt[0]->str, rf.txt[0]->str) == 0);
+    run_free(&rw);
+    run_free(&rf);
     g_free(iq);
     g_array_free(ea, TRUE);
     g_array_free(eb, TRUE);
@@ -578,8 +639,8 @@ static void run_suite(const SkimDecodeBackend *cw) {
     g_array_free(eb1, TRUE);
     env_fit(ea, eb->len);
     guint  frames;
-    float *iq = synth_two(ea, -20.0, 0.5, eb, 30.0, 0.4, RATE, 20, rng,
-                          &frames);
+    float *iq = synth_two(ea, -20.0, 0.5, eb, 30.0, 0.4, RATE, 10, rng,
+                          &frames);                   /* weak: under the bar */
     SplitRun r;
     run_split(iq, frames, cw, 25.0, &r);
     check("focused on A before B keys", r.focus_at[30] == 1);
