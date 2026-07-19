@@ -65,7 +65,15 @@ typedef struct {
  * splitter unarmed the walk touches only slot 0 and the path is the old one
  * exactly. Higher slots come and go with the channel's splitter topology;
  * their decoders spawn lazily and reset whenever the slot generation moves. */
-#define NSLOT SKIM_TONE_SPLIT_MAX
+/* Per-channel decode lanes: SKIM_TONE_SPLIT_MAX narrow-slot lanes plus one
+ * PERSISTENT wide lane (WIDE_LANE) that owns the passthrough stream. The
+ * wide lane's decoder/extractor/flock survive every splitter topology
+ * change — an engage merely stops feeding it and a collapse resumes it, so
+ * a wrong split costs the split's duration, not minutes of re-acquisition
+ * (fixture-caught 2026-07-19: every reset in a pileup left the fresh
+ * decoder mute and the station got takeover-evicted or TTL-pruned). */
+#define NSLOT (SKIM_TONE_SPLIT_MAX + 1)
+#define WIDE_LANE SKIM_TONE_SPLIT_MAX
 #define SL(c, s) ((c) * NSLOT + (s))
 
 typedef struct {
@@ -392,14 +400,13 @@ static void bank_build(SkimPipeline *p, double rate) {
   const SkimDecodeBackend *cw = cw_backend();
   const double out_rate = skim_channelizer_out_rate(p->bank);
   for (guint c = 0; c < p->nchan; c++) {
-    p->dec[SL(c, 0)] = cw->channel_new(out_rate);
-    p->ext[SL(c, 0)] = skim_callsign_extractor_new();
+    p->dec[SL(c, WIDE_LANE)] = cw->channel_new(out_rate);
+    p->ext[SL(c, WIDE_LANE)] = skim_callsign_extractor_new();
     if (p->split) {
       p->split[c] = skim_tone_split_new(out_rate);
       if (p->focus_fc > 0) {
         skim_tone_split_set_focus(p->split[c], p->focus_fc);
       }
-      p->sgen[SL(c, 0)] = skim_tone_split_slot_gen(p->split[c], 0);
     }
   }
   if (p->state_cb) {
@@ -448,15 +455,16 @@ static gboolean ghost_suppressed(SkimPipeline *p, const double *lvl, guint c,
      * is closer keeps it; a dead tie falls to the lower channel. */
     if (ABS(s) == 1 && ratio > 0.71 && cw->tone_offset_hz) {
       const double my_hz = skim_channelizer_offset_hz(p->bank, c) + eff_off;
-      const guint nns = (p->split && p->split[cn])
-                            ? skim_tone_split_slots(p->split[cn]) : 1;
+      const SkimToneSplit *tsn = p->split ? p->split[cn] : NULL;
+      const gboolean nsplit = tsn && skim_tone_split_is_split(tsn);
+      const guint nns = nsplit ? skim_tone_split_slots(tsn) : 1;
       for (guint j = 0; j < nns; j++) {
-        if (!p->dec[SL(cn, j)])
+        const guint lane = nsplit ? j : WIDE_LANE;
+        if (!p->dec[SL(cn, lane)])
           continue;
         const double nb_off =
-            ((p->split && p->split[cn])
-                 ? skim_tone_split_slot_hz(p->split[cn], j) : 0.0) +
-            cw->tone_offset_hz(p->dec[SL(cn, j)]);
+            (nsplit ? skim_tone_split_slot_hz(tsn, j) : 0.0) +
+            cw->tone_offset_hz(p->dec[SL(cn, lane)]);
         const double nb_hz = skim_channelizer_offset_hz(p->bank, cn) + nb_off;
         if (fabs(my_hz - nb_hz) < 60.0) {
           const double my_dist = fabs(eff_off);
@@ -479,9 +487,11 @@ static void slot_sync(SkimPipeline *p, guint c, guint s,
   if (p->sgen[i] == g && p->dec[i])
     return;
   if (g_getenv("SKIM_TS_DEBUG")) {      /* absolute view the splitter lacks  */
-    g_printerr("pipeline: ch %u @ %.0f Hz slot %u gen %u->%u mix %+.1f Hz\n",
+    g_printerr("pipeline: ch %u @ %.0f Hz slot %u gen %u->%u mix %+.1f Hz"
+               " ts %p\n",
                c, p->center_hz + skim_channelizer_offset_hz(p->bank, c), s,
-               p->sgen[i], g, skim_tone_split_slot_hz(p->split[c], s));
+               p->sgen[i], g, skim_tone_split_slot_hz(p->split[c], s),
+               (void *)p->split[c]);
   }
   if (p->dec[i]) { cw->channel_free(p->dec[i]); }
   p->dec[i] = cw->channel_new(skim_channelizer_out_rate(p->bank));
@@ -551,44 +561,58 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
     SkimToneSplit *sp = p->split ? p->split[c] : NULL;
     const double chan_hz = cw->set_freq
         ? b->center_hz + skim_channelizer_offset_hz(p->bank, c) : 0.0;
-    if (cw->set_freq && !sp) { cw->set_freq(p->dec[SL(c, 0)], chan_hz); }
+    if (cw->set_freq && !sp) {
+      cw->set_freq(p->dec[SL(c, WIDE_LANE)], chan_hz);
+    }
     guint n;
     while ((n = skim_channelizer_read(p->bank, c, buf, DRAIN_FRAMES)) > 0) {
       if (!sp) {
-        const gboolean got = cw->process(p->dec[SL(c, 0)], buf, n, &d);
+        const gboolean got = cw->process(p->dec[SL(c, WIDE_LANE)], buf, n, &d);
         char *aux = cw->take_aux_text
-                        ? cw->take_aux_text(p->dec[SL(c, 0)]) : NULL;
-        GArray *ops = hit_take_ops(cw, p->dec[SL(c, 0)]);
+                        ? cw->take_aux_text(p->dec[SL(c, WIDE_LANE)]) : NULL;
+        GArray *ops = hit_take_ops(cw, p->dec[SL(c, WIDE_LANE)]);
         if (!got && !aux && !ops)
           continue;
         if (!got) { memset(&d, 0, sizeof(d)); }
-        Hit h = { .chan = c, .slot = 0, .eff_off = d.freq_offset_hz,
+        Hit h = { .chan = c, .slot = WIDE_LANE, .eff_off = d.freq_offset_hz,
                   .contested = FALSE, .d = d, .aux = aux, .ops = ops };
         g_array_append_val(p->hits, h);
         continue;
       }
       skim_tone_split_push(sp, buf, n);
+      /* Narrow slots (split/focus) run lanes 0..ns-1 with generation
+       * resets; the wide passthrough runs the PERSISTENT wide lane — an
+       * engage parks it mid-state, a collapse resumes it (v2 reads the
+       * gap as a pause and reopens; the extractor keeps its candidates). */
+      const gboolean insplit = skim_tone_split_is_split(sp);
       const guint ns = skim_tone_split_slots(sp);
       for (guint s = 0; s < ns; s++) {
-        slot_sync(p, c, s, cw);
+        const guint lane = insplit ? s : WIDE_LANE;
+        if (insplit) { slot_sync(p, c, s, cw); }
         if (cw->set_freq) {
-          cw->set_freq(p->dec[SL(c, s)],
+          cw->set_freq(p->dec[SL(c, lane)],
                        chan_hz + skim_tone_split_slot_hz(sp, s));
         }
         float sbuf[DRAIN_FRAMES * 2];
         guint m;
         while ((m = skim_tone_split_read(sp, s, sbuf, DRAIN_FRAMES)) > 0) {
-          const gboolean got = cw->process(p->dec[SL(c, s)], sbuf, m, &d);
+          const gboolean got = cw->process(p->dec[SL(c, lane)], sbuf, m, &d);
           if (got && d.speed > 0) {          /* focus cutoff rides the WPM   */
             skim_tone_split_slot_hint_wpm(sp, s, d.speed);
           }
+          /* Solid = elem_err under ~0.1 — a beat-garbled channel still
+           * emits CONFIDENT mutations around 0.6-0.7 (that is why beat
+           * text validates), so the bar sits where clean copy lives. */
+          if (!insplit && got && d.text[0] && d.confidence >= 0.85) {
+            skim_tone_split_hint_wide_solid(sp);
+          }
           char *aux = cw->take_aux_text
-                          ? cw->take_aux_text(p->dec[SL(c, s)]) : NULL;
-          GArray *ops = hit_take_ops(cw, p->dec[SL(c, s)]);
+                          ? cw->take_aux_text(p->dec[SL(c, lane)]) : NULL;
+          GArray *ops = hit_take_ops(cw, p->dec[SL(c, lane)]);
           if (!got && !aux && !ops)
             continue;
           if (!got) { memset(&d, 0, sizeof(d)); }
-          Hit h = { .chan = c, .slot = s,
+          Hit h = { .chan = c, .slot = lane,
                     .eff_off = skim_tone_split_slot_hz(sp, s) +
                                d.freq_offset_hz,
                     .contested = skim_tone_split_slot_contested(sp, s),
@@ -597,8 +621,10 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
         }
       }
     }
+    const gboolean c_split = sp && skim_tone_split_is_split(sp);
     for (guint s = 0; s < NSLOT; s++) {
-      const gboolean live = (s == 0) || (sp && s < skim_tone_split_slots(sp));
+      const gboolean live = c_split ? (s < skim_tone_split_slots(sp))
+                                    : (s == WIDE_LANE);
       p->lvl[SL(c, s)] = (live && p->dec[SL(c, s)] && cw->level)
                              ? cw->level(p->dec[SL(c, s)]) : 0.0;
     }
@@ -728,14 +754,29 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
        * shows (log, monitor panes), but it must not breed callsign
        * candidates: beat mutations validate often enough to reach the
        * spot path (live-caught 2026-07-15, the 14036 slot). */
-      if (h->contested)
-        continue;
-
-      skim_callsign_extractor_feed(p->ext[SL(c, h->slot)], d.text);
+      /* Contested (beat / unverifiable second line): the garbled text must
+       * not BREED candidates — but the candidate this channel already
+       * proved keeps reporting, so the station rides out the episode
+       * instead of takeover-eviction or TTL-prune (fixture 2026-07-19:
+       * pending episodes on runner channels blocked 100+ feeds and the
+       * frozen extractor was the only thing that still knew the call). */
+      if (h->contested) {
+        if (g_getenv("SKIM_TS_DEBUG")) {
+          g_printerr("pipeline: ch %u slot %u @ %.0f Hz contested-drop |%s|\n",
+                     c, h->slot, sig_hz, d.text);
+        }
+      } else {
+        skim_callsign_extractor_feed(p->ext[SL(c, h->slot)], d.text);
+      }
       char call[24];
       gboolean cq = FALSE;
       double score = skim_callsign_extractor_best_ex(p->ext[SL(c, h->slot)],
                                                      call, sizeof(call), &cq);
+      if (g_getenv("SKIM_ST_DEBUG")) {
+        g_printerr("cand: ch %u slot %u @ %.0f Hz score %.2f %s |%s| t=%.0f\n",
+                   c, h->slot, sig_hz, score, score > 0 ? call : "-", d.text,
+                   pipe_now_us(p) / 1e6);
+      }
       if (score <= 0)
         continue;
 
@@ -750,6 +791,11 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
       st.cq         = cq;
       st.last_heard = pipe_now_us(p);
       st.first_heard = st.last_heard;
+      if (g_getenv("SKIM_ST_DEBUG")) {
+        g_printerr("report: ch %u slot %u %s @ %.0f Hz score %.2f t=%.0f s\n",
+                   c, h->slot, st.call, st.freq_hz, score,
+                   st.last_heard / 1e6);
+      }
       const SkimStation *merged = skim_station_table_report(p->stations, &st);
       if (p->station_cb) { p->station_cb(merged, p->station_user); }
       /* The merged record's frequency is the ghost-deduped one. CQ-only

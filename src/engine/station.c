@@ -51,6 +51,16 @@ void skim_station_table_set_gone_cb(SkimStationTable *t, SkimStationGoneFunc cb,
   t->gone_user = user_data;
 }
 
+/* SKIM_ST_DEBUG=1 traces evictions/folds/QSY — the table mutations that a
+ * final-state dump cannot explain (a phantom takeover chain leaves no trace). */
+static gboolean st_debug(void) {
+  static gsize once = 0;
+  if (g_once_init_enter(&once)) {
+    g_once_init_leave(&once, g_getenv("SKIM_ST_DEBUG") ? 2 : 1);
+  }
+  return once == 2;
+}
+
 /* TRUE when `shorter` reads as a clipped decode of `longer` — a leading or
  * trailing fragment ("M0K" of "M0KKB", "31RM" of "Z31RM"). */
 static gboolean call_is_clip(const char *shorter, const char *longer) {
@@ -82,6 +92,11 @@ static void takeover_sweep(SkimStationTable *t, const SkimStation *st) {
       if (fabs(e->freq_hz - st->freq_hz) <= SKIM_STATION_MERGE_HZ &&
           (st->last_heard - e->last_heard > SKIM_STATION_TAKEOVER_US ||
            call_is_clip(e->call, st->call))) {
+        if (st_debug()) {
+          g_printerr("station: EVICT %s @ %.0f Hz by %s @ %.0f Hz (%s)\n",
+                     e->call, e->freq_hz, st->call, st->freq_hz,
+                     call_is_clip(e->call, st->call) ? "clip" : "silent");
+        }
         if (t->gone_cb) { t->gone_cb(e, t->gone_user); }
         list = g_slist_remove(list, e);
         g_free(e);
@@ -114,6 +129,10 @@ static SkimStation *clip_fold(SkimStationTable *t, const SkimStation *st) {
       SkimStation *e = l->data;
       if (fabs(e->freq_hz - st->freq_hz) <= SKIM_STATION_MERGE_HZ &&
           st->last_heard - e->last_heard <= SKIM_STATION_TAKEOVER_US) {
+        if (st_debug()) {
+          g_printerr("station: FOLD %s into %s @ %.0f Hz\n", st->call, e->call,
+                     e->freq_hz);
+        }
         e->last_heard = st->last_heard;
         e->reports++;
         return e;
@@ -153,6 +172,10 @@ const SkimStation *skim_station_table_report(SkimStationTable *t,
      * confident report relocates the record; a one-off garble does not. */
     SkimStation *e = list->data;
     if (st->score >= SKIM_STATION_QSY_SCORE) {
+      if (st_debug()) {
+        g_printerr("station: QSY %s %.0f -> %.0f Hz\n", e->call, e->freq_hz,
+                   st->freq_hz);
+      }
       e->freq_hz    = st->freq_hz;
       e->snr_db     = st->snr_db;
       e->speed      = st->speed;
@@ -208,6 +231,11 @@ guint skim_station_table_prune(SkimStationTable *t, gint64 now_us,
       SkimStation *e = l->data;
       GSList *next = l->next;
       if (e->last_heard < cutoff) {
+        if (st_debug()) {
+          g_printerr("station: PRUNE %s @ %.0f Hz (silent %.0f s, t=%.0f s)\n",
+                     e->call, e->freq_hz, (now_us - e->last_heard) / 1e6,
+                     now_us / 1e6);
+        }
         if (t->gone_cb) { t->gone_cb(e, t->gone_user); }
         list = g_slist_remove(list, e);
         g_free(e);
