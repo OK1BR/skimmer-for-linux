@@ -193,10 +193,17 @@ void skim_rbn_feed_spot(SkimRbnFeed *f, const char *call, const char *mode,
   Broadcast *b = g_new0(Broadcast, 1);
   b->f = f;
   /* The classic cluster line the Aggregator parses; frequency in kHz. CW
-   * speed is WPM; the digital backends (RTTY/PSK, later) report baud. */
+   * speed is WPM; the digital backends (RTTY/PSK, later) report baud.
+   * The kHz field goes through g_ascii_formatd: the dialect requires a
+   * DOT, but the GTK app runs under the user's locale and a cs_CZ %8.1f
+   * emitted "14009,0" — every parser dropped the lines silently
+   * (live-caught 2026-07-19; the whole-number %f fields have no
+   * separator and are safe). */
+  char khz[G_ASCII_DTOSTR_BUF_SIZE];
+  g_ascii_formatd(khz, sizeof(khz), "%8.1f", freq_hz / 1000.0);
   b->line = g_strdup_printf(
-      "DX de %-9s %8.1f  %-12s %-4s %3.0f dB  %2.0f %s  CQ      %02d%02dZ\r\n",
-      f->spotter, freq_hz / 1000.0, call, mode, snr_db, speed,
+      "DX de %-9s %s  %-12s %-4s %3.0f dB  %2.0f %s  CQ      %02d%02dZ\r\n",
+      f->spotter, khz, call, mode, snr_db, speed,
       g_strcmp0(mode, "CW") == 0 ? "WPM" : "BPS",
       g_date_time_get_hour(now), g_date_time_get_minute(now));
   g_date_time_unref(now);

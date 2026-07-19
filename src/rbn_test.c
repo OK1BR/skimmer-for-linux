@@ -19,6 +19,7 @@
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
 #include <gio/gio.h>
+#include <locale.h>
 #include <glib.h>
 #include <math.h>
 #include <stdio.h>
@@ -260,6 +261,20 @@ static void on_station(const SkimStation *st, gpointer user) {
 int main(void) {
   printf("=== RBN telnet feed gate (offline) ===\n");
 
+  /* Run under a comma-decimal locale when one is available: the GTK app
+   * inherits the user's LC_NUMERIC and a cs_CZ %8.1f once emitted
+   * "14009,0" on the cluster wire — every parser dropped the lines
+   * silently (live-caught 2026-07-19). The dialect requires the dot
+   * regardless of locale; the checks below parse with g_ascii_strtod so
+   * they stay honest either way. */
+  const char *commas[] = { "cs_CZ.UTF-8", "cs_CZ", "de_DE.UTF-8", "fr_FR.UTF-8" };
+  for (guint i = 0; i < G_N_ELEMENTS(commas); i++) {
+    if (setlocale(LC_NUMERIC, commas[i])) {
+      printf("    (LC_NUMERIC forced to %s)\n", commas[i]);
+      break;
+    }
+  }
+
   /* -- feed units: handshake, line format, broadcast ----------------------------- */
   {
     GError *err = NULL;
@@ -281,16 +296,21 @@ int main(void) {
     skim_rbn_feed_spot(f, "DL1ABC", "CW", 14025100.0, 25.0, 22.0);
     check("spot line arrives", cap_wait(a, "DL1ABC", 3000));
     char *line = cap_line(a, "DL1ABC");
-    char spotter[24] = "", call[16] = "", mode[8] = "", type[8] = "",
-         zt[16] = "";
-    double khz = 0, snr = 0, wpm = 0;
-    int n = line ? sscanf(line, "DX de %23s %lf %15s %7s %lf dB %lf WPM %7s %15s",
-                          spotter, &khz, call, mode, &snr, &wpm, type, zt)
+    char spotter[24] = "", khzs[24] = "", call[16] = "", mode[8] = "",
+         type[8] = "", zt[16] = "";
+    double snr = 0, wpm = 0;
+    /* The kHz field reads as a STRING + g_ascii_strtod: sscanf's %lf obeys
+     * the forced comma locale and would mask a wrong separator. */
+    int n = line ? sscanf(line, "DX de %23s %23s %15s %7s %lf dB %lf WPM %7s %15s",
+                          spotter, khzs, call, mode, &snr, &wpm, type, zt)
                  : 0;
     printf("       line: %s\n", line ? line : "(none)");
     check("line parses as a cluster spot", n == 8);
     check("spotter is OK1BR-#:", g_strcmp0(spotter, "OK1BR-#:") == 0);
-    check("frequency in kHz", fabs(khz - 14025.1) < 0.05);
+    check("frequency uses the DOT the dialect demands",
+          line && strchr(line, ',') == NULL && strchr(khzs, '.') != NULL);
+    check("frequency in kHz",
+          fabs(g_ascii_strtod(khzs, NULL) - 14025.1) < 0.05);
     check("call, mode, snr, wpm carried",
           g_strcmp0(call, "DL1ABC") == 0 && g_strcmp0(mode, "CW") == 0 &&
           fabs(snr - 25) < 0.5 && fabs(wpm - 22) < 0.5);
@@ -377,9 +397,9 @@ int main(void) {
     for (char **l = lines; *l; l++) {
       if (!g_str_has_prefix(*l, "DX de"))
         continue;
-      char spotter[24] = "", spotted[16] = "";
-      double khz = 0;
-      if (sscanf(*l, "DX de %23s %lf %15s", spotter, &khz, spotted) != 3 ||
+      char spotter[24] = "", khzs[24] = "", spotted[16] = "";
+      if (sscanf(*l, "DX de %23s %23s %15s", spotter, khzs, spotted) != 3 ||
+          g_ascii_strtod(khzs, NULL) <= 0 ||
           (g_strcmp0(spotted, "OK1BR") != 0 &&
            g_strcmp0(spotted, "DL1ABC") != 0)) {
         bogus++;
