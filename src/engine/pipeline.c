@@ -525,7 +525,13 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
         for (guint s = 0; s < NSLOT; s++) {
           const guint i = SL(c, s);
           if (p->dec[i]) { cwf->channel_free(p->dec[i]); }
-          p->dec[i] = (s == 0) ? cwf->channel_new(out_rate) : NULL;
+          /* The PERSISTENT passthrough lane must survive the flush with a
+           * fresh decoder — every drain calls set_freq on it before the
+           * splitter can engage. Narrow lanes are born in slot_sync().
+           * (Pre-reground this was slot 0; leaving it there left WIDE_LANE
+           * NULL and the first block after a centre change segfaulted —
+           * live-caught 2026-08-01, 45 min into a contest.) */
+          p->dec[i] = (s == WIDE_LANE) ? cwf->channel_new(out_rate) : NULL;
           if (p->ext[i]) { skim_callsign_extractor_reset(p->ext[i]); }
           p->sgen[i] = 0;
         }
@@ -535,7 +541,6 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
           if (p->focus_fc > 0) {
             skim_tone_split_set_focus(p->split[c], p->focus_fc);
           }
-          p->sgen[SL(c, 0)] = skim_tone_split_slot_gen(p->split[c], 0);
         }
       }
       memset(p->flock, 0, p->nchan * NSLOT * sizeof(FreqLock));
