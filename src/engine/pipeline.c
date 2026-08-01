@@ -958,6 +958,11 @@ void skim_pipeline_tune(SkimPipeline *p, double freq_hz) {
   if (p->tci) { skim_tci_client_tune(p->tci, freq_hz); }
 }
 
+void skim_pipeline_spot_clicked(SkimPipeline *p, const char *call,
+                                double freq_hz) {
+  if (p->tci) { skim_tci_client_spot_clicked(p->tci, call, freq_hz); }
+}
+
 void skim_pipeline_set_spot_cq_only(SkimPipeline *p, gboolean cq_only) {
   g_atomic_int_set(&p->cq_only, cq_only ? 1 : 0);
 }

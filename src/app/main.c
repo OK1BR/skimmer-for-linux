@@ -1243,6 +1243,82 @@ static void on_row_activated(GtkColumnView *view, guint position, gpointer user)
   }
 }
 
+/* --- clickable callsigns in the decode pane ----------------------------------------------- */
+
+/* The whitespace-delimited token under a widget coordinate, trimmed to its
+ * [A-Z0-9/] core — NULL when the pointer sits on space, past the text, or
+ * the token is no callsign. Caller frees. */
+static char *pane_call_at(App *app, double wx, double wy) {
+  gint bx, by;
+  gtk_text_view_window_to_buffer_coords(app->tuned_view, GTK_TEXT_WINDOW_WIDGET,
+                                        (gint)wx, (gint)wy, &bx, &by);
+  GtkTextIter it;
+  if (!gtk_text_view_get_iter_at_location(app->tuned_view, &it, bx, by)) {
+    return NULL;
+  }
+  if (gtk_text_iter_ends_line(&it) ||
+      g_unichar_isspace(gtk_text_iter_get_char(&it))) {
+    return NULL;
+  }
+  GtkTextIter s = it, e = it;
+  while (!gtk_text_iter_starts_line(&s)) {
+    GtkTextIter p = s;
+    gtk_text_iter_backward_char(&p);
+    if (g_unichar_isspace(gtk_text_iter_get_char(&p))) { break; }
+    s = p;
+  }
+  while (!gtk_text_iter_ends_line(&e)) {
+    if (g_unichar_isspace(gtk_text_iter_get_char(&e))) { break; }
+    gtk_text_iter_forward_char(&e);
+  }
+  char *tok = gtk_text_buffer_get_text(app->tuned, &s, &e, FALSE);
+  /* Strip punctuation and over separators off the ends ("OK1BR?", "·");
+   * anything non-call left inside fails validation below. */
+  char *a = tok;
+  while (*a && !g_ascii_isalnum(*a) && *a != '/') { a++; }
+  char *z = a + strlen(a);
+  while (z > a && !g_ascii_isalnum(z[-1]) && z[-1] != '/') { z--; }
+  char *call = g_strndup(a, (gsize)(z - a));
+  g_free(tok);
+  if (!call[0] || !skim_callsign_is_valid(call)) {
+    g_free(call);
+    return NULL;
+  }
+  return call;
+}
+
+/* A click on a decoded callsign behaves like a panadapter spot click in
+ * sdr-for-linux: tune the radio to the station and announce the click over
+ * TCI — the server relays it and log-for-linux prefills its Call entry
+ * (SCOPE, Richard 2026-08-01). The exact station frequency (pinned slot)
+ * beats the 100 Hz-stepped VFO: the logger's QSY staleness check gets the
+ * carrier the station actually sits on. */
+static void on_pane_click(GtkGestureClick *g, gint n_press, double x, double y,
+                          gpointer user) {
+  (void)g; (void)n_press;
+  App *app = user;
+  if (gtk_text_buffer_get_has_selection(app->tuned)) { return; } /* drag-select */
+  char *call = pane_call_at(app, x, y);
+  if (!call) { return; }
+  const double hz = app->tuned_slot_hz > 0 ? app->tuned_slot_hz : app->vfo_hz;
+  if (app->pipeline && hz > 0) {
+    skim_pipeline_tune(app->pipeline, hz);
+    skim_pipeline_spot_clicked(app->pipeline, call, hz);
+  }
+  g_free(call);
+}
+
+/* Hand cursor over anything clickable — the pane's only affordance. */
+static void on_pane_motion(GtkEventControllerMotion *m, double x, double y,
+                           gpointer user) {
+  (void)m;
+  App *app = user;
+  char *call = pane_call_at(app, x, y);
+  gtk_widget_set_cursor_from_name(GTK_WIDGET(app->tuned_view),
+                                  call ? "pointer" : "text");
+  g_free(call);
+}
+
 /* --- activate ----------------------------------------------------------------------------- */
 
 static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
@@ -1334,6 +1410,14 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   gtk_text_view_set_left_margin(app->tuned_view, 12);
   gtk_text_view_set_top_margin(app->tuned_view, 4);
   gtk_widget_add_css_class(tuned_view, "decode-pane");
+  GtkGesture *pane_click = gtk_gesture_click_new();
+  gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(pane_click),
+                                GDK_BUTTON_PRIMARY);
+  g_signal_connect(pane_click, "released", G_CALLBACK(on_pane_click), app);
+  gtk_widget_add_controller(tuned_view, GTK_EVENT_CONTROLLER(pane_click));
+  GtkEventController *pane_motion = gtk_event_controller_motion_new();
+  g_signal_connect(pane_motion, "motion", G_CALLBACK(on_pane_motion), app);
+  gtk_widget_add_controller(tuned_view, pane_motion);
   decode_font_apply(app);
   GtkWidget *tuned_scroll = gtk_scrolled_window_new();
   gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(tuned_scroll), tuned_view);

@@ -249,6 +249,9 @@ static int cond_spot(void) {
   g_mutex_unlock(&s_lock);
   return hit;
 }
+static int cond_click(void) {
+  return srv_rx_contains("clicked_on_spot:9A1AA,7020153;");
+}
 
 static SkimTciClient *g_client;
 static int cond_dds(void) { return skim_tci_client_center_hz(g_client) == 7030000.0; }
@@ -338,6 +341,12 @@ int main(void) {
   check("spot format: call,mode,rounded hz,argb,scrubbed text",
         strcmp(s_spot, "spot:OK1BR,CW,7020150,4294901760,cq test") == 0);
   g_mutex_unlock(&s_lock);
+
+  /* A decoded-callsign click announces itself like a panadapter spot click
+   * (the server relays it; log-for-linux prefills from the broadcast). */
+  skim_tci_client_spot_clicked(c, "9A1AA", 7020152.6);
+  check("spot_clicked() sends clicked_on_spot:call,rounded hz",
+        wait_ms(cond_click, 2000));
 
   skim_tci_client_stop(c);
   check("stop() sends iq_stop:0;", wait_ms(cond_stop, 1000));

@@ -68,6 +68,14 @@ void     skim_tci_client_spot_delete(SkimTciClient *c, const char *call);
  * skimmer never changes radio state on its own. */
 void     skim_tci_client_tune(SkimTciClient *c, double freq_hz);
 
+/* Announce a spot click (clicked_on_spot:call,<hz>) — only ever on an explicit
+ * user action. The server relays it to its other clients (rx_clicked_on_spot +
+ * legacy), so a logger prefills from OUR decoded-text click exactly like from
+ * a panadapter spot click. hz must be the spot's exact frequency (> 0): the
+ * logger's QSY-away staleness check keys on it. */
+void     skim_tci_client_spot_clicked(SkimTciClient *c, const char *call,
+                                      double freq_hz);
+
 G_END_DECLS
 
 #endif /* SKIMMER_TCI_CLIENT_H */

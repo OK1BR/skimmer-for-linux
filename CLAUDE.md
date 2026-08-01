@@ -427,6 +427,18 @@ channel↔splitter mapping. 9 gates green; splitter replay 20 % faster
 (40 m): engages Δ1-6 dB comparable pairs, band went quiet before a
 verdict — splitter live validation STILL OPEN (A/B dataset live5
 reserved for it; live4 = post-squelch-fix, no splitter — don't mix).
+**Callsign click-through → logbook (offline-proven 2026-08-01).** A left
+click on any decode-pane token that validates as a call acts like a
+panadapter spot click: tune to the pane's pinned slot Hz (exact carrier,
+not the stepped VFO) + NEW `clicked_on_spot:call,hz;` over TCI
+(`skim_tci_client_spot_clicked` / `skim_pipeline_spot_clicked`); the
+sdr-for-linux server now RELAYS client-sent clicks to every client
+(both forms; its sdrfl-tci-test covers it) and log-for-linux prefills
+its Call entry (that side was already live). Hand cursor over clickable
+calls; drag-select never fires; token ends trimmed of punctuation/over
+marks. Gate: skimmer-tci-test wire check (17 checks). The LIVE chain
+(pane click → radio tunes + logbook prefills) is unverified — it needs
+the sdr-for-linux server REBUILT with the relay and restarted.
 **Release: Richard decided 2026-07-18 — tag v0.1.0 only AFTER his live
 validation session** (v2 + relock + splitter + one more soak), then
 default flips + release. **Direction (Richard, 2026-07-19): better

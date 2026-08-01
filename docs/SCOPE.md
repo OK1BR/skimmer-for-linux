@@ -286,6 +286,32 @@ where relevant, a live check against a running `sdr-for-linux`.
   collapse/re-engage (90 s — a slot survives the other side's over), and
   the whole offline pipeline with two stations in one channel — both calls
   tracked to the Hz, zero mutations.
+- **Clickable callsigns in decoded text → logbook prefill (requested by
+  Richard 2026-08-01; IMPLEMENTED offline the same day, live check
+  pending).** The decode view already highlights callsigns; make them
+  clickable. A click behaves exactly like a panadapter spot click in
+  `sdr-for-linux`: tune the radio to the station (the row-activation
+  `vfo:0,0,<hz>` path already exists) and announce the click over TCI
+  (`rx_clicked_on_spot`/`clicked_on_spot` with call + exact frequency in Hz)
+  so `log-for-linux` reacts instantly — it prefills its Call entry, pulls its
+  window forward and focuses the field with the call selected. That logbook
+  side is implemented and live as of 2026-08-01 and needs the spot's exact
+  frequency (`hz > 0`) in the message for its QSY-away staleness check
+  (prefill is dropped when the VFO wanders > 200 Hz off the spot).
+  The open point resolved by reading the server: it did NOT relay a
+  client-sent click (its parser knew only `spot`/`spot_delete`/`spot_clear`;
+  the click broadcast was wired to its own panadapter alone), so the relay
+  was added to `sdr-for-linux`'s `tci_server.c` — both forms accepted from
+  any client, rebroadcast to every client as `rx_clicked_on_spot` + legacy
+  (its `sdrfl-tci-test` covers the relay). Skimmer side: a left click on
+  any whitespace-delimited pane token that validates as a callsign (ends
+  trimmed of punctuation/over marks; drag-select does not fire) issues
+  `skim_pipeline_tune` + the new `skim_pipeline_spot_clicked` →
+  `clicked_on_spot:call,hz;` with the pane's pinned slot frequency (exact
+  carrier, not the 100 Hz-stepped VFO); a hand cursor over clickable calls
+  is the affordance. Gate: `skimmer-tci-test` checks the wire format. Live
+  (skimmer click → radio tunes + logbook prefills) still unverified — needs
+  the rebuilt `sdr-for-linux` server running.
 - **Later — RTTY backend** (FSK 45.45 bd, Baudot/ITA2), **PSK backend**
   (BPSK31 + BPSK63, Costas loop, varicode), and an optional **own-panorama
   waterfall** (port `waterfall.c`).

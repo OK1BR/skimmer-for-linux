@@ -434,6 +434,14 @@ void skim_tci_client_tune(SkimTciClient *c, double freq_hz) {
   cli_queue(c, g_strdup_printf("vfo:0,0,%lld;", (long long)(freq_hz + 0.5)));
 }
 
+void skim_tci_client_spot_clicked(SkimTciClient *c, const char *call,
+                                  double freq_hz) {
+  if (!c->thread || !call || !call[0] || freq_hz <= 0)
+    return;
+  cli_queue(c, g_strdup_printf("clicked_on_spot:%s,%lld;",
+                               call, (long long)(freq_hz + 0.5)));
+}
+
 double skim_tci_client_center_hz(SkimTciClient *c) {
   g_mutex_lock(&c->lock);
   double hz = c->center_hz;

@@ -83,6 +83,12 @@ double skim_pipeline_vfo_hz(const SkimPipeline *p);
  * while disconnected). The vfo broadcast confirms the retune. */
 void   skim_pipeline_tune(SkimPipeline *p, double freq_hz);
 
+/* Announce a user's click on a decoded callsign (clicked_on_spot over TCI) —
+ * the server relays it to its other clients so a logger prefills. Explicit
+ * user action only; a no-op while disconnected. */
+void   skim_pipeline_spot_clicked(SkimPipeline *p, const char *call,
+                                  double freq_hz);
+
 /* Spot policy: when TRUE, only stations heard CALLING (CQ/TEST/QRZ context)
  * reach the spot sinks — S&P answers stay off the panadapter/RBN. The
  * station list still tracks everything. Runtime-switchable, thread-safe. */
