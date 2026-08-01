@@ -309,9 +309,15 @@ where relevant, a live check against a running `sdr-for-linux`.
   `skim_pipeline_tune` + the new `skim_pipeline_spot_clicked` →
   `clicked_on_spot:call,hz;` with the pane's pinned slot frequency (exact
   carrier, not the 100 Hz-stepped VFO); a hand cursor over clickable calls
-  is the affordance. Gate: `skimmer-tci-test` checks the wire format. Live
-  (skimmer click → radio tunes + logbook prefills) still unverified — needs
-  the rebuilt `sdr-for-linux` server running.
+  is the affordance. Gate: `skimmer-tci-test` checks the wire format.
+  Live status (contest evening 2026-08-01): the skimmer SENDS on click and
+  the server RELAYS both forms — proven on the wire (an observer client
+  captured ~30 real clicks, YL3FT/YT6X/UX0LL/SD7X/…; SKIM_PANE_DEBUG
+  traces press→release→sent). The remaining open end is the LOGBOOK
+  prefill: log-for-linux fills only an EMPTY Call entry (typed text is
+  never overwritten, by design) and its build was being restarted during
+  the click tests — one click with an empty Call field against the current
+  logbook build still awaits Richard's confirmation.
 - **Dup-aware spot & decode coloring via the logbook (requested by Richard
   2026-08-01; logbook side DONE, skimmer side IMPLEMENTED the same day —
   gate `skimmer-dup-test`, live look pending).** Goal: the
