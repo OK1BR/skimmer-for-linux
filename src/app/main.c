@@ -450,10 +450,18 @@ static void apply_gone(App *app, const SkimStation *st) {
       if (o->pos > pos) { o->pos--; }
     }
   }
-  if (g_strcmp0(st->call, app->tuned_call) == 0) {
+  const gboolean was_fixed = g_strcmp0(st->call, app->tuned_call) == 0;
+  if (was_fixed) {
     app->tuned_call[0] = '\0';                 /* the fixed station left     */
   }
-  if (tuned_station_refresh(app)) { tuned_pane_reload(app); }
+  /* Re-resolve the pane only when this departure could touch it — the
+   * resolver walks every row, and a contest TTL-prune WAVE ran it once per
+   * evicted station (lag telemetry: 24-32 ms drains, growing with the
+   * table). A station far from the VFO can't change what the pane shows. */
+  if (was_fixed || app->vfo_hz <= 0 ||
+      ABS(st->freq_hz - app->vfo_hz) <= TUNED_WINDOW_HZ) {
+    if (tuned_station_refresh(app)) { tuned_pane_reload(app); }
+  }
 }
 
 static void pane_flush(App *app, GString *pane);
