@@ -462,6 +462,22 @@ total. **LIVE-VERIFIED 2026-08-01: a logged QSO grays the label
 instantly (Richard).** Lesson: meson test does NOT relink the app —
 build `ninja skimmer-for-linux` explicitly or the old binary keeps
 running (cost one "why is everything green" round).
+**UI-thread congestion killed (live-measured + live-verified
+2026-08-01).** Richard: the app chokes under contest load, worse over
+time. Profilers unavailable (ptrace_scope=1, no perf) → built
+SKIM_LAG_DEBUG: 250 ms main-loop heartbeat (logs stalls with length) +
+5 s counters (ev/append/retag/reload/worst-drain). It convicted
+apply_station: a per-event LINEAR scan of the station GListStore plus
+remove+append churn — cost grew with the table (drain 3→22 ms over
+6 min at constant ~200 ev/s, main thread 10→99 %). Fix: call→row hash,
+in-place update + single-row items_changed (rows carry their unsorted
+position; apply_gone maintains it). Same-age comparison after: main
+thread 0 %, drain flat 0.6-6 ms at full load. Also: dup verdicts now
+SERVE STALE past the TTL (background revalidate; the old
+expiry→UNKNOWN flap re-tagged the pane every 60 s per gray call), and
+the earlier stutter round removed blind re-tagging, per-motion cursor
+allocation, and the poll-under-lock in dup lookups. UDP itself was
+exonerated by measurement (0 drops, 0 kernel time).
 **Release: Richard decided 2026-07-18 — tag v0.1.0 only AFTER his live
 validation session** (v2 + relock + splitter + one more soak), then
 default flips + release. **Direction (Richard, 2026-07-19): better
