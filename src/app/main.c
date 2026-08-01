@@ -56,6 +56,9 @@ G_DECLARE_FINAL_TYPE(SkimRow, skim_row, SKIM, ROW, GObject)
 struct _SkimRow {
   GObject parent_instance;
   SkimStation st;
+  guint pos;                     /* position in the UNSORTED store — kept by
+                                  * apply_station/apply_gone so an update can
+                                  * announce itself without scanning          */
 };
 G_DEFINE_TYPE(SkimRow, skim_row, G_TYPE_OBJECT)
 static void skim_row_class_init(SkimRowClass *k) { (void)k; }
@@ -91,6 +94,9 @@ typedef struct {
                                   * can never disagree                        */
   double          tuned_slot_hz; /* its pinned frequency (slot key)           */
   GListStore     *stations;      /* of SkimRow                                */
+  GHashTable     *row_by_call;   /* call → SkimRow* (owns a ref) — O(1) event
+                                  * application; the per-event store scan
+                                  * pegged the UI thread (2026-08-01)         */
   GtkSortListModel *sorted;
   GtkTextBuffer  *tuned;         /* decode text at the tuned frequency        */
   GtkTextTag     *draft_tag;     /* dim: reader may still rewrite this text   */
@@ -403,19 +409,22 @@ static void ev_free(gpointer data) {
 }
 
 static void apply_station(App *app, const SkimStation *st) {
-  guint n = g_list_model_get_n_items(G_LIST_MODEL(app->stations));
-  for (guint i = 0; i < n; i++) {
-    SkimRow *r = g_list_model_get_item(G_LIST_MODEL(app->stations), i);
-    /* The tracker keeps ONE record per call (QSY moves it) — match by call. */
-    gboolean same = g_strcmp0(r->st.call, st->call) == 0;
-    g_object_unref(r);
-    if (same) {
-      /* Rows carry no notify — replace to refresh the bound labels. */
-      g_list_store_remove(app->stations, i);
-      break;
-    }
+  /* The tracker keeps ONE record per call (QSY moves it) — match by call,
+   * O(1). Updating in place + a single-row items_changed re-sorts and
+   * rebinds JUST this row; the old remove+append walked and churned the
+   * whole store per event, and with a contest table that pegged the UI
+   * thread — drain cost grew with the row count (live-measured
+   * 2026-08-01: 3→16 ms/drain over minutes, main thread to 99 %). */
+  SkimRow *r = g_hash_table_lookup(app->row_by_call, st->call);
+  if (r) {
+    r->st = *st;
+    g_list_model_items_changed(G_LIST_MODEL(app->stations), r->pos, 1, 1);
+  } else {
+    SkimRow *nr = skim_row_new(st);
+    nr->pos = g_list_model_get_n_items(G_LIST_MODEL(app->stations));
+    g_list_store_append(app->stations, nr);     /* store takes its own ref  */
+    g_hash_table_insert(app->row_by_call, g_strdup(st->call), nr);
   }
-  g_list_store_append(app->stations, skim_row_new(st));
   /* Keep the tuned pane's header fresh if this touches the tuned window —
    * via the sticky resolver, never straight from the event. When the
    * fixation resolves to a (new) station, pull in its history: the first
@@ -427,14 +436,18 @@ static void apply_station(App *app, const SkimStation *st) {
 
 /* Station left the tracker (TTL / frequency takeover) — drop its row. */
 static void apply_gone(App *app, const SkimStation *st) {
-  guint n = g_list_model_get_n_items(G_LIST_MODEL(app->stations));
-  for (guint i = 0; i < n; i++) {
-    SkimRow *r = g_list_model_get_item(G_LIST_MODEL(app->stations), i);
-    gboolean same = g_strcmp0(r->st.call, st->call) == 0;
-    g_object_unref(r);
-    if (same) {
-      g_list_store_remove(app->stations, i);
-      break;
+  SkimRow *r = g_hash_table_lookup(app->row_by_call, st->call);
+  if (r) {
+    const guint pos = r->pos;
+    g_hash_table_remove(app->row_by_call, st->call);
+    g_list_store_remove(app->stations, pos);
+    /* Rare path: shift the cached positions of the successors. */
+    GHashTableIter it;
+    gpointer v;
+    g_hash_table_iter_init(&it, app->row_by_call);
+    while (g_hash_table_iter_next(&it, NULL, &v)) {
+      SkimRow *o = v;
+      if (o->pos > pos) { o->pos--; }
     }
   }
   if (g_strcmp0(st->call, app->tuned_call) == 0) {
@@ -1452,6 +1465,8 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
    * (double-click / Enter) to tune the radio to that station. */
   app->freq_logs = g_ptr_array_new_with_free_func(freqlog_free);
   app->stations = g_list_store_new(SKIM_TYPE_ROW);
+  app->row_by_call = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                           g_free, g_object_unref);
   GtkSorter *sorter = GTK_SORTER(gtk_custom_sorter_new(freq_cmp, NULL, NULL));
   app->sorted = gtk_sort_list_model_new(G_LIST_MODEL(app->stations), sorter);
   g_object_ref(app->sorted);
