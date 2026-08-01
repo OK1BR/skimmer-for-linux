@@ -477,7 +477,14 @@ SERVE STALE past the TTL (background revalidate; the old
 expiry→UNKNOWN flap re-tagged the pane every 60 s per gray call), and
 the earlier stutter round removed blind re-tagging, per-motion cursor
 allocation, and the poll-under-lock in dup lookups. UDP itself was
-exonerated by measurement (0 drops, 0 kernel time).
+exonerated by measurement (0 drops, 0 kernel time). Two follow-up
+levers, both telemetry-driven: a TTL-prune wave no longer runs the
+pane resolver per eviction, and the resolver runs ONCE per drain (a
+VFO pileup ran it per report — 35-57 ms drains). FINAL soak (1+ h,
+band change included): main 0-5 %, drains 2-12 ms typical at up to
+320 ev/s, zero stalls. Residual 20-35 ms one-offs = prune waves;
+next lever IF ever needed: batched removals (g_list_store_splice) —
+not deployed, no measured benefit today (the iron rule).
 **Release: Richard decided 2026-07-18 — tag v0.1.0 only AFTER his live
 validation session** (v2 + relock + splitter + one more soak), then
 default flips + release. **Direction (Richard, 2026-07-19): better
