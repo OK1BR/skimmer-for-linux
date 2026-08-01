@@ -354,8 +354,15 @@ where relevant, a live check against a running `sdr-for-linux`.
   listener → UNKNOWN, the colour rule). Live look 2026-08-01: colours
   work, but a just-logged QSO grayed the panadapter label only on the
   next re-announce (≤180 s) — too slow for contest flow (Richard).
-  **PUSH extension (skimmer side IMPLEMENTED; logbook side REQUESTED —
-  agent of log-for-linux, please implement the send):** the moment a
+  **PUSH extension (skimmer side IMPLEMENTED; logbook side IMPLEMENTED
+  2026-08-01 — `logfl_dup_srv_notify()`, sent from the :2238 socket to all
+  peers with a valid `DUP?` in the last 10 min, max 8 peers; fires on QSO
+  logged (manual + WSJT-X), delete, and cell edit incl. the OLD identity
+  when call/band/mode moved; gate `log-dupq-test` covers the push, live
+  query verified, first real logged QSO is the live push check —
+  **LIVE-VERIFIED 2026-08-01: a logged QSO grays the panadapter label
+  instantly, Richard confirmed**):** the
+  moment a
   QSO is logged (or deleted/edited so a call's verdict changes), the
   logbook sends the STANDARD answer datagram (`DUP <call>` / `B4 <call>`
   / `NEW <call>`, same format, trailing newline fine) UNSOLICITED from

@@ -451,8 +451,17 @@ the 180 s re-announce recolours), pane scp highlight tints the same
 way via a second gray tag (verdict-sharpened rescans swap tags; app
 asks with 0 wait — GTK never blocks). Pane + panadapter colours come
 from the SAME constants since today (scp_tag was #44cc44, now
-#30C060 = spot green). Gate skimmer-dup-test (10 checks) — 10 gates
-total. Live look pending.
+#30C060 = spot green; the sdr panadapter renders client ARGB verbatim,
+alpha 0.95). PUSH: the logbook sends the standard answer datagram
+unsolicited on QSO log/delete/edit (its side: logfl_dup_srv_notify,
+peers from the last 10 min); dup_query queues green↔gray flips (answers
+AND pushes), the engine thread drains per block and resends the last
+emission with only the ARGB changed (labels < 10 min only), the pane
+re-tints its tail à 2 s. Gate skimmer-dup-test (15 checks) — 10 gates
+total. **LIVE-VERIFIED 2026-08-01: a logged QSO grays the label
+instantly (Richard).** Lesson: meson test does NOT relink the app —
+build `ninja skimmer-for-linux` explicitly or the old binary keeps
+running (cost one "why is everything green" round).
 **Release: Richard decided 2026-07-18 — tag v0.1.0 only AFTER his live
 validation session** (v2 + relock + splitter + one more soak), then
 default flips + release. **Direction (Richard, 2026-07-19): better
