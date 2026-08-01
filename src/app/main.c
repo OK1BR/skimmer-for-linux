@@ -116,6 +116,13 @@ typedef struct {
   GMutex          evq_lock;      /* guards evq + evq_scheduled                */
   GPtrArray      *evq;           /* engine events awaiting the main loop      */
   gboolean        evq_scheduled; /* a drain idle is already pending           */
+
+  /* SKIM_LAG_DEBUG: main-loop congestion forensics (2026-08-01 — the UI
+   * thread pegged a core and nothing in the logs said why). */
+  gint64          lag_prev;      /* last lag_tick arrival                     */
+  guint           lag_ticks;
+  guint           ctr_ev, ctr_append, ctr_retag, ctr_reload;
+  gint64          ctr_drain_us;  /* worst event-drain this window             */
 } App;
 
 /* The bottom pane's header: the station heard on the tuned frequency (the
@@ -302,6 +309,7 @@ static void scp_tag_token(App *app, gint s_off, gint e_off) {
     if (!gtk_text_iter_has_tag(&s, want) || gtk_text_iter_has_tag(&s, other)) {
       gtk_text_buffer_remove_tag(app->tuned, other, &s, &e);
       gtk_text_buffer_apply_tag(app->tuned, want, &s, &e);
+      app->ctr_retag++;
     }
   }
   g_free(tok);
@@ -333,6 +341,7 @@ static void scp_highlight(App *app, gsize back) {
  * to whatever history sits near the VFO). A live over region re-dims its
  * draft tail and re-arms the widget-side region size. */
 static void tuned_pane_reload(App *app) {
+  app->ctr_reload++;
   gtk_text_buffer_set_text(app->tuned, "", -1);
   app->pane_over = 0;
   FreqLog *fl = NULL;
@@ -580,6 +589,7 @@ static void pane_flush(App *app, GString *pane) {
     tail_append(app->tuned_view, app->tuned, pane->str);
     g_string_truncate(pane, 0);
     scp_highlight(app, n);
+    app->ctr_append++;
   }
 }
 
@@ -588,6 +598,7 @@ static void pane_flush(App *app, GString *pane) {
  * that could change routing or reload the pane (and once at the end). */
 static gboolean evq_drain(gpointer data) {
   App *app = data;
+  const gint64 drain_t0 = g_get_monotonic_time();
   g_mutex_lock(&app->evq_lock);
   GPtrArray *batch = app->evq;
   app->evq = g_ptr_array_new_with_free_func(ev_free);
@@ -635,7 +646,10 @@ static gboolean evq_drain(gpointer data) {
   pane_flush(app, pane);
   g_string_free(pane, TRUE);
   g_hash_table_unref(last);
+  app->ctr_ev += batch->len;
   g_ptr_array_unref(batch);
+  const gint64 drain_us = g_get_monotonic_time() - drain_t0;
+  if (drain_us > app->ctr_drain_us) { app->ctr_drain_us = drain_us; }
   return G_SOURCE_REMOVE;
 }
 
@@ -696,6 +710,28 @@ static void pipe_gone_cb(const SkimStation *st, gpointer user) {
 /* --- status line -------------------------------------------------------------------- */
 
 /* Rebind visible rows so the Age column ticks even for silent stations. */
+/* SKIM_LAG_DEBUG: a 250 ms heartbeat on the main loop. A late beat means
+ * something hogged the UI thread; the 5 s summary says what the loop was
+ * busy with (engine events, pane appends, tag churn, pane reloads). */
+static gboolean lag_tick(gpointer data) {
+  App *app = data;
+  const gint64 now = g_get_monotonic_time();
+  if (app->lag_prev && now - app->lag_prev > 750 * 1000) {
+    g_message("lag: main loop stalled %.0f ms",
+              (now - app->lag_prev - 250 * 1000) / 1000.0);
+  }
+  app->lag_prev = now;
+  if (++app->lag_ticks >= 20) {
+    g_message("lag: 5s ev=%u append=%u retag=%u reload=%u worst-drain=%.1f ms",
+              app->ctr_ev, app->ctr_append, app->ctr_retag, app->ctr_reload,
+              app->ctr_drain_us / 1000.0);
+    app->lag_ticks = 0;
+    app->ctr_ev = app->ctr_append = app->ctr_retag = app->ctr_reload = 0;
+    app->ctr_drain_us = 0;
+  }
+  return G_SOURCE_CONTINUE;
+}
+
 static gboolean age_tick(gpointer data) {
   App *app = data;
   guint n = g_list_model_get_n_items(G_LIST_MODEL(app->stations));
@@ -1502,6 +1538,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   gtk_widget_set_margin_bottom(GTK_WIDGET(app->status), 4);
   g_timeout_add_seconds(1, status_tick, app);
   g_timeout_add_seconds(2, age_tick, app);
+  if (g_getenv("SKIM_LAG_DEBUG")) { g_timeout_add(250, lag_tick, app); }
 
   GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_box_append(GTK_BOX(box), header);

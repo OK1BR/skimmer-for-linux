@@ -159,7 +159,12 @@ SkimDupVerdict skim_dup_query_lookup(SkimDupQuery *q, const char *call,
     e->asked_at = now;
   }
 
-  SkimDupVerdict v = SKIM_DUP_UNKNOWN;
+  /* SERVE STALE: an entry the logbook once answered keeps its verdict past
+   * the TTL — the re-ask above revalidates it in the background and only a
+   * DIFFERENT answer changes it (via the change queue). Returning UNKNOWN
+   * here made every gray call flap green for one tick per expiry, and each
+   * flap re-tagged the pane and repainted the label for nothing. */
+  SkimDupVerdict v = e->fresh_until > 0 ? e->verdict : SKIM_DUP_UNKNOWN;
   if (wait_ms > 0) {
     /* Poll OUTSIDE the lock — the GTK thread's wait-0 lookups must never
      * queue behind the pipeline's answer wait. */
