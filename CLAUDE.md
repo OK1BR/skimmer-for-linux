@@ -439,6 +439,20 @@ calls; drag-select never fires; token ends trimmed of punctuation/over
 marks. Gate: skimmer-tci-test wire check (17 checks). The LIVE chain
 (pane click → radio tunes + logbook prefills) is unverified — it needs
 the sdr-for-linux server REBUILT with the relay and restarted.
+**Dup-aware colours from the logbook (offline-proven 2026-08-01).**
+log-for-linux runs a read-only UDP dup service (127.0.0.1:2238,
+`DUP? call hz mode` → `NEW/B4/DUP call`, silence on malformed;
+live-probed — answers end in \n). `dup_query.c`: non-blocking client,
+60 s TTL cache, 2 s re-ask suppression, every failure → UNKNOWN
+(logbook closed must never break spotting). Pipeline owns it; spot_out
+colours SPOT ARGB by verdict (shared rule skim_spot_argb_for_dup:
+NEW/UNKNOWN bright SKIM_SPOT_ARGB, DUP/B4 gray SKIM_SPOT_ARGB_DUP —
+the 180 s re-announce recolours), pane scp highlight tints the same
+way via a second gray tag (verdict-sharpened rescans swap tags; app
+asks with 0 wait — GTK never blocks). Pane + panadapter colours come
+from the SAME constants since today (scp_tag was #44cc44, now
+#30C060 = spot green). Gate skimmer-dup-test (10 checks) — 10 gates
+total. Live look pending.
 **Release: Richard decided 2026-07-18 — tag v0.1.0 only AFTER his live
 validation session** (v2 + relock + splitter + one more soak), then
 default flips + release. **Direction (Richard, 2026-07-19): better

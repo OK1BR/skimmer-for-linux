@@ -19,6 +19,7 @@
 
 #include "callsign.h"
 #include "pane_log.h"
+#include "spot_out.h"
 #include "pipeline.h"
 
 #ifndef SKIMMER_VERSION
@@ -95,6 +96,8 @@ typedef struct {
   GtkTextTag     *draft_tag;     /* dim: reader may still rewrite this text   */
   GtkTextTag     *scp_tag;       /* green+underline: MASTER.SCP knows this
                                   * call (Richard, 2026-07-19)                */
+  GtkTextTag     *scp_dup_tag;   /* gray+underline: the logbook already has
+                                  * it (DUP/B4 — Richard, 2026-08-01)         */
   GtkTextView    *tuned_view;
   GtkLabel       *tuned_label;
   GtkWidget      *tuned_scroll;  /* the decode pane's scroller                */
@@ -281,7 +284,19 @@ static void scp_tag_token(App *app, gint s_off, gint e_off) {
   gtk_text_buffer_get_iter_at_offset(app->tuned, &e, e_off);
   char *tok = gtk_text_buffer_get_text(app->tuned, &s, &e, FALSE);
   if (skim_callsign_dict_has(tok)) {
-    gtk_text_buffer_apply_tag(app->tuned, app->scp_tag, &s, &e);
+    /* Tint by the logbook's dup verdict, same rule as the outgoing spot
+     * colour. The verdict can sharpen between overlapping scans (UNKNOWN →
+     * answer arrived), so the losing tag is removed, not just outvoted. */
+    const double hz = app->tuned_slot_hz > 0 ? app->tuned_slot_hz
+                                             : app->vfo_hz;
+    const SkimDupVerdict v = app->pipeline
+        ? skim_pipeline_dup_verdict(app->pipeline, tok, hz)
+        : SKIM_DUP_UNKNOWN;
+    const gboolean dup = skim_spot_argb_for_dup(v) == SKIM_SPOT_ARGB_DUP;
+    gtk_text_buffer_remove_tag(app->tuned,
+                               dup ? app->scp_tag : app->scp_dup_tag, &s, &e);
+    gtk_text_buffer_apply_tag(app->tuned,
+                              dup ? app->scp_dup_tag : app->scp_tag, &s, &e);
   }
   g_free(tok);
 }
@@ -1297,15 +1312,40 @@ static void on_pane_click(GtkGestureClick *g, gint n_press, double x, double y,
                           gpointer user) {
   (void)g; (void)n_press;
   App *app = user;
-  if (gtk_text_buffer_get_has_selection(app->tuned)) { return; } /* drag-select */
+  const gboolean dbg = g_getenv("SKIM_PANE_DEBUG") != NULL;
+  if (gtk_text_buffer_get_has_selection(app->tuned)) {
+    if (dbg) { g_message("pane click: release at %.0f,%.0f — drag-select, skip", x, y); }
+    return;
+  }
   char *call = pane_call_at(app, x, y);
-  if (!call) { return; }
+  if (!call) {
+    if (dbg) { g_message("pane click: release at %.0f,%.0f — no call there", x, y); }
+    return;
+  }
   const double hz = app->tuned_slot_hz > 0 ? app->tuned_slot_hz : app->vfo_hz;
   if (app->pipeline && hz > 0) {
+    if (dbg) { g_message("pane click: %s @ %.0f Hz — tune + clicked_on_spot", call, hz); }
     skim_pipeline_tune(app->pipeline, hz);
     skim_pipeline_spot_clicked(app->pipeline, call, hz);
+  } else if (dbg) {
+    g_message("pane click: %s but hz=%.0f pipeline=%p — NOT sent",
+              call, hz, (void *)app->pipeline);
   }
   g_free(call);
+}
+
+/* SKIM_PANE_DEBUG forensics for the click path: a press that never makes it
+ * to a release means the text view's own gestures claimed the sequence and
+ * ours got cancelled. */
+static void on_pane_press_dbg(GtkGestureClick *g, gint n_press, double x,
+                              double y, gpointer user) {
+  (void)g; (void)user;
+  g_message("pane click: press %d at %.0f,%.0f", n_press, x, y);
+}
+static void on_pane_cancel_dbg(GtkGesture *g, GdkEventSequence *seq,
+                               gpointer user) {
+  (void)g; (void)seq; (void)user;
+  g_message("pane click: sequence CANCELLED (claimed elsewhere)");
 }
 
 /* Hand cursor over anything clickable — the pane's only affordance. */
@@ -1396,10 +1436,20 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
    * plain — the over "firms up" in place (phase B, Richard 2026-07-18). */
   app->draft_tag = gtk_text_buffer_create_tag(app->tuned, "draft",
                                               "foreground", "#808080", NULL);
+  /* Highlight colours = the ARGB our TCI spots carry, so a call in the pane
+   * matches its label on the radio panadapter — bright for new ones, gray
+   * for what the logbook already has. */
+  char scp_col[8], dup_col[8];
+  g_snprintf(scp_col, sizeof(scp_col), "#%06X", SKIM_SPOT_ARGB & 0xFFFFFFu);
+  g_snprintf(dup_col, sizeof(dup_col), "#%06X", SKIM_SPOT_ARGB_DUP & 0xFFFFFFu);
   app->scp_tag = gtk_text_buffer_create_tag(app->tuned, "scp",
-                                            "foreground", "#44cc44",
+                                            "foreground", scp_col,
                                             "underline", PANGO_UNDERLINE_SINGLE,
                                             NULL);
+  app->scp_dup_tag = gtk_text_buffer_create_tag(app->tuned, "scp-dup",
+                                                "foreground", dup_col,
+                                                "underline",
+                                                PANGO_UNDERLINE_SINGLE, NULL);
   GtkWidget *tuned_view = gtk_text_view_new_with_buffer(app->tuned);
   app->tuned_view = GTK_TEXT_VIEW(tuned_view);
   gtk_text_view_set_editable(app->tuned_view, FALSE);
@@ -1414,6 +1464,10 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(pane_click),
                                 GDK_BUTTON_PRIMARY);
   g_signal_connect(pane_click, "released", G_CALLBACK(on_pane_click), app);
+  if (g_getenv("SKIM_PANE_DEBUG")) {
+    g_signal_connect(pane_click, "pressed", G_CALLBACK(on_pane_press_dbg), app);
+    g_signal_connect(pane_click, "cancel", G_CALLBACK(on_pane_cancel_dbg), app);
+  }
   gtk_widget_add_controller(tuned_view, GTK_EVENT_CONTROLLER(pane_click));
   GtkEventController *pane_motion = gtk_event_controller_motion_new();
   g_signal_connect(pane_motion, "motion", G_CALLBACK(on_pane_motion), app);

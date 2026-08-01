@@ -312,6 +312,46 @@ where relevant, a live check against a running `sdr-for-linux`.
   is the affordance. Gate: `skimmer-tci-test` checks the wire format. Live
   (skimmer click → radio tunes + logbook prefills) still unverified — needs
   the rebuilt `sdr-for-linux` server running.
+- **Dup-aware spot & decode coloring via the logbook (requested by Richard
+  2026-08-01; logbook side DONE, skimmer side IMPLEMENTED the same day —
+  gate `skimmer-dup-test`, live look pending).** Goal: the
+  operator must see at a glance which spotted calls are already worked, so
+  he does not click duplicates. `log-for-linux` now runs a read-only UDP
+  lookup service on `127.0.0.1:2238` (always on while the logbook runs;
+  implemented + live-verified 2026-08-01):
+  request `DUP? <call> <freq_hz> <mode>` (single datagram, UTF-8, e.g.
+  `DUP? 9A8A 14025000 CW`) → reply `NEW <call>` / `B4 <call>` /
+  `DUP <call>` sent back to the requester. `DUP` = call+band+mode already
+  logged in the logbook's ACTIVE CONTEST (band derived from `freq_hz` on
+  the log side); `B4` = worked before at any time; `NEW` = not in the log.
+  Malformed requests get NO reply — treat a ~1 s timeout as "unknown" and
+  keep the default color (logbook not running must never break spotting).
+  Skimmer work: query when a validated callsign becomes a station/spot
+  (small TTL cache, say 60 s, so the decode pane does not re-ask per
+  frame), then (a) choose the `SPOT:` ARGB by verdict — worked/dup dimmed
+  (e.g. gray), NEW stays the current bright color — the panadapter needs
+  no changes, dedup-by-callsign recolors the label and the existing 180 s
+  re-announce keeps it fresh; and (b) tint the decode-pane callsign
+  highlight the same way. Invalidate the cache entry for a call after the
+  operator logs it (simplest: short TTL is enough — a just-logged call
+  flips to DUP on the next re-announce/query). Do NOT read the logbook's
+  SQLite directly — the dup rule and active-contest context live in the
+  logbook, the UDP answer is the contract.
+  Implementation (offline-proven 2026-08-01): `src/engine/dup_query.c` —
+  connected non-blocking UDP client, 60 s answer TTL, 2 s re-ask
+  suppression for unanswered calls; every failure mode collapses to
+  UNKNOWN = default colour (live-probed: answers carry a trailing
+  newline; malformed requests get silence). The pipeline owns one
+  instance (pipeline-lifetime — the cache rides out reconnects);
+  `spot_out` emit asks with a 5 ms budget and colours the SPOT ARGB via
+  the shared `skim_spot_argb_for_dup` rule (`SKIM_SPOT_ARGB` bright /
+  `SKIM_SPOT_ARGB_DUP` gray, spot_out.h); the pane highlight asks with
+  a 0 ms budget (`skim_pipeline_dup_verdict`, GTK thread never blocks)
+  and tints via a second gray underline tag — verdict sharpening between
+  overlapping scans swaps the tag. Gate `skimmer-dup-test` (10 checks:
+  verdict round-trips incl. the newline, request wire format, silence →
+  UNKNOWN, re-ask suppression, TTL survives the logbook closing, no
+  listener → UNKNOWN, the colour rule). Live look pending.
 - **Later — RTTY backend** (FSK 45.45 bd, Baudot/ITA2), **PSK backend**
   (BPSK31 + BPSK63, Costas loop, varicode), and an optional **own-panorama
   waterfall** (port `waterfall.c`).

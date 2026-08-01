@@ -12,15 +12,38 @@
 #define SKIMMER_SPOT_OUT_H
 
 #include <glib.h>
+#include "dup_query.h"
 #include "tci_client.h"
 
 G_BEGIN_DECLS
+
+/* The colour of our spots on the radio panadapter — sent as the ARGB field
+ * of every TCI SPOT. The app's decode-pane callsign highlight uses the SAME
+ * constant, so a highlighted call and its panadapter label always match
+ * (Richard, 2026-08-01). Calls the logbook already has (DUP in the active
+ * contest, or B4 = worked some earlier time) dim to gray — the operator
+ * skips them at a glance; the 180 s re-announce recolours a label whose
+ * verdict changed (dedup by callsign on the radio side). */
+#define SKIM_SPOT_ARGB     0xFF30C060u
+#define SKIM_SPOT_ARGB_DUP 0xFF808080u
+
+/* One mapping from a logbook verdict to the spot colour — shared by the TCI
+ * spot path and the app's pane highlight so they can never disagree. */
+static inline guint32 skim_spot_argb_for_dup(SkimDupVerdict v) {
+  return (v == SKIM_DUP_DUP || v == SKIM_DUP_B4) ? SKIM_SPOT_ARGB_DUP
+                                                 : SKIM_SPOT_ARGB;
+}
 
 typedef struct _SkimSpotOut SkimSpotOut;
 
 /* Spot sink policy instance. tci may be NULL (no radio feed). */
 SkimSpotOut *skim_spot_out_new(SkimTciClient *tci);
 void         skim_spot_out_free(SkimSpotOut *s);
+
+/* Colour spots by the logbook's dup verdict (borrowed; NULL = default
+ * colour for everything). Emit asks with a ~5 ms budget — localhost answers
+ * in µs, an absent logbook costs one poll and stays UNKNOWN. */
+void  skim_spot_out_set_dup_query(SkimSpotOut *s, SkimDupQuery *q);
 
 /* Dedup/rate policy (defaults: re-spot 180 s, QSY 30 Hz, ≤5 spots/s). */
 void  skim_spot_out_set_policy(SkimSpotOut *s, guint respot_s,

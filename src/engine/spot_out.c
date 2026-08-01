@@ -20,8 +20,6 @@
 
 #include <math.h>
 
-#define SPOT_ARGB 0xFF30C060u                  /* green-ish label            */
-
 typedef struct {
   double freq_hz;
   gint64 at;
@@ -45,6 +43,8 @@ struct _SkimSpotOut {
 
   SkimNowFn now_fn;                            /* NULL → monotonic           */
   gpointer  now_user;
+
+  SkimDupQuery *dupq;                          /* not owned; NULL = no tint  */
 };
 
 static gint64 so_now(const SkimSpotOut *s) {
@@ -69,6 +69,10 @@ void skim_spot_out_free(SkimSpotOut *s) {
     return;
   g_hash_table_destroy(s->memo);
   g_free(s);
+}
+
+void skim_spot_out_set_dup_query(SkimSpotOut *s, SkimDupQuery *q) {
+  s->dupq = q;
 }
 
 void skim_spot_out_set_policy(SkimSpotOut *s, guint respot_s,
@@ -130,7 +134,11 @@ gboolean skim_spot_out_emit(SkimSpotOut *s, const char *call, const char *mode,
   if (s->tci) {
     char text[48];
     g_snprintf(text, sizeof(text), "%.0f dB", snr_db);
-    skim_tci_client_spot(s->tci, call, mode, out_hz, SPOT_ARGB, text);
+    const SkimDupVerdict v = s->dupq
+        ? skim_dup_query_lookup(s->dupq, call, freq_hz, mode, 5)
+        : SKIM_DUP_UNKNOWN;
+    skim_tci_client_spot(s->tci, call, mode, out_hz,
+                         skim_spot_argb_for_dup(v), text);
   }
   if (s->sink) { s->sink(call, mode, out_hz, snr_db, speed, s->sink_user); }
   s->emitted++;

@@ -13,6 +13,7 @@
 
 #include <glib.h>
 #include "decode.h"
+#include "dup_query.h"
 #include "rbn_feed.h"
 #include "station.h"
 
@@ -88,6 +89,12 @@ void   skim_pipeline_tune(SkimPipeline *p, double freq_hz);
  * user action only; a no-op while disconnected. */
 void   skim_pipeline_spot_clicked(SkimPipeline *p, const char *call,
                                   double freq_hz);
+
+/* The logbook's cached dup verdict for call (UNKNOWN when the logbook is
+ * closed or has not answered yet). Never blocks — safe from the GTK thread;
+ * the app tints the decode-pane highlight with it. */
+SkimDupVerdict skim_pipeline_dup_verdict(SkimPipeline *p, const char *call,
+                                         double freq_hz);
 
 /* Spot policy: when TRUE, only stations heard CALLING (CQ/TEST/QRZ context)
  * reach the spot sinks — S&P answers stay off the panadapter/RBN. The

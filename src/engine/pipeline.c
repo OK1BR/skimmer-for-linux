@@ -139,6 +139,7 @@ struct _SkimPipeline {
   SkimStationTable *stations;
   SkimSpotOut      *spots;
   SkimSpotOut      *rbn_spots;                 /* RBN policy → cfg.rbn feed  */
+  SkimDupQuery     *dupq;                      /* logbook dup verdicts       */
   double            rbn_min;
 
   GArray           *hits;                      /* Hit — one block's decodes  */
@@ -242,6 +243,9 @@ SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg) {
   skim_station_table_set_gone_cb(p->stations, station_gone_fwd, p);
   p->queue    = g_async_queue_new();
   p->hits     = g_array_new(FALSE, FALSE, sizeof(Hit));
+  /* Logbook dup lookup — pipeline-lifetime like the RBN memo: the verdict
+   * cache rides out reconnects. Harmless when no logbook listens. */
+  p->dupq     = skim_dup_query_new();
   if (p->cfg.rbn) {
     /* Lives for the pipeline's whole life (not per-connection like the TCI
      * sink): the dedup memo rides out reconnects, no re-spot burst. */
@@ -297,6 +301,7 @@ void skim_pipeline_free(SkimPipeline *p) {
   skim_station_table_free(p->stations);
   g_clear_pointer(&p->spots, skim_spot_out_free);
   g_clear_pointer(&p->rbn_spots, skim_spot_out_free);
+  g_clear_pointer(&p->dupq, skim_dup_query_free);
   IqBlock *b;
   while ((b = g_async_queue_try_pop(p->queue)) != NULL) {
     g_free(b->iq);
@@ -858,6 +863,7 @@ gboolean skim_pipeline_start(SkimPipeline *p, GError **error) {
   }
   p->spots = skim_spot_out_new(p->tci);
   skim_spot_out_set_clock(p->spots, pipe_clock_cb, p);
+  skim_spot_out_set_dup_query(p->spots, p->dupq);
   if (p->dlog_path) {
     p->dlog = fopen(p->dlog_path, "a");
     if (p->dlog) {
@@ -961,6 +967,13 @@ void skim_pipeline_tune(SkimPipeline *p, double freq_hz) {
 void skim_pipeline_spot_clicked(SkimPipeline *p, const char *call,
                                 double freq_hz) {
   if (p->tci) { skim_tci_client_spot_clicked(p->tci, call, freq_hz); }
+}
+
+SkimDupVerdict skim_pipeline_dup_verdict(SkimPipeline *p, const char *call,
+                                         double freq_hz) {
+  /* wait 0: the GTK thread must never stall on the socket — a miss fires
+   * the request and the answer colours the next highlight pass. */
+  return skim_dup_query_lookup(p->dupq, call, freq_hz, "CW", 0);
 }
 
 void skim_pipeline_set_spot_cq_only(SkimPipeline *p, gboolean cq_only) {

@@ -48,6 +48,7 @@ engine_sources = [
   'src/engine/station.c',      # M5: per-frequency station tracker
   'src/engine/callsign.c',     # M4: extraction + validation
   'src/engine/spot_out.c',     # M5/M6: spot policy — dedup, rate, sinks
+  'src/engine/dup_query.c',    # logbook dup lookup (UDP 2238) → spot colour
   'src/engine/rbn_feed.c',     # M6: RBN telnet server (CW Skimmer dialect)
   'src/engine/pipeline.c',     # M5: the engine assembled end to end
 ]
@@ -138,6 +139,17 @@ skimmer_call_test = executable('skimmer-call-test',
   link_with : engine_lib,
 )
 test('callsign', skimmer_call_test, timeout : 60)
+
+# Logbook dup lookup gate: mock log-for-linux UDP responder — verdict
+# round-trips (newline answers), silence→UNKNOWN, TTL cache, re-ask
+# suppression, and the shared verdict→colour rule.
+skimmer_dup_test = executable('skimmer-dup-test',
+  ['src/dup_test.c'],
+  include_directories : include_directories('src'),
+  dependencies : engine_deps,
+  link_with : engine_lib,
+)
+test('dup-lookup', skimmer_dup_test, timeout : 60)
 
 # Decode pane gate: SkimPaneLog op semantics — the ONE applier the app's
 # decode pane is built on (the neural reader that once fed it richer ops
