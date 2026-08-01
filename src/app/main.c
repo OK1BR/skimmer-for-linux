@@ -99,6 +99,7 @@ typedef struct {
   GtkTextTag     *scp_dup_tag;   /* gray+underline: the logbook already has
                                   * it (DUP/B4 — Richard, 2026-08-01)         */
   GtkTextView    *tuned_view;
+  gboolean        pane_hand;     /* hand cursor currently shown over the pane */
   GtkLabel       *tuned_label;
   GtkWidget      *tuned_scroll;  /* the decode pane's scroller                */
   GtkWidget      *list_scroll;   /* the station list's scroller               */
@@ -293,10 +294,15 @@ static void scp_tag_token(App *app, gint s_off, gint e_off) {
         ? skim_pipeline_dup_verdict(app->pipeline, tok, hz)
         : SKIM_DUP_UNKNOWN;
     const gboolean dup = skim_spot_argb_for_dup(v) == SKIM_SPOT_ARGB_DUP;
-    gtk_text_buffer_remove_tag(app->tuned,
-                               dup ? app->scp_tag : app->scp_dup_tag, &s, &e);
-    gtk_text_buffer_apply_tag(app->tuned,
-                              dup ? app->scp_dup_tag : app->scp_tag, &s, &e);
+    GtkTextTag *want  = dup ? app->scp_dup_tag : app->scp_tag;
+    GtkTextTag *other = dup ? app->scp_tag : app->scp_dup_tag;
+    /* Touch the tag table only on a real change: overlapping scans revisit
+     * every token, and a blind remove+apply invalidates the text layout each
+     * time — enough churn to stutter the whole app under contest load. */
+    if (!gtk_text_iter_has_tag(&s, want) || gtk_text_iter_has_tag(&s, other)) {
+      gtk_text_buffer_remove_tag(app->tuned, other, &s, &e);
+      gtk_text_buffer_apply_tag(app->tuned, want, &s, &e);
+    }
   }
   g_free(tok);
 }
@@ -1348,15 +1354,21 @@ static void on_pane_cancel_dbg(GtkGesture *g, GdkEventSequence *seq,
   g_message("pane click: sequence CANCELLED (claimed elsewhere)");
 }
 
-/* Hand cursor over anything clickable — the pane's only affordance. */
+/* Hand cursor over anything clickable — the pane's only affordance. The
+ * cursor is set only on a state CHANGE: set_cursor_from_name allocates a
+ * fresh GdkCursor, and motion events come by the hundred per second. */
 static void on_pane_motion(GtkEventControllerMotion *m, double x, double y,
                            gpointer user) {
   (void)m;
   App *app = user;
   char *call = pane_call_at(app, x, y);
-  gtk_widget_set_cursor_from_name(GTK_WIDGET(app->tuned_view),
-                                  call ? "pointer" : "text");
+  const gboolean hand = call != NULL;
   g_free(call);
+  if (hand != app->pane_hand) {
+    app->pane_hand = hand;
+    gtk_widget_set_cursor_from_name(GTK_WIDGET(app->tuned_view),
+                                    hand ? "pointer" : "text");
+  }
 }
 
 /* --- activate ----------------------------------------------------------------------------- */

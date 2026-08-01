@@ -123,8 +123,13 @@ SkimDupVerdict skim_dup_query_lookup(SkimDupQuery *q, const char *call,
 
   SkimDupVerdict v = SKIM_DUP_UNKNOWN;
   if (wait_ms > 0) {
+    /* Poll OUTSIDE the lock — the GTK thread's wait-0 lookups must never
+     * queue behind the pipeline's answer wait. */
+    g_mutex_unlock(&q->lock);
     struct pollfd pfd = { .fd = q->fd, .events = POLLIN };
-    if (poll(&pfd, 1, (int)wait_ms) > 0) {
+    const int ready = poll(&pfd, 1, (int)wait_ms);
+    g_mutex_lock(&q->lock);
+    if (ready > 0) {
       dup_drain(q);
       e = g_hash_table_lookup(q->cache, call);
       if (e && e->fresh_until > now) { v = e->verdict; }
