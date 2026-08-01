@@ -24,6 +24,7 @@ static guint16  s_port;
 static GMutex   s_lock;
 static char     s_last_req[128];     /* last datagram the mock received      */
 static int      s_requests;          /* total datagrams received             */
+static struct sockaddr_in s_last_from;   /* where it came from (push target) */
 static volatile gint s_run = 1;
 
 /* Mock log-for-linux: DUP? <call> ... → per-call canned verdict, trailing
@@ -42,6 +43,7 @@ static gpointer mock_serve(gpointer user) {
     buf[n] = '\0';
     g_mutex_lock(&s_lock);
     g_strlcpy(s_last_req, buf, sizeof(s_last_req));
+    s_last_from = from;
     s_requests++;
     g_mutex_unlock(&s_lock);
     char call[32] = "";
@@ -111,6 +113,33 @@ int main(void) {
   check("unanswered call re-asked at most every 2 s",
         s_requests == asked_before);
   g_mutex_unlock(&s_lock);
+
+  /* Colour flips queue for the pipeline's instant recolour: the first gray
+   * answers (9A1AA→DUP, OK1BR→B4) queued on arrival, and an UNSOLICITED
+   * push — the logbook the moment a QSO is logged — lands the same way,
+   * with no request at all. Green→green answers (the NEW ones) must not. */
+  g_mutex_lock(&s_lock);
+  struct sockaddr_in push_to = s_last_from;
+  g_mutex_unlock(&s_lock);
+  sendto(s_fd, "DUP DL1ABC\n", 11, 0,
+         (struct sockaddr *)&push_to, sizeof(push_to));
+  g_usleep(50 * 1000);
+  char chc[24];
+  SkimDupVerdict chv;
+  check("answer flip queued (9A1AA gray)",
+        skim_dup_query_take_change(q, chc, &chv) &&
+            strcmp(chc, "9A1AA") == 0 && chv == SKIM_DUP_DUP);
+  check("answer flip queued (OK1BR gray)",
+        skim_dup_query_take_change(q, chc, &chv) &&
+            strcmp(chc, "OK1BR") == 0 && chv == SKIM_DUP_B4);
+  check("unsolicited push queued (DL1ABC NEW→DUP)",
+        skim_dup_query_take_change(q, chc, &chv) &&
+            strcmp(chc, "DL1ABC") == 0 && chv == SKIM_DUP_DUP);
+  check("no further flips queued",
+        !skim_dup_query_take_change(q, chc, &chv));
+  check("push flipped the cache too",
+        skim_dup_query_lookup(q, "DL1ABC", 14025000, "CW", 0) ==
+            SKIM_DUP_DUP);
 
   /* Cache: with the mock gone, fresh verdicts still answer from the TTL. */
   g_atomic_int_set(&s_run, 0);

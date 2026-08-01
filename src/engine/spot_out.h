@@ -73,6 +73,14 @@ void  skim_spot_out_set_sink(SkimSpotOut *s, SkimSpotSink sink, gpointer user);
 gboolean skim_spot_out_emit(SkimSpotOut *s, const char *call, const char *mode,
                             double freq_hz, double snr_db, double speed);
 
+/* Repaint a live label in the verdict's colour RIGHT NOW (the logbook says
+ * "just logged him" — the operator must not wait out the re-announce).
+ * A resend of the last emission with only the ARGB changed; dedup memo and
+ * re-announce schedule stay untouched. No-op for calls without a fresh
+ * label (≤10 min, the radio's own spot TTL). */
+void skim_spot_out_recolour(SkimSpotOut *s, const char *call,
+                            SkimDupVerdict verdict);
+
 /* The station is gone (TTL / takeover): pull its label off the panadapter
  * (SPOT_DELETE) and forget its dedup memo, so a comeback re-spots at once. */
 void skim_spot_out_delete(SkimSpotOut *s, const char *call);

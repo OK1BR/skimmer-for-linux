@@ -700,6 +700,10 @@ static gboolean age_tick(gpointer data) {
   App *app = data;
   guint n = g_list_model_get_n_items(G_LIST_MODEL(app->stations));
   if (n) { g_list_model_items_changed(G_LIST_MODEL(app->stations), 0, n, n); }
+  /* Re-tint the recent pane tail with fresh logbook verdicts — a call
+   * logged a moment ago must gray out in place, not only in new text.
+   * The no-churn guard in scp_tag_token makes an unchanged pass free. */
+  scp_highlight(app, 2000);
   return G_SOURCE_CONTINUE;
 }
 

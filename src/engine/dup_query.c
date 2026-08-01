@@ -22,11 +22,19 @@ typedef struct {
   gint64         asked_at;      /* last request sent                        */
 } DupEntry;
 
+typedef struct {
+  char           call[24];
+  SkimDupVerdict verdict;
+} DupChange;
+
 struct _SkimDupQuery {
   int         fd;               /* connected non-blocking UDP, −1 on error  */
   GHashTable *cache;            /* call → DupEntry                          */
+  GQueue      changes;          /* DupChange* — colour flips awaiting drain */
   GMutex      lock;
 };
+
+static void dup_drain(SkimDupQuery *q);
 
 SkimDupQuery *skim_dup_query_new(void) {
   return skim_dup_query_new_full("127.0.0.1", 2238);
@@ -55,8 +63,25 @@ void skim_dup_query_free(SkimDupQuery *q) {
     return;
   if (q->fd >= 0) { close(q->fd); }
   g_hash_table_destroy(q->cache);
+  g_queue_clear_full(&q->changes, g_free);
   g_mutex_clear(&q->lock);
   g_free(q);
+}
+
+gboolean skim_dup_query_take_change(SkimDupQuery *q, char *call,
+                                    SkimDupVerdict *verdict) {
+  if (!q)
+    return FALSE;
+  g_mutex_lock(&q->lock);
+  if (q->fd >= 0) { dup_drain(q); }      /* pushes land without a lookup    */
+  DupChange *ch = g_queue_pop_head(&q->changes);
+  g_mutex_unlock(&q->lock);
+  if (!ch)
+    return FALSE;
+  g_strlcpy(call, ch->call, sizeof(ch->call));
+  *verdict = ch->verdict;
+  g_free(ch);
+  return TRUE;
 }
 
 /* Fold every queued answer into the cache. An answer is `VERDICT CALL`
@@ -84,6 +109,19 @@ static void dup_drain(SkimDupQuery *q) {
       if (!e) {
         e = g_new0(DupEntry, 1);
         g_hash_table_insert(q->cache, g_strdup(f[1]), e);
+      }
+      /* A colour-changing transition (green↔gray) queues for the pipeline
+       * to recolour the live spot — this is how an unsolicited logbook
+       * push ("just logged him") turns the label gray at once. */
+      const gboolean was_gray = e->verdict == SKIM_DUP_DUP ||
+                                e->verdict == SKIM_DUP_B4;
+      const gboolean is_gray  = v == SKIM_DUP_DUP || v == SKIM_DUP_B4;
+      if (was_gray != is_gray &&
+          strlen(f[1]) < sizeof(((DupChange *)0)->call)) {
+        DupChange *ch = g_new0(DupChange, 1);
+        g_strlcpy(ch->call, f[1], sizeof(ch->call));
+        ch->verdict = v;
+        g_queue_push_tail(&q->changes, ch);
       }
       e->verdict     = v;
       e->fresh_until = g_get_monotonic_time() + DUP_TTL_US;

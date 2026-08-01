@@ -351,7 +351,26 @@ where relevant, a live check against a running `sdr-for-linux`.
   overlapping scans swaps the tag. Gate `skimmer-dup-test` (10 checks:
   verdict round-trips incl. the newline, request wire format, silence →
   UNKNOWN, re-ask suppression, TTL survives the logbook closing, no
-  listener → UNKNOWN, the colour rule). Live look pending.
+  listener → UNKNOWN, the colour rule). Live look 2026-08-01: colours
+  work, but a just-logged QSO grayed the panadapter label only on the
+  next re-announce (≤180 s) — too slow for contest flow (Richard).
+  **PUSH extension (skimmer side IMPLEMENTED; logbook side REQUESTED —
+  agent of log-for-linux, please implement the send):** the moment a
+  QSO is logged (or deleted/edited so a call's verdict changes), the
+  logbook sends the STANDARD answer datagram (`DUP <call>` / `B4 <call>`
+  / `NEW <call>`, same format, trailing newline fine) UNSOLICITED from
+  the :2238 socket to the source address of every `DUP?` request seen
+  recently (last ~10 min is plenty; just the last requester works too).
+  No new protocol: the skimmer parses it exactly like an answer — the
+  cache flips, and a colour-changing flip (green↔gray) repaints the
+  live panadapter label AT ONCE (resend of the last emission with only
+  the ARGB changed; dedup/re-announce schedule untouched; only labels
+  fresher than the radio's 10 min spot TTL) and re-tints the decode
+  pane within 2 s (periodic tail rescan). Do NOT write TCI `spot:`
+  from the logbook — two writers of one label race (the skimmer's
+  re-announce would repaint green until its cache expires). Gate
+  `skimmer-dup-test` covers the push path (unsolicited datagram →
+  change queue → cache flip; 15 checks).
 - **Later — RTTY backend** (FSK 45.45 bd, Baudot/ITA2), **PSK backend**
   (BPSK31 + BPSK63, Costas loop, varicode), and an optional **own-panorama
   waterfall** (port `waterfall.c`).

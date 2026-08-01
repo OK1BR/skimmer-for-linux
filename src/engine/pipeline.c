@@ -841,6 +841,14 @@ static gpointer engine_thread(gpointer data) {
       p->last_prune = now;
       skim_station_table_prune(p->stations, now, STATION_TTL_US);
     }
+    /* Logbook verdict flips (answers AND unsolicited "just logged him"
+     * pushes) repaint the live label at once — the operator must not wait
+     * out the 180 s re-announce to see a station turn gray. */
+    char dup_call[24];
+    SkimDupVerdict dup_v;
+    while (skim_dup_query_take_change(p->dupq, dup_call, &dup_v)) {
+      if (p->spots) { skim_spot_out_recolour(p->spots, dup_call, dup_v); }
+    }
   }
   return NULL;
 }

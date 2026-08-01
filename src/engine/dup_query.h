@@ -41,6 +41,14 @@ SkimDupVerdict skim_dup_query_lookup(SkimDupQuery *q, const char *call,
                                      double freq_hz, const char *mode,
                                      guint wait_ms);
 
+/* Colour-changing verdict transitions (green↔gray), queued as they land —
+ * including UNSOLICITED pushes: the logbook may send `DUP <call>` on its own
+ * the moment a QSO is logged, and it parses exactly like an answer. The
+ * pipeline drains this queue once per block and recolours the live spot.
+ * Returns FALSE when empty. call must hold ≥ 24 bytes. Thread-safe. */
+gboolean skim_dup_query_take_change(SkimDupQuery *q, char *call,
+                                    SkimDupVerdict *verdict);
+
 G_END_DECLS
 
 #endif /* SKIMMER_DUP_QUERY_H */

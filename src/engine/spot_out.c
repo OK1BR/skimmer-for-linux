@@ -23,6 +23,8 @@
 typedef struct {
   double freq_hz;
   gint64 at;
+  char   mode[8];                     /* last emission, for recolour resend  */
+  double snr_db;
 } SpotMemo;
 
 struct _SkimSpotOut {
@@ -130,6 +132,8 @@ gboolean skim_spot_out_emit(SkimSpotOut *s, const char *call, const char *mode,
   const double out_hz =
       rh > 1 ? round(freq_hz / rh) * rh : freq_hz;
   m->at      = now;
+  g_strlcpy(m->mode, mode ? mode : "CW", sizeof(m->mode));
+  m->snr_db  = snr_db;
 
   if (s->tci) {
     char text[48];
@@ -143,6 +147,26 @@ gboolean skim_spot_out_emit(SkimSpotOut *s, const char *call, const char *mode,
   if (s->sink) { s->sink(call, mode, out_hz, snr_db, speed, s->sink_user); }
   s->emitted++;
   return TRUE;
+}
+
+void skim_spot_out_recolour(SkimSpotOut *s, const char *call,
+                            SkimDupVerdict verdict) {
+  if (!s->tci || !call || !call[0])
+    return;
+  SpotMemo *m = g_hash_table_lookup(s->memo, call);
+  /* Only a label that is plausibly still on the panadapter (the radio keeps
+   * spots ~10 min) — repainting a long-gone station would re-plant it. */
+  if (!m || so_now(s) - m->at > 10 * 60 * (gint64)G_USEC_PER_SEC)
+    return;
+  const gint rh = g_atomic_int_get(&s->round_hz);
+  const double out_hz =
+      rh > 1 ? round(m->freq_hz / rh) * rh : m->freq_hz;
+  char text[48];
+  g_snprintf(text, sizeof(text), "%.0f dB", m->snr_db);
+  /* A refresh of an existing label, not a new spot: no dedup-memo touch, no
+   * token — the regular re-announce schedule stays as it was. */
+  skim_tci_client_spot(s->tci, call, m->mode, out_hz,
+                       skim_spot_argb_for_dup(verdict), text);
 }
 
 void skim_spot_out_delete(SkimSpotOut *s, const char *call) {
