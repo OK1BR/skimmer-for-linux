@@ -122,6 +122,9 @@ typedef struct {
   GMutex          evq_lock;      /* guards evq + evq_scheduled                */
   GPtrArray      *evq;           /* engine events awaiting the main loop      */
   gboolean        evq_scheduled; /* a drain idle is already pending           */
+  gboolean        resolve_pending; /* run the pane resolver ONCE at drain end
+                                  * — a pileup on the VFO used to walk the
+                                  * whole table per report (49 ms drains)     */
 
   /* SKIM_LAG_DEBUG: main-loop congestion forensics (2026-08-01 — the UI
    * thread pegged a core and nothing in the logs said why). */
@@ -430,7 +433,7 @@ static void apply_station(App *app, const SkimStation *st) {
    * fixation resolves to a (new) station, pull in its history: the first
    * seconds after a retune decoded before the station validated. */
   if (app->vfo_hz > 0 && ABS(st->freq_hz - app->vfo_hz) <= TUNED_WINDOW_HZ) {
-    if (tuned_station_refresh(app)) { tuned_pane_reload(app); }
+    app->resolve_pending = TRUE;         /* once per drain, at the end       */
   }
 }
 
@@ -460,7 +463,7 @@ static void apply_gone(App *app, const SkimStation *st) {
    * table). A station far from the VFO can't change what the pane shows. */
   if (was_fixed || app->vfo_hz <= 0 ||
       ABS(st->freq_hz - app->vfo_hz) <= TUNED_WINDOW_HZ) {
-    if (tuned_station_refresh(app)) { tuned_pane_reload(app); }
+    app->resolve_pending = TRUE;         /* once per drain, at the end       */
   }
 }
 
@@ -667,6 +670,13 @@ static gboolean evq_drain(gpointer data) {
   pane_flush(app, pane);
   g_string_free(pane, TRUE);
   g_hash_table_unref(last);
+  if (app->resolve_pending) {
+    /* One resolver pass over the FINAL table state covers every station/gone
+     * event of the batch — running it per event walked the table once per
+     * pileup report (49 ms drains, live-measured 2026-08-01). */
+    app->resolve_pending = FALSE;
+    if (tuned_station_refresh(app)) { tuned_pane_reload(app); }
+  }
   app->ctr_ev += batch->len;
   g_ptr_array_unref(batch);
   const gint64 drain_us = g_get_monotonic_time() - drain_t0;
