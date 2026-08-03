@@ -223,3 +223,7 @@ any ExpertSDR-compatible TCI server.
 ## Licence
 
 GPL-3.0-or-later. See [`LICENSE`](LICENSE).
+
+## Author
+
+Richard Fakenberg — **OK1BR** — [rifak.cz](https://rifak.cz)
