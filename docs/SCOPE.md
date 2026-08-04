@@ -413,6 +413,14 @@ where relevant, a live check against a running `sdr-for-linux`.
   `cz.ok1br.skimmer_for_linux` resolves. `sdr-for-linux`'s About
   (`src/gui.c`) is the family reference for the field set; take
   `debug_info` from `log-for-linux`'s.
+- **The Website field in the repo header. TO DO (written down 2026-08-04 at
+  Richard's request, across every one of his projects).** Every OK1BR repo
+  has that field empty while its README already points at
+  [rifak.cz](https://rifak.cz) — so the GitHub sidebar, which is the first
+  place a visitor looks, links nowhere. It is repo metadata, not code:
+  `gh repo edit OK1BR/skimmer-for-linux --homepage https://rifak.cz` (or the
+  web UI). Whoever next works this project sets it; the same note is in the
+  scope of every sibling.
 - **Later — RTTY backend** (FSK 45.45 bd, Baudot/ITA2), **PSK backend**
   (BPSK31 + BPSK63, Costas loop, varicode), and an optional **own-panorama
   waterfall** (port `waterfall.c`).

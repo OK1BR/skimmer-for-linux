@@ -38,6 +38,12 @@
   <url type="homepage">https://github.com/OK1BR/skimmer-for-linux</url>
   <url type="bugtracker">https://github.com/OK1BR/skimmer-for-linux/issues</url>
   <url type="vcs-browser">https://github.com/OK1BR/skimmer-for-linux</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/OK1BR/skimmer-for-linux/main/docs/screenshot-decode-pane.png</image>
+      <caption>The decode pane on a contest evening, validated callsigns highlighted</caption>
+    </screenshot>
+  </screenshots>
   <categories>
     <category>Utility</category>
     <category>HamRadio</category>

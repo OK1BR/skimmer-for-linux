@@ -23,6 +23,13 @@ feed**.
 > `meson test`, 10 gates, plus a ~50× realtime replay harness for A/B runs on
 > recorded off-air IQ. See [`docs/SCOPE.md`](docs/SCOPE.md) for the full plan.
 
+![The decode pane during a contest evening](docs/screenshot-decode-pane.png)
+
+*Following the tuned station at 32 WPM, 37 dB. Callsigns that validate are
+highlighted — gray instead of green once the logbook says you have worked
+them. The status line counts the whole segment behind it: 107 stations and
+2383 spots off 1536 channels at 192 kHz.*
+
 ## How it works
 
 ```
