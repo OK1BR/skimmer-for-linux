@@ -16,8 +16,8 @@ G_BEGIN_DECLS
 const SkimDecodeBackend *skim_decode_cw(void);
 
 /* v2: soft-decision semi-Markov Viterbi over the same plumbing — built for
- * QSB (a faded element is weak evidence, not no evidence). Selected in the
- * pipeline with SKIM_CW_V2=1 until the replay A/B flips the default. */
+ * QSB (a faded element is weak evidence, not no evidence). The pipeline
+ * DEFAULT since 2026-08-04; SKIM_CW_V1=1 falls back to the classical v1. */
 const SkimDecodeBackend *skim_decode_cw_v2(void);
 
 G_END_DECLS

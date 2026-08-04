@@ -208,11 +208,14 @@ static void pipe_log_stamp(const SkimPipeline *p, const IqBlock *b,
   }
 }
 
-/* CW decoder pick: v1 (classical, live-proven) stays the default; the
- * Viterbi v2 arms with SKIM_CW_V2=1 until the replay A/B flips it. One
- * process = one backend (per-channel states are not mixable). */
+/* CW decoder pick: the soft-decision Viterbi v2 is the DEFAULT since
+ * 2026-08-04 (Richard's call after the 2026-08-01 contest session ran it
+ * live all day). v1 stays in the tree as the classical fallback, one env
+ * var away: SKIM_CW_V1=1. SKIM_CW_V2 is still accepted so old command
+ * lines and replay scripts keep meaning what they said. One process =
+ * one backend (per-channel states are not mixable). */
 static const SkimDecodeBackend *cw_backend(void) {
-  return g_getenv("SKIM_CW_V2") ? skim_decode_cw_v2() : skim_decode_cw();
+  return g_getenv("SKIM_CW_V1") ? skim_decode_cw() : skim_decode_cw_v2();
 }
 
 static void station_gone_fwd(const SkimStation *st, gpointer user);
