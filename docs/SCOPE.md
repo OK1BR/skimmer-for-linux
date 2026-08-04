@@ -406,6 +406,11 @@ where relevant, a live check against a running `sdr-for-linux`.
   acknowledgement section wherever third-party code is vendored (here:
   WDSP). The menu item is the LAST one in the primary menu, "About
   Skimmer for Linux", per the GNOME HIG.
+  **The version must be findable FROM THE UI** (Richard, 2026-08-04): a
+  `--version` flag on the command line does NOT satisfy this. Someone who
+  launched the app from the app grid must be able to see which version he
+  is running without leaving it — the About dialog is that place. A CLI
+  flag is welcome on top, never instead.
   **Where this project stands: there is no About dialog and no primary
   menu at all — the whole item is to be built.** The pieces it points at
   do exist since v0.1.0: `data/cz.ok1br.skimmer_for_linux.{svg,desktop.in,
