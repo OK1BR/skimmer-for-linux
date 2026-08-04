@@ -1180,7 +1180,7 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   adw_preferences_row_set_title(ADW_PREFERENCES_ROW(sw), "CQ only");
   adw_action_row_set_subtitle(ADW_ACTION_ROW(sw),
       "Spot only stations heard calling (CQ, TEST, QRZ) — "
-      "S&P answers stay off the panadapter");
+      "S&amp;P answers stay off the panadapter");
   adw_switch_row_set_active(ADW_SWITCH_ROW(sw), app->cq_only);
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(sgrp), sw);
   GtkWidget *qrow = adw_combo_row_new();
