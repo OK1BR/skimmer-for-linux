@@ -208,12 +208,38 @@ mode is a pluggable decode backend on shared infrastructure.
 - Linux, GTK4 + libadwaita, GLib, libwebsockets, FFTW (single + double).
 - Build: `meson` + `ninja`.
 
-## Build
+## Install
+
+Pick whichever fits your distribution — every release ships prebuilt
+packages on the [Releases page](https://github.com/OK1BR/skimmer-for-linux/releases):
+
+- **AppImage** (any distro): download, `chmod +x Skimmer_for_Linux-*.AppImage`,
+  run. Everything bundled, nothing to install.
+- **Ubuntu 24.04+ / Debian 13+**: `sudo apt install ./skimmer-for-linux_*.deb`
+- **Fedora 40+**: `sudo dnf install ./skimmer-for-linux-*.rpm`
+- **Arch Linux**: `makepkg -si` in `packaging/` of a repo clone — the
+  [PKGBUILD](packaging/PKGBUILD) builds the tagged release tarball (AUR
+  package to follow)
+
+Both distro packages are install-tested in clean containers before they are
+attached to a release.
+
+## Build from source
 
 ```sh
 meson setup build
 meson compile -C build
+meson test -C build             # 10 offline gates, no radio needed
 ./build/skimmer-for-linux
+```
+
+Install into the user prefix (desktop file, icon and AppStream metainfo
+included — the app shows up in the app grid):
+
+```sh
+meson setup builddir --prefix=$HOME/.local
+meson compile -C builddir
+meson install -C builddir
 ```
 
 A plain launch runs the v2 decoder. Two switches are still opt-in until their

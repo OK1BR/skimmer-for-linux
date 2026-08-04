@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>cz.ok1br.skimmer_for_linux</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Skimmer for Linux</name>
+  <summary>Multi-channel CW skimmer and spot feeder</summary>
+  <description>
+    <p>
+      A native GTK4/libadwaita CW skimmer for Linux. It pulls a wideband IQ
+      stream from the TCI server in sdr-for-linux, splits the segment into
+      hundreds of narrow channels with a polyphase filter bank, and decodes
+      every signal in it at once. Validated callsigns go back to the radio as
+      panadapter spots and out to local loggers over a CW-Skimmer-dialect
+      telnet cluster feed.
+    </p>
+    <p>
+      The decoder is built for the hard half of the band, not the happy path:
+      a soft-decision semi-Markov Viterbi lattice that carries a faded element
+      through QSB instead of thresholding it away, a fist model that learns
+      each operator's own spacing, a clock that re-locks in one jump when the
+      other side of a QSO comes back at their own speed, and a tone splitter
+      that separates two stations sharing one channel. Callsign validation is
+      RBN-grade, so nothing unvalidated ever reaches the wire.
+    </p>
+    <p>
+      Built to work with its sibling apps: click a decoded callsign and the
+      radio tunes while log-for-linux pre-fills its entry row, and calls
+      already worked dim to gray from the logbook's duplicate service. The
+      skimmer is read-only against the radio — it never keys, and the one
+      deliberate write is the tuning you asked for.
+    </p>
+  </description>
+  <developer id="cz.ok1br">
+    <name>Richard Fakenberg, OK1BR</name>
+  </developer>
+  <launchable type="desktop-id">cz.ok1br.skimmer_for_linux.desktop</launchable>
+  <url type="homepage">https://github.com/OK1BR/skimmer-for-linux</url>
+  <url type="bugtracker">https://github.com/OK1BR/skimmer-for-linux/issues</url>
+  <url type="vcs-browser">https://github.com/OK1BR/skimmer-for-linux</url>
+  <categories>
+    <category>Utility</category>
+    <category>HamRadio</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-08-04">
+      <description>
+        <p>
+          First release: TCI client and IQ ingest, polyphase channelizer,
+          the soft-decision Viterbi CW decoder with fist model and clock
+          re-lock, RBN-grade callsign validation, station tracker and spot
+          feeder to the panadapter, local telnet cluster feed, click-through
+          from decoded text to radio and logbook, and duplicate-aware spot
+          colours from log-for-linux. Decoding was validated on the air
+          through the 2026-08-01 contest day.
+        </p>
+      </description>
+    </release>
+  </releases>
+</component>

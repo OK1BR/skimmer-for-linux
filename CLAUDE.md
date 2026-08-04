@@ -528,12 +528,25 @@ made AdwActionRow's Pango markup reject the whole string (the GTK
 warning sat in EVERY live log since M5; verified by parsing both forms
 through `Pango.parse_markup`). Docs regrounded to the tree: gate count
 8→10, the v2-opt-in lines, the deleted ML blob, the stale
-`SKIM_CW_V2=1 SKIM_TONE_SPLIT=1` launch line. **Open before v0.1.0:**
-(1) `meson.build` still says `version : '0.0.0'`; (2) NOTHING installs
-but the binary — no `.desktop`, no icon, no metainfo; (3) tone
-splitter + FOCUS live validation still has no verdict (they stay
-opt-in); (4) the click-through's last link — logbook prefill into an
-EMPTY Call entry — is still unconfirmed live.
+`SKIM_CW_V2=1 SKIM_TONE_SPLIT=1` launch line.
+**v0.1.0 release plumbing built the same day**, copied from
+log-for-linux's v0.1.0 (2026-08-02) and sdr-for-linux: version
+0.0.0 → 0.1.0, `data/` (desktop entry with the bindir baked in, the
+scalable icon, AppStream metainfo) installed via `subdir('data')` +
+`gnome.post_install`, `packaging/` (nfpm deb/rpm + AUR PKGBUILD) and
+`.github/workflows/build.yml` (gates on PRs/tags; AppImage + deb + rpm
+built and container install-tested at tag time only — no CI per
+commit, Richard 2026-07-12). **The GApplication id changed
+`cz.ok1br.SkimmerForLinux` → `cz.ok1br.skimmer_for_linux`** — it has
+to equal the icon/desktop file name or Wayland shows a generic icon,
+and snake_case is the family form. Verified: staged install lands the
+four paths nfpm expects, `desktop-file-validate` and `appstreamcli
+validate` pass, 10 gates green on the release build. **Open before the
+tag:** (1) tone splitter + FOCUS live validation still has no verdict
+(they stay opt-in, so this does not block); (2) the click-through's
+last link — logbook prefill into an EMPTY Call entry — is still
+unconfirmed live; (3) `packaging/PKGBUILD` carries `sha256sums=SKIP`
+until the tag tarball exists.
 
 ## Layout
 

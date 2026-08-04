@@ -1,5 +1,5 @@
 project('skimmer-for-linux', 'c',
-  version : '0.0.0',
+  version : '0.1.0',
   license : 'GPL-3.0-or-later',
   default_options : [
     'c_std=c11',
@@ -18,6 +18,7 @@ add_project_arguments('-DSKIMMER_VERSION="@0@"'.format(meson.project_version()),
 # (+ vendored WDSP resampler). They are declared now because they are already on
 # the system (sdr-for-linux uses them) and the engine will reach for them soon.
 cc        = meson.get_compiler('c')
+gnome     = import('gnome')  # used in data/ for post-install icon/desktop DB refresh
 glib_dep  = dependency('glib-2.0')            # headless engine
 gio_dep   = dependency('gio-2.0')             # M6: RBN telnet server sockets
 gtk_dep   = dependency('gtk4')                # app front-end
@@ -193,3 +194,5 @@ executable('skimmer-for-linux',
   c_args : ['-DSKIMMER_DATADIR="@0@"'.format(
     get_option('prefix') / get_option('datadir') / 'skimmer-for-linux')],
 )
+
+subdir('data')   # .desktop + icon + AppStream metainfo (install only)

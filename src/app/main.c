@@ -1597,8 +1597,12 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
 int main(int argc, char **argv) {
   g_set_application_name("Skimmer for Linux");
 
+  /* The id doubles as the Wayland app-id and the icon/desktop/metainfo file
+   * name — data/ installs cz.ok1br.skimmer_for_linux.svg, so this must match
+   * it exactly or the window shows a generic icon. Same snake_case form as
+   * sdr-for-linux and log-for-linux. */
   AdwApplication *app =
-      adw_application_new("cz.ok1br.SkimmerForLinux", G_APPLICATION_DEFAULT_FLAGS);
+      adw_application_new("cz.ok1br.skimmer_for_linux", G_APPLICATION_DEFAULT_FLAGS);
   g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
 
   int status = g_application_run(G_APPLICATION(app), argc, argv);
