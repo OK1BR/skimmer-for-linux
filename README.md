@@ -14,12 +14,13 @@ feed**.
 
 > **Status: the skimmer skims, live.** TCI client (M1) → polyphase channelizer
 > (M2: −109 dBc isolation, ~1 % of a core per 192 kHz segment) → CW decoder
-> (M3 classical + a soft-decision Viterbi v2) → RBN-grade callsign validation
+> (the soft-decision Viterbi **v2**, default since 2026-08-04; the classical
+> v1 stays as a fallback) → RBN-grade callsign validation
 > (M4: corpus precision 1.0) → station tracker + spot feeder (M5) → local
 > telnet spot feed (M6). Fresh off the bench: a per-channel **tone splitter**
 > (two stations in one channel decode separately) and a **fist model** (the
 > decoder learns each operator's own spacing). Everything is gated offline —
-> `meson test`, 8 gates, plus a ~60× realtime replay harness for A/B runs on
+> `meson test`, 10 gates, plus a ~50× realtime replay harness for A/B runs on
 > recorded off-air IQ. See [`docs/SCOPE.md`](docs/SCOPE.md) for the full plan.
 
 ## How it works
@@ -68,7 +69,13 @@ traceback emits text live, with the lag itself adaptive — short on healthy
 signals (half the latency), full through a fade where late evidence still
 rescues drowned elements. On the recorded corpus v2 reads the true `9A170NT`
 where v1 tables the mutilation, and E/T noise drops measurably; the same gate
-suite runs both backends so v1 is always one env var away.
+suite runs both backends, so v1 is always one env var away (`SKIM_CW_V1=1`).
+
+v2 has been the default since 2026-08-04, after a full contest day on the air.
+The 600 s YOTA-contest replay says why: v2 tables **19** stations, v1 **12** —
+and among v1's misses is the loudest signal in the segment (LZ5R, 39 dB,
+673 reports for v2), while v1 mutates `SN1T` into `IN1T` and mints a phantom
+`TM00TFR`. The lattice costs about 50 % more CPU (52× realtime vs 79×).
 
 ### A fist model — spacing is personal
 
@@ -185,8 +192,9 @@ compatible should that ever change.
 
 ## Modes
 
-1. **CW** — shipping (v1 classical + v2 Viterbi behind `SKIM_CW_V2=1` until
-   the live A/B flips the default; tone splitter behind `SKIM_TONE_SPLIT=1`).
+1. **CW** — shipping (the v2 Viterbi decoder is the default; the classical v1
+   is one env var away, `SKIM_CW_V1=1`; tone splitter still opt-in behind
+   `SKIM_TONE_SPLIT=1` / `SKIM_TONE_FOCUS=1` pending its live validation).
 2. **RTTY** — next: FSK 45.45 bd, Baudot/ITA2.
 3. **PSK** — BPSK31/63 (Costas loop, varicode).
 
@@ -205,8 +213,14 @@ mode is a pluggable decode backend on shared infrastructure.
 ```sh
 meson setup build
 meson compile -C build
-SKIM_CW_V2=1 SKIM_TONE_SPLIT=1 ./build/skimmer-for-linux
+./build/skimmer-for-linux
 ```
+
+A plain launch runs the v2 decoder. Two switches are still opt-in until their
+live validation: `SKIM_TONE_SPLIT=1` (two stations in one channel decode
+separately) and `SKIM_TONE_FOCUS=1` (a narrow slot on a lone carrier; it arms
+the splitter machinery too). `SKIM_CW_V1=1` falls back to the classical
+decoder.
 
 Optional: drop a `MASTER.SCP` into `~/.config/skimmer-for-linux/` and the
 extractor uses it as a dictionary boost. Settings live in

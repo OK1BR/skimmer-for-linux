@@ -245,8 +245,13 @@ where relevant, a live check against a running `sdr-for-linux`.
   kHz ONCE each (dedup across two band passes), the S&P answerer is tracked
   locally but NEVER hits the wire, zero unvalidated lines.
 - **CW decoder v2 — soft-decision semi-Markov Viterbi. IMPLEMENTED
-  (offline 2026-07-15; opt-in `SKIM_CW_V2=1` until live A/B flips the
-  default).** v1's plumbing (envelope, trackers, squelch, tone offset)
+  (offline 2026-07-15; the PIPELINE DEFAULT since 2026-08-04 — Richard's
+  call after the 2026-08-01 contest session ran it live all day. The
+  classical v1 stays in the tree behind `SKIM_CW_V1=1`; the flip is
+  measured on the 600 s YOTA-contest replay — v2 tables 19 stations to
+  v1's 12, v1 misses the segment's loudest signal outright (LZ5R, 39 dB,
+  673 v2 reports), mutates SN1T→IN1T and mints the phantom TM00TFR;
+  v2 costs ~50 % more CPU, 52× realtime vs 79×).** v1's plumbing (envelope, trackers, squelch, tone offset)
   carries a new decision layer: per-sample mark/space log-likelihoods (a
   span discriminator that FOLLOWS QSB + a noise-anchored Rayleigh term
   that tells a −18 dB in-dash dropout from a real space) feed a Viterbi

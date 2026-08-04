@@ -50,6 +50,11 @@ back to the radio panadapter and to the RBN. The full plan is in
 
 ## Status
 
+> Read this section as a CHRONOLOGICAL log: entries are appended, not
+> rewritten, so where two of them disagree the LATER one is the truth
+> (gate counts, defaults, what is in the tree). The last entry carries
+> the current state and the open list.
+
 **M3 — CW decoder, synthetic gate green 2026-07-15.** `decode_cw.c` v1
 (classical, HMM later): envelope → mean-floor tracker → Schmitt keying →
 blip-folding run classifier → adaptive dit → Morse LUT; layered squelch
@@ -85,9 +90,10 @@ follows QSB; noise-anchored Rayleigh term tells dropouts from spaces) →
 segment Viterbi with duration priors on the adaptive dit → lag-committed
 traceback. Solid channels ride out envelope-gate dips (µ_m/µ_s ratio).
 Replay A/B: "oper" corpus — v1 reads mutilated "9A1G", v2 the true
-9A170NT (121 reports); contest precision held, E/T noise down. **v1 stays
-the pipeline default — `SKIM_CW_V2=1` arms v2** (app + replay); flip the
-default after Richard's live session. Gate `skimmer-cw-test` runs BOTH
+9A170NT (121 reports); contest precision held, E/T noise down. **v2 is the
+pipeline DEFAULT since 2026-08-04** (was opt-in `SKIM_CW_V2=1`; that name
+is still accepted, `SKIM_CW_V1=1` now selects the classical v1 — see the
+2026-08-04 entry at the end). Gate `skimmer-cw-test` runs BOTH
 backends + QSB/flutter cases (35 checks).
 **Tone splitter (offline-proven 2026-07-16, opt-in `SKIM_TONE_SPLIT=1`).**
 `tone_split.c`: per-channel Welch periodogram + keying-sideband mirror
@@ -174,7 +180,8 @@ pairs): synthetic 0.029/0.039, held-out blocks F+G CER 0.046 vs run3
 0.059 (labels biased TOWARD run3), EA1EYL 21 exact calls, EA3BP body
 exact. **Blob run4 is IN-REPO: data/cw-reader.bin** (provenance
 data/cw-reader.md); the cw-reader gate runs torch-parity +
-stream==batch on it every `meson test`. App: **Preferences → CW reader,
+stream==batch on it every `meson test`. [SUPERSEDED — the blob, `ml/`
+and that gate were deleted 2026-07-19, …ba12f77.] App: **Preferences → CW reader,
 default OFF** (Richard 2026-07-18; plain launch never arms — ear rule),
 switch resolves blob + sets SKIM_CW_READER for the next reconnect.
 **Engine clock fix:** offline replay runs TTLs/dedup on STREAM time
@@ -272,6 +279,7 @@ vs run4's 274. run5 = run3 + 20k steps at 25 % real: **held-out H CER
 0.25 vs run4 0.428; EA3BP 0.008 vs 0.016; noise transcription trained
 away** (run5 blanks what v2's squelch blanks — "PA4O TU 5NN 2" where
 run4 wrote "EEEAAOEEEIEX 5NN 2M"). **Blob data/cw-reader.bin = run5.**
+[SUPERSEDED — deleted 2026-07-19, …ba12f77; no blob ships today.]
 Margin gate recalibrated by measurement (`ml/margin_sweep.py`, 3-class:
 match/conflict/orphan vs v2 words from .chars): 6/3 stands (higher bars
 halve recall, conflict share barely moves); phaseB 6/3: 219 match / 93
@@ -324,11 +332,15 @@ The pane is pure v2 (draft = final, no dim/rewrite in practice; the
 engine's SKIM_CW_READER env path + pane-op machinery still exist for
 OFFLINE replay analyses only, and their gates keep them honest while
 they remain). Phase D (model as spot witness) is dead. The classical
-path (v2 + clock re-lock + tone splitter) is the decoder. Full source
-removal of the neural subsystem (cw_reader.c, pane ops, ml/ training
-tools, data/cw-reader.bin, reader+pane gates) awaits Richard's explicit
-call — it is a lot of gate-proven code and git history keeps it either
-way.
+path (v2 + clock re-lock + tone splitter) is the decoder. **Removal
+DONE in part (…ba12f77, 2026-07-19): `ml/`, the in-repo blob
+`data/cw-reader.bin` and the `skimmer-reader-test` gate are GONE from
+the tree** — any older paragraph above that calls the blob "in-repo"
+is history, not current state. What still sits in `src/engine/`:
+`cw_reader.c`/`.h` (dormant, reachable only via the `SKIM_CW_READER`
+env path, and with no blob shipped it cannot arm on its own) and
+`pane_log.c`/`.h` (NOT dead — the app's decode pane is built on it).
+Excising the cw_reader remnant awaits Richard's explicit call.
 **Tone FOCUS — narrow slot on a lone carrier (offline-proven 2026-07-19,
 opt-in `SKIM_TONE_FOCUS=1`).** Lever #1 of the classical-decoding plan:
 the envelope used to integrate the whole 125 Hz channel while a CW signal
@@ -350,11 +362,15 @@ new: **A/B spot harness `tools/ab_spots.py`** (plan lever #2) — collects
 our telnet feed and SDC's side by side (JSONL), reports who-first/freq
 deltas/mutation suspects (edit distance ≤ 2, MASTER.SCP adjudicates) and
 per-side-only station events; mock-verified, awaiting a live SDC run.
-Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison),
-**v2 live session**, **tone splitter + FOCUS live session** (run the app
-with `SKIM_CW_V2=1 SKIM_TONE_FOCUS=1` — focus arms the splitter too;
-splitter alone briefly live 2026-07-20 post-reground, band died before
-a verdict). MASTER.SCP can go to
+Still pending live: **M3 off-air A/B** (fldigi/CW Skimmer comparison) and
+the **tone splitter + FOCUS live session** (run the app with
+`SKIM_TONE_FOCUS=1` — focus arms the splitter too; splitter alone briefly
+live 2026-07-20 post-reground, band died before a verdict; armed again
+during the 2026-08-01 contest — 37 054 `tone-split` lines in
+`/var/tmp/skimmer-app-20260801-live8.log` — but the day went to the UI
+congestion hunt, so still NO verdict). The **v2 live session is DONE**
+(2026-08-01 contest day) and v2 is the default since 2026-08-04.
+MASTER.SCP can go to
 `~/.config/skimmer-for-linux/master.scp` (the app loads it if present).
 **Squelch attack fixed — pre-roll replay (offline-proven 2026-07-19 late,
 always on, v2 only).** Úkol #4, the ONE weakness the SDC A/B measured:
@@ -496,7 +512,28 @@ real dB exactly where stations are lost today; (2) M3 off-air A/B vs
 CW Skimmer/fldigi to MEASURE where we lose; (3) torn-dah merge
 hypotheses in the v2 lattice (QSK chop: 32+8+26 splits seen all over
 the live captures); (4) RTTY/PSK backends; (5) sub-20 Hz joint demod
-for contested slots (far). 
+for contested slots (far).
+**v2 IS THE DEFAULT + docs regrounded (2026-08-04, Richard's call after
+the 2026-08-01 contest day ran v2 live).** `pipeline.c` flipped:
+`SKIM_CW_V1=1` selects the classical v1, everything else gets v2
+(`SKIM_CW_V2` still parsed so old command lines keep meaning what they
+said). Measured on the 600 s YOTA-contest replay, default vs
+`SKIM_CW_V1=1`: **19 stations vs 12**; v1 loses the segment's LOUDEST
+signal outright (LZ5R, 39 dB, 673 reports for v2), mutates SN1T→IN1T,
+mints the phantom TM00TFR (103 reports) and drops IT9JYI/DF8V/DL6KVA;
+v2 costs ~50 % more CPU (52× realtime vs 79×). 10 gates green with the
+new default — the spot-pipeline gate now exercises v2. Also fixed: the
+**"CQ only" preference subtitle never rendered** — a raw `&` in "S&P"
+made AdwActionRow's Pango markup reject the whole string (the GTK
+warning sat in EVERY live log since M5; verified by parsing both forms
+through `Pango.parse_markup`). Docs regrounded to the tree: gate count
+8→10, the v2-opt-in lines, the deleted ML blob, the stale
+`SKIM_CW_V2=1 SKIM_TONE_SPLIT=1` launch line. **Open before v0.1.0:**
+(1) `meson.build` still says `version : '0.0.0'`; (2) NOTHING installs
+but the binary — no `.desktop`, no icon, no metainfo; (3) tone
+splitter + FOCUS live validation still has no verdict (they stay
+opt-in); (4) the click-through's last link — logbook prefill into an
+EMPTY Call entry — is still unconfirmed live.
 
 ## Layout
 
