@@ -389,6 +389,30 @@ where relevant, a live check against a running `sdr-for-linux`.
   re-announce would repaint green until its cache expires). Gate
   `skimmer-dup-test` covers the push path (unsolicited datagram →
   change queue → cache flip; 15 checks).
+- **A GNOME-correct About dialog. TO DO (written down 2026-08-04 at
+  Richard's request, across every app of the family).** Every app must open
+  the same kind of About from its primary menu, and its strings must agree
+  with what the `.desktop` entry and the AppStream metainfo already say —
+  one truth about the app, not three. The contract, in `AdwAboutDialog`
+  terms (`adw_about_dialog_new`, NOT the deprecated `AdwAboutWindow`;
+  shown with `adw_dialog_present`): `application_icon` = the GApplication
+  id, which is also the installed icon's file name — get that wrong and
+  the dialog shows a generic gear; `application_name`; `version` from the
+  meson project version (one source of truth); `developer_name`
+  "Richard Fakenberg, OK1BR"; `copyright`; `license_type`
+  `GTK_LICENSE_GPL_3_0`; `comments` — the same one-liner the metainfo
+  carries; `website` + `issue_url`; `debug_info` with versions and paths,
+  so a bug report can be pasted straight from its Copy button; and an
+  acknowledgement section wherever third-party code is vendored (here:
+  WDSP). The menu item is the LAST one in the primary menu, "About
+  Skimmer for Linux", per the GNOME HIG.
+  **Where this project stands: there is no About dialog and no primary
+  menu at all — the whole item is to be built.** The pieces it points at
+  do exist since v0.1.0: `data/cz.ok1br.skimmer_for_linux.{svg,desktop.in,
+  metainfo.xml}` are installed, so `application_icon` =
+  `cz.ok1br.skimmer_for_linux` resolves. `sdr-for-linux`'s About
+  (`src/gui.c`) is the family reference for the field set; take
+  `debug_info` from `log-for-linux`'s.
 - **Later — RTTY backend** (FSK 45.45 bd, Baudot/ITA2), **PSK backend**
   (BPSK31 + BPSK63, Costas loop, varicode), and an optional **own-panorama
   waterfall** (port `waterfall.c`).
