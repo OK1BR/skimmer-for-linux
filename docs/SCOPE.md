@@ -426,6 +426,34 @@ where relevant, a live check against a running `sdr-for-linux`.
   `gh repo edit OK1BR/skimmer-for-linux --homepage https://rifak.cz` (or the
   web UI). Whoever next works this project sets it; the same note is in the
   scope of every sibling.
+- **Hysteresis on the reported spot frequency. TO DO (written down
+  2026-08-07.)** `skim_spot_out_emit()` quantises with no memory:
+  `out_hz = round(freq_hz / rh) * rh` (`src/engine/spot_out.c`). A station
+  whose frequency estimate wanders across a grid boundary therefore gets a
+  DIFFERENT reported frequency on every re-announce (180 s) although it never
+  moved — the panadapter label jumps a whole grid step and the telnet feed
+  carries a spot that disagrees with the one before it. `qsy_hz` (30 Hz) does
+  not cover this: it gates whether a NEW emission happens at all, not which
+  value a scheduled re-announce carries. **Only with the grid switched on** —
+  "Frequency step" defaults to `Exact` (0), where the reported value follows
+  the estimate and that is exactly what we want (the label converges onto the
+  true carrier — see the `qsy_hz` comment); the grid choices are 10/20/50/100 Hz.
+  Fix: keep the last emitted `out_hz` in `SpotMemo` and re-quantise only when
+  the raw estimate leaves the reported cell by more than half a step plus a
+  small margin — otherwise re-send the value already on the label. The raw
+  `freq_hz` stays untouched; it is the QSY policy's input.
+  `skim_spot_out_recolour()` must then resend the STORED reported value
+  instead of re-quantising — today it recomputes from the memo's raw value and
+  happens to agree, but after this change recomputing would undo the
+  hysteresis on every repaint.
+  Gate: extend `skimmer-spot-test` with a station parked on a grid boundary —
+  estimate jittering a few Hz across it, several re-announces — and assert the
+  reported frequency is emitted once and never alternates.
+  Origin: the idea (not the code) comes from e04's DeepCW and s53zo's SO2R
+  fork of it, whose pileup tracker keeps an internal EMA frequency and a
+  separate *reported* one that is updated only past half a bin (widths past
+  0.75 bin). **Principle only — neither repository carries any licence, so
+  none of their code may be copied into this GPLv3 tree.**
 - **Later — RTTY backend** (FSK 45.45 bd, Baudot/ITA2), **PSK backend**
   (BPSK31 + BPSK63, Costas loop, varicode), and an optional **own-panorama
   waterfall** (port `waterfall.c`).
