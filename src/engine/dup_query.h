@@ -3,8 +3,10 @@
  * log-for-linux runs a read-only UDP lookup service on 127.0.0.1:2238 while
  * it is open (docs/SCOPE.md, 2026-08-01): request `DUP? <call> <freq_hz>
  * <mode>` in one datagram, answer `NEW <call>` / `B4 <call>` / `DUP <call>`
- * (malformed requests get silence). The verdict colours our spots and the
- * decode-pane highlight so the operator never clicks a duplicate.
+ * / `INV <call>` (malformed requests get silence). The verdict colours our
+ * spots and the decode-pane highlight so the operator never clicks a
+ * duplicate — or, under contest rules, a station no valid QSO is possible
+ * with at all.
  *
  * The logbook NOT running must never break spotting: every failure mode —
  * no listener, lost datagram, malformed answer — collapses to UNKNOWN, which
@@ -25,7 +27,18 @@ typedef enum {
   SKIM_DUP_NEW,           /* not in the log                                 */
   SKIM_DUP_B4,            /* worked before, some earlier time               */
   SKIM_DUP_DUP,           /* call+band+mode already in the ACTIVE contest   */
+  SKIM_DUP_INV,           /* the ACTIVE contest scores no QSO with this
+                             station at all (WAE: EU↔EU for an EU op) —
+                             logbook side since log-for-linux 8093437     */
 } SkimDupVerdict;
+
+/* One truth for "the operator should not call this station": DUP, B4 and
+ * INV all gray the spot colour and the pane highlight. A verdict string
+ * this build does not know collapses to UNKNOWN in the parser (bright) —
+ * that tolerance is what lets the logbook grow verdicts first. */
+static inline gboolean skim_dup_verdict_gray(SkimDupVerdict v) {
+  return v == SKIM_DUP_DUP || v == SKIM_DUP_B4 || v == SKIM_DUP_INV;
+}
 
 typedef struct _SkimDupQuery SkimDupQuery;
 

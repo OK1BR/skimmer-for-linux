@@ -547,6 +547,21 @@ tag:** (1) tone splitter + FOCUS live validation still has no verdict
 last link — logbook prefill into an EMPTY Call entry — is still
 unconfirmed live; (3) `packaging/PKGBUILD` carries `sha256sums=SKIP`
 until the tag tarball exists.
+**INV verdict — contest-invalid grays like DUP (offline-proven + live wire
+check 2026-08-08, mid-WAE).** The logbook's :2238 service grew `INV <call>`
+(log-for-linux `8093437`): the active contest scores no QSO with that
+station at all (WAE: every EU call for an EU op). `SKIM_DUP_INV` in the
+enum; the gray decision has ONE truth now — `skim_dup_verdict_gray()`
+(dup_query.h), called by both the parser's flip rule and
+`skim_spot_argb_for_dup` — so spot ARGB, pane tint and push recolours all
+follow from two lines (parse + gray set). Unknown verdicts from a newer
+logbook keep collapsing to UNKNOWN before the cache (now gate-proven).
+Gate `skimmer-dup-test` 15 → 25 checks (INV round-trip/push/TTL-survival,
+unknown-verdict answer + push tolerance, colour). Live wire check against
+the running logbook mid-WAE: DL1AA→INV, K1AA→NEW, OK1BR→INV. The visual
+chain (gray label on the live panadapter) rides the exact path DUP
+live-verified 2026-08-01; a live INV look during a contest is welcome but
+nothing new executes there.
 
 ## Layout
 

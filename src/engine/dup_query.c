@@ -103,6 +103,7 @@ static void dup_drain(SkimDupQuery *q) {
       if (strcmp(f[0], "NEW") == 0)      { v = SKIM_DUP_NEW; }
       else if (strcmp(f[0], "B4") == 0)  { v = SKIM_DUP_B4; }
       else if (strcmp(f[0], "DUP") == 0) { v = SKIM_DUP_DUP; }
+      else if (strcmp(f[0], "INV") == 0) { v = SKIM_DUP_INV; }
     }
     if (v != SKIM_DUP_UNKNOWN && f[1] && f[1][0] && !f[2]) {
       DupEntry *e = g_hash_table_lookup(q->cache, f[1]);
@@ -113,9 +114,8 @@ static void dup_drain(SkimDupQuery *q) {
       /* A colour-changing transition (green↔gray) queues for the pipeline
        * to recolour the live spot — this is how an unsolicited logbook
        * push ("just logged him") turns the label gray at once. */
-      const gboolean was_gray = e->verdict == SKIM_DUP_DUP ||
-                                e->verdict == SKIM_DUP_B4;
-      const gboolean is_gray  = v == SKIM_DUP_DUP || v == SKIM_DUP_B4;
+      const gboolean was_gray = skim_dup_verdict_gray(e->verdict);
+      const gboolean is_gray  = skim_dup_verdict_gray(v);
       if (was_gray != is_gray &&
           strlen(f[1]) < sizeof(((DupChange *)0)->call)) {
         DupChange *ch = g_new0(DupChange, 1);

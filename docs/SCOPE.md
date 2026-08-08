@@ -388,9 +388,9 @@ where relevant, a live check against a running `sdr-for-linux`.
   from the logbook — two writers of one label race (the skimmer's
   re-announce would repaint green until its cache expires). Gate
   `skimmer-dup-test` covers the push path (unsolicited datagram →
-  change queue → cache flip; 15 checks).
-- **INV verdict — contest-invalid stations must gray out like dups.
-  PRIORITY TO DO (Richard, 2026-08-08, mid-WAE).** The logbook's :2238
+  change queue → cache flip; 25 checks since the INV verdict landed).
+- **INV verdict — contest-invalid stations gray out like dups.
+  (Richard's priority 2026-08-08, mid-WAE; DONE the same day.)** The logbook's :2238
   dup service grew a FOURTH verdict on 2026-08-08 (log-for-linux commit
   `8093437`): `INV <call>` = under the ACTIVE CONTEST's rules no valid
   QSO with this station is possible at all — e.g. WAE scores only
@@ -407,10 +407,24 @@ where relevant, a live check against a running `sdr-for-linux`.
   verdict string from a NEWER logbook must keep collapsing to UNKNOWN =
   default color, never crash the parser (that tolerance is why INV can
   ship on the logbook side first). Extend gate `skimmer-dup-test`:
-  INV round-trip, INV via push, unknown-verdict tolerance. Until this
-  lands, an EU spot during WAE stays bright green and invites a QSO the
+  INV round-trip, INV via push, unknown-verdict tolerance. Without this,
+  an EU spot during WAE stays bright green and invites a QSO the
   rules score at zero — the logbook's entry row already warns in red,
   but the operator hunts from the panadapter, hence the priority.
+  Implementation (2026-08-08): `SKIM_DUP_INV` in the verdict enum; the
+  "gray" decision now has ONE truth, `skim_dup_verdict_gray()` in
+  dup_query.h — the parser's flip rule and `skim_spot_argb_for_dup`
+  both call it, so a future verdict is added in exactly two lines
+  (parse + gray-set membership) and spot ARGB, pane tint, recolour
+  pushes all follow. Unknown verdict strings were already dropped
+  before the cache (gate-proven now, not just by reading). Gate grew
+  15 → 25 checks (INV round-trip/push/cache-survival, unknown-verdict
+  answer AND push tolerance, INV colour). Live wire check the same
+  afternoon against the running logbook mid-WAE: `DL1AA → INV`,
+  `K1AA → NEW`, `OK1BR → INV`, trailing newline as documented. The
+  full visual chain (gray label on the live panadapter) is the same
+  code path DUP took through its 2026-08-01 live verification; INV
+  changes only the string→enum map and the gray set.
   Richard's request, across every app of the family).** Every app must open
   the same kind of About from its primary menu, and its strings must agree
   with what the `.desktop` entry and the AppStream metainfo already say —

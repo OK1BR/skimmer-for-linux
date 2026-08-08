@@ -54,6 +54,10 @@ static gpointer mock_serve(gpointer user) {
       g_snprintf(reply, sizeof(reply), "DUP %s\n", call);
     } else if (strcmp(call, "OK1BR") == 0) {
       g_snprintf(reply, sizeof(reply), "B4 %s\n", call);
+    } else if (strcmp(call, "DL1EU") == 0) {
+      g_snprintf(reply, sizeof(reply), "INV %s\n", call);
+    } else if (strcmp(call, "ODD1X") == 0) {
+      g_snprintf(reply, sizeof(reply), "MAYBE %s\n", call);
     } else {
       g_snprintf(reply, sizeof(reply), "NEW %s\n", call);
     }
@@ -141,12 +145,52 @@ int main(void) {
         skim_dup_query_lookup(q, "DL1ABC", 14025000, "CW", 0) ==
             SKIM_DUP_DUP);
 
+  /* INV — the contest-invalid verdict (log-for-linux 8093437, 2026-08-08):
+   * the active contest's rules score no QSO with this station at all
+   * (WAE: every EU station for an EU op). Parses like the others, grays
+   * like DUP, arrives as an answer or as an unsolicited push. */
+  check("INV round-trip",
+        skim_dup_query_lookup(q, "DL1EU", 14025000, "CW", 500) ==
+            SKIM_DUP_INV);
+  check("INV answer flip queued (DL1EU gray)",
+        skim_dup_query_take_change(q, chc, &chv) &&
+            strcmp(chc, "DL1EU") == 0 && chv == SKIM_DUP_INV);
+  check("green call before the INV push (F5ABC NEW)",
+        skim_dup_query_lookup(q, "F5ABC", 14025000, "CW", 500) ==
+            SKIM_DUP_NEW);
+  sendto(s_fd, "INV F5ABC\n", 10, 0,
+         (struct sockaddr *)&push_to, sizeof(push_to));
+  g_usleep(50 * 1000);
+  check("unsolicited INV push queued (F5ABC NEW→INV)",
+        skim_dup_query_take_change(q, chc, &chv) &&
+            strcmp(chc, "F5ABC") == 0 && chv == SKIM_DUP_INV);
+  check("INV push flipped the cache too",
+        skim_dup_query_lookup(q, "F5ABC", 14025000, "CW", 0) ==
+            SKIM_DUP_INV);
+
+  /* A verdict string this build does not know (a NEWER logbook) must
+   * collapse to UNKNOWN and never crash the parser — that tolerance is
+   * why INV could ship on the logbook side first. */
+  check("unknown verdict answer → UNKNOWN",
+        skim_dup_query_lookup(q, "ODD1X", 14025000, "CW", 120) ==
+            SKIM_DUP_UNKNOWN);
+  sendto(s_fd, "SOON F5ABC\n", 11, 0,
+         (struct sockaddr *)&push_to, sizeof(push_to));
+  g_usleep(50 * 1000);
+  check("unknown verdict push ignored (cache keeps INV)",
+        skim_dup_query_lookup(q, "F5ABC", 14025000, "CW", 0) ==
+            SKIM_DUP_INV);
+  check("no flips queued by unknown verdicts",
+        !skim_dup_query_take_change(q, chc, &chv));
+
   /* Cache: with the mock gone, fresh verdicts still answer from the TTL. */
   g_atomic_int_set(&s_run, 0);
   g_thread_join(server);
   close(s_fd);
   check("cached verdict survives the logbook closing",
         skim_dup_query_lookup(q, "9A1AA", 14025000, "CW", 50) == SKIM_DUP_DUP);
+  check("cached INV verdict survives the logbook closing",
+        skim_dup_query_lookup(q, "DL1EU", 14025000, "CW", 50) == SKIM_DUP_INV);
   check("uncached call with no listener → UNKNOWN",
         skim_dup_query_lookup(q, "F5XYZ", 14025000, "CW", 20) ==
             SKIM_DUP_UNKNOWN);
@@ -159,6 +203,8 @@ int main(void) {
   check("colour: DUP/B4 dimmed",
         skim_spot_argb_for_dup(SKIM_DUP_DUP) == SKIM_SPOT_ARGB_DUP &&
             skim_spot_argb_for_dup(SKIM_DUP_B4) == SKIM_SPOT_ARGB_DUP);
+  check("colour: INV dimmed like DUP",
+        skim_spot_argb_for_dup(SKIM_DUP_INV) == SKIM_SPOT_ARGB_DUP);
 
   printf("=== %d checks, %d failures ===\n", s_checks, s_failures);
   if (s_failures == 0) {

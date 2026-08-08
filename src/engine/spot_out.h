@@ -20,18 +20,18 @@ G_BEGIN_DECLS
 /* The colour of our spots on the radio panadapter — sent as the ARGB field
  * of every TCI SPOT. The app's decode-pane callsign highlight uses the SAME
  * constant, so a highlighted call and its panadapter label always match
- * (Richard, 2026-08-01). Calls the logbook already has (DUP in the active
- * contest, or B4 = worked some earlier time) dim to gray — the operator
- * skips them at a glance; the 180 s re-announce recolours a label whose
- * verdict changed (dedup by callsign on the radio side). */
+ * (Richard, 2026-08-01). Calls the logbook grays out (DUP in the active
+ * contest, B4 = worked some earlier time, or INV = the contest rules score
+ * no QSO with that station at all) dim to gray — the operator skips them
+ * at a glance; the 180 s re-announce recolours a label whose verdict
+ * changed (dedup by callsign on the radio side). */
 #define SKIM_SPOT_ARGB     0xFF30C060u
 #define SKIM_SPOT_ARGB_DUP 0xFF808080u
 
 /* One mapping from a logbook verdict to the spot colour — shared by the TCI
  * spot path and the app's pane highlight so they can never disagree. */
 static inline guint32 skim_spot_argb_for_dup(SkimDupVerdict v) {
-  return (v == SKIM_DUP_DUP || v == SKIM_DUP_B4) ? SKIM_SPOT_ARGB_DUP
-                                                 : SKIM_SPOT_ARGB;
+  return skim_dup_verdict_gray(v) ? SKIM_SPOT_ARGB_DUP : SKIM_SPOT_ARGB;
 }
 
 typedef struct _SkimSpotOut SkimSpotOut;
