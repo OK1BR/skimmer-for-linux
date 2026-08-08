@@ -940,8 +940,9 @@ static void rbn_apply(App *app) {
   }
 }
 
-/* Station list show/hide (the header-bar toggle next to Preferences). The
- * CW decode pane stays put and takes over the space when the list hides. */
+/* Station list show/hide (the header-bar toggle next to the primary menu).
+ * The CW decode pane stays put and takes over the space when the list
+ * hides. */
 static void on_list_toggled(GtkToggleButton *btn, gpointer user) {
   App *app = user;
   gboolean vis = gtk_toggle_button_get_active(btn);
@@ -1249,6 +1250,75 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   adw_dialog_present(dlg, GTK_WIDGET(app->window));
 }
 
+/* --- about --------------------------------------------------------------------------------
+ * The GNOME-correct About every app of the family owes its user (SCOPE,
+ * Richard 2026-08-04): the version must be findable FROM THE UI, the strings
+ * must agree with the .desktop entry and the AppStream metainfo, and
+ * vendored code is acknowledged. Field set per sdr-for-linux's About,
+ * debug_info per log-for-linux's. */
+
+static void act_about(GSimpleAction *action, GVariant *param, gpointer user) {
+  (void)action; (void)param;
+  App *app = user;
+  AdwDialog *dlg = adw_about_dialog_new();
+  AdwAboutDialog *ad = ADW_ABOUT_DIALOG(dlg);
+  adw_about_dialog_set_application_name(ad, "Skimmer for Linux");
+  /* = the GApplication id = the installed icon's file name; anything else
+   * shows a generic gear here. */
+  adw_about_dialog_set_application_icon(ad, "cz.ok1br.skimmer_for_linux");
+  adw_about_dialog_set_version(ad, SKIMMER_VERSION);
+  adw_about_dialog_set_developer_name(ad, "Richard Fakenberg, OK1BR");
+  /* Same one-liner the metainfo <summary> and the .desktop Comment carry. */
+  adw_about_dialog_set_comments(ad,
+      "Multi-channel CW skimmer and spot feeder");
+  adw_about_dialog_set_copyright(ad, "© 2026 Richard Fakenberg, OK1BR");
+  adw_about_dialog_set_license_type(ad, GTK_LICENSE_GPL_3_0);
+  adw_about_dialog_set_website(ad,
+      "https://github.com/OK1BR/skimmer-for-linux");
+  adw_about_dialog_set_issue_url(ad,
+      "https://github.com/OK1BR/skimmer-for-linux/issues");
+  char feed[48];
+  if (app->rbn) {
+    g_snprintf(feed, sizeof(feed), "port %u (%u clients)",
+               skim_rbn_feed_port(app->rbn), skim_rbn_feed_clients(app->rbn));
+  } else {
+    g_strlcpy(feed, "off", sizeof(feed));
+  }
+  char scp_note[32];
+  if (skim_callsign_dict_size() > 0) {
+    g_snprintf(scp_note, sizeof(scp_note), "%u calls",
+               (guint)skim_callsign_dict_size());
+  } else {
+    g_strlcpy(scp_note, "not loaded", sizeof(scp_note));
+  }
+  /* Versions and paths, pasteable into a bug report via the Copy button. */
+  char *dbg = g_strdup_printf(
+      "GTK %u.%u.%u, libadwaita %u.%u.%u\n"
+      "TCI: %s:40001\n"
+      "Telnet feed: %s\n"
+      "Settings: %s/skimmer-for-linux/settings.ini\n"
+      "MASTER.SCP: %s/skimmer-for-linux/master.scp (%s)\n"
+      "Decode logs: %s/skimmer-for-linux/",
+      gtk_get_major_version(), gtk_get_minor_version(),
+      gtk_get_micro_version(),
+      adw_get_major_version(), adw_get_minor_version(),
+      adw_get_micro_version(),
+      app->host, feed,
+      g_get_user_config_dir(), g_get_user_config_dir(), scp_note,
+      g_get_user_data_dir());
+  adw_about_dialog_set_debug_info(ad, dbg);
+  g_free(dbg);
+  const char *vendored[] = { "WDSP — Warren Pratt NR0V", NULL };
+  adw_about_dialog_add_acknowledgement_section(ad, "Vendored libraries",
+                                               vendored);
+  adw_dialog_present(dlg, GTK_WIDGET(app->window));
+}
+
+static void act_prefs(GSimpleAction *action, GVariant *param, gpointer user) {
+  (void)action; (void)param;
+  prefs_open(NULL, user);
+}
+
 /* --- column helpers -------------------------------------------------------------------- */
 
 typedef void (*RowToText)(const SkimStation *st, char *out, gsize n);
@@ -1467,10 +1537,29 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   adw_header_bar_set_title_widget(ADW_HEADER_BAR(header),
                                   GTK_WIDGET(app->title));
 
-  GtkWidget *prefs_btn = gtk_button_new_from_icon_name("emblem-system-symbolic");
-  gtk_widget_set_tooltip_text(prefs_btn, "Preferences");
-  g_signal_connect(prefs_btn, "clicked", G_CALLBACK(prefs_open), app);
-  adw_header_bar_pack_end(ADW_HEADER_BAR(header), prefs_btn);
+  /* Primary menu (family form, same as sdr-for-linux): Preferences moved
+   * in from the old standalone gear button; About LAST, per the GNOME HIG. */
+  {
+    GSimpleAction *pa = g_simple_action_new("preferences", NULL);
+    g_signal_connect(pa, "activate", G_CALLBACK(act_prefs), app);
+    g_action_map_add_action(G_ACTION_MAP(gtk_app), G_ACTION(pa));
+    g_object_unref(pa);
+    GSimpleAction *aa = g_simple_action_new("about", NULL);
+    g_signal_connect(aa, "activate", G_CALLBACK(act_about), app);
+    g_action_map_add_action(G_ACTION_MAP(gtk_app), G_ACTION(aa));
+    g_object_unref(aa);
+    GMenu *m = g_menu_new();
+    g_menu_append(m, "Preferences", "app.preferences");
+    g_menu_append(m, "About Skimmer for Linux", "app.about");
+    GtkWidget *menu_btn = gtk_menu_button_new();
+    gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menu_btn),
+                                  "open-menu-symbolic");
+    gtk_widget_set_tooltip_text(menu_btn, "Main menu");
+    gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(menu_btn),
+                                   G_MENU_MODEL(m));
+    g_object_unref(m);
+    adw_header_bar_pack_end(ADW_HEADER_BAR(header), menu_btn);
+  }
 
   GtkWidget *list_btn = gtk_toggle_button_new();
   gtk_button_set_icon_name(GTK_BUTTON(list_btn), "view-list-symbolic");
@@ -1594,6 +1683,19 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   g_timeout_add_seconds(3, scan_tick, app);
 }
 
+/* --version prints and exits in the LOCAL instance, before GApplication
+ * uniqueness would forward to (or disturb) a running one. On top of the
+ * About dialog, never instead (the UI rule, SCOPE 2026-08-04). */
+static gint on_local_options(GApplication *a, GVariantDict *opts,
+                             gpointer user) {
+  (void)a; (void)user;
+  if (g_variant_dict_contains(opts, "version")) {
+    g_print("skimmer-for-linux %s\n", SKIMMER_VERSION);
+    return 0;
+  }
+  return -1;                                   /* continue normal startup    */
+}
+
 int main(int argc, char **argv) {
   g_set_application_name("Skimmer for Linux");
 
@@ -1603,6 +1705,11 @@ int main(int argc, char **argv) {
    * sdr-for-linux and log-for-linux. */
   AdwApplication *app =
       adw_application_new("cz.ok1br.skimmer_for_linux", G_APPLICATION_DEFAULT_FLAGS);
+  g_application_add_main_option(G_APPLICATION(app), "version", 'v',
+                                G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE,
+                                "Print the version and exit", NULL);
+  g_signal_connect(app, "handle-local-options",
+                   G_CALLBACK(on_local_options), NULL);
   g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
 
   int status = g_application_run(G_APPLICATION(app), argc, argv);

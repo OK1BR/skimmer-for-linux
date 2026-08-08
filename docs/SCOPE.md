@@ -446,13 +446,23 @@ where relevant, a live check against a running `sdr-for-linux`.
   launched the app from the app grid must be able to see which version he
   is running without leaving it — the About dialog is that place. A CLI
   flag is welcome on top, never instead.
-  **Where this project stands: there is no About dialog and no primary
-  menu at all — the whole item is to be built.** The pieces it points at
-  do exist since v0.1.0: `data/cz.ok1br.skimmer_for_linux.{svg,desktop.in,
-  metainfo.xml}` are installed, so `application_icon` =
-  `cz.ok1br.skimmer_for_linux` resolves. `sdr-for-linux`'s About
-  (`src/gui.c`) is the family reference for the field set; take
-  `debug_info` from `log-for-linux`'s.
+  **BUILT 2026-08-08.** The header bar's standalone gear button became the
+  family primary menu (hamburger, `open-menu-symbolic`, packed where the
+  gear sat): Preferences, then "About Skimmer for Linux" LAST — the same
+  form as sdr-for-linux, whose About (`src/gui.c`) supplied the field set;
+  `debug_info` follows log-for-linux's (GTK + libadwaita runtime versions,
+  TCI host, telnet-feed state, settings/MASTER.SCP/decode-log paths —
+  pasteable via the dialog's Copy button). Comments line = the metainfo
+  `<summary>` = the `.desktop` Comment, verbatim; acknowledgement section
+  credits vendored WDSP. On top (never instead): `--version` /`-v` on the
+  CLI, answered in `handle-local-options` so it prints from the LOCAL
+  process and exits — it can never activate (raise) a running instance.
+  Verified: build + all 10 gates green, `--version` prints 0.1.0 while
+  the live instance ran undisturbed. The dialog itself is code-true to
+  the family reference but NOT yet seen on screen — both family apps were
+  live mid-WAE, and a second GApplication instance would either forward
+  to or visually poke the operator's session. Look pending after the
+  contest (the running binary is the installed pre-About one anyway).
 - **The Website field in the repo header. TO DO (written down 2026-08-04 at
   Richard's request, across every one of his projects).** Every OK1BR repo
   has that field empty while its README already points at

@@ -574,6 +574,17 @@ resends the stored value instead of recomputing. Gate `skimmer-spot-test`
 21 → 26 checks (boundary jitter over four re-announces = ONE value, QSY
 re-quantises, grid change re-quantises, Exact follows raw) — and the new
 check was run against the pre-fix code to confirm it goes red.
+**About dialog + primary menu + --version (built 2026-08-08).** The gear
+button became the family hamburger menu (Preferences, then "About Skimmer
+for Linux" last, GNOME HIG); AdwAboutDialog field set per sdr-for-linux,
+debug_info per log-for-linux (GTK/adwaita versions, TCI host, feed state,
+settings/MASTER.SCP/decode-log paths); comments = metainfo summary =
+desktop Comment. CLI `--version`/-v answers in handle-local-options —
+prints locally and exits, can never raise a running instance (verified
+live: printed 0.1.0 while Richard's instance ran mid-WAE, untouched).
+10 gates green. NOT yet seen on screen — both family apps were live in
+the contest; visual look + a menu click pending after WAE (his running
+binary is the installed pre-About build anyway).
 
 ## Layout
 
