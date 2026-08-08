@@ -25,6 +25,8 @@ typedef struct {
   gint64 at;
   char   mode[8];                     /* last emission, for recolour resend  */
   double snr_db;
+  double out_hz;                      /* the REPORTED value on the label     */
+  gint   out_rh;                      /* grid it was quantised to            */
 } SpotMemo;
 
 struct _SkimSpotOut {
@@ -129,8 +131,22 @@ gboolean skim_spot_out_emit(SkimSpotOut *s, const char *call, const char *mode,
   }
   m->freq_hz = freq_hz;                        /* raw — QSY policy input     */
   const gint rh = g_atomic_int_get(&s->round_hz);
-  const double out_hz =
-      rh > 1 ? round(freq_hz / rh) * rh : freq_hz;
+  /* Hysteresis on the REPORTED value (grid only; Exact follows the raw
+   * estimate): a re-announce re-sends the value already on the label unless
+   * the raw estimate left the reported cell clearly — ¾ of a step, so a
+   * few-Hz jitter across a grid boundary can never alternate the label.
+   * A grid change (out_rh differs) re-quantises at once. Principle from
+   * s53zo's DeepCW fork (EMA vs reported frequency); no code copied. */
+  double out_hz;
+  if (rh > 1) {
+    out_hz = (m->out_rh == rh && fabs(freq_hz - m->out_hz) <= 0.75 * rh)
+                 ? m->out_hz
+                 : round(freq_hz / rh) * rh;
+  } else {
+    out_hz = freq_hz;
+  }
+  m->out_hz  = out_hz;
+  m->out_rh  = rh;
   m->at      = now;
   g_strlcpy(m->mode, mode ? mode : "CW", sizeof(m->mode));
   m->snr_db  = snr_db;
@@ -158,9 +174,9 @@ void skim_spot_out_recolour(SkimSpotOut *s, const char *call,
    * spots ~10 min) — repainting a long-gone station would re-plant it. */
   if (!m || so_now(s) - m->at > 10 * 60 * (gint64)G_USEC_PER_SEC)
     return;
-  const gint rh = g_atomic_int_get(&s->round_hz);
-  const double out_hz =
-      rh > 1 ? round(m->freq_hz / rh) * rh : m->freq_hz;
+  /* Resend the STORED reported value — re-quantising from the raw memo
+   * here would undo the emit-side hysteresis on every repaint. */
+  const double out_hz = m->out_hz;
   char text[48];
   g_snprintf(text, sizeof(text), "%.0f dB", m->snr_db);
   /* A refresh of an existing label, not a new spot: no dedup-memo touch, no

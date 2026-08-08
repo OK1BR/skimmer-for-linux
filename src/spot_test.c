@@ -321,11 +321,17 @@ static double spot_freq(const char *call) {
 
 /* --- unit sink for spot_out ------------------------------------------------------- */
 
-static int  u_spots;
+static int    u_spots;
+static double u_hz[64];              /* reported frequency per emission      */
 static void u_sink(const char *call, const char *mode, double hz, double snr,
                    double speed, gpointer user) {
-  (void)call; (void)mode; (void)hz; (void)snr; (void)speed; (void)user;
+  (void)call; (void)mode; (void)snr; (void)speed; (void)user;
+  if (u_spots < 64) { u_hz[u_spots] = hz; }
   u_spots++;
+}
+
+static gint64 u_now(gpointer user) {
+  return *(gint64 *)user;
 }
 
 int main(void) {
@@ -386,6 +392,46 @@ int main(void) {
     }
     check("rate limiter caps a flood (≤3 of 10)", sent <= 3);
     check("emitted counter matches", skim_spot_out_count(so) == (guint64)(2 + sent));
+    skim_spot_out_free(so);
+  }
+
+  /* -- reported-frequency hysteresis (grid on) ----------------------------------- */
+  {
+    /* A station parked ON a grid-cell edge: without hysteresis every
+     * re-announce re-quantises the jittering estimate and the label
+     * alternates a whole step although the station never moved. */
+    static gint64 t_us;
+    t_us = G_USEC_PER_SEC;
+    SkimSpotOut *so = skim_spot_out_new(NULL);
+    skim_spot_out_set_sink(so, u_sink, NULL);
+    skim_spot_out_set_policy(so, 180, 30.0, 100);
+    skim_spot_out_set_clock(so, u_now, &t_us);
+    skim_spot_out_set_round_hz(so, 10);       /* cells …20/…30, edge at …25 */
+    skim_spot_out_emit(so, "OK1BR", "CW", 7032023, 25, 20);
+    check("grid: first emission quantises", u_hz[u_spots - 1] == 7032020.0);
+    const double jitter[] = { 7032027, 7032024, 7032026, 7032023 };
+    gboolean stable = TRUE;
+    for (guint i = 0; i < G_N_ELEMENTS(jitter); i++) {
+      t_us += 181 * (gint64)G_USEC_PER_SEC;   /* due for a re-announce      */
+      stable = stable &&
+               skim_spot_out_emit(so, "OK1BR", "CW", jitter[i], 25, 20) &&
+               u_hz[u_spots - 1] == 7032020.0;
+    }
+    check("re-announces jittering across the edge keep ONE reported value",
+          stable);
+    check("a real QSY re-quantises at once",
+          skim_spot_out_emit(so, "OK1BR", "CW", 7032063, 25, 20) &&
+              u_hz[u_spots - 1] == 7032060.0);
+    skim_spot_out_set_round_hz(so, 50);
+    t_us += 181 * (gint64)G_USEC_PER_SEC;
+    check("a grid change re-quantises on the next re-announce",
+          skim_spot_out_emit(so, "OK1BR", "CW", 7032063, 25, 20) &&
+              u_hz[u_spots - 1] == 7032050.0);
+    skim_spot_out_set_round_hz(so, 0);
+    t_us += 181 * (gint64)G_USEC_PER_SEC;
+    check("Exact (grid off) follows the raw estimate, no hysteresis",
+          skim_spot_out_emit(so, "OK1BR", "CW", 7032063, 25, 20) &&
+              u_hz[u_spots - 1] == 7032063.0);
     skim_spot_out_free(so);
   }
 

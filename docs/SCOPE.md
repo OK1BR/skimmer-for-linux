@@ -461,8 +461,8 @@ where relevant, a live check against a running `sdr-for-linux`.
   `gh repo edit OK1BR/skimmer-for-linux --homepage https://rifak.cz` (or the
   web UI). Whoever next works this project sets it; the same note is in the
   scope of every sibling.
-- **Hysteresis on the reported spot frequency. TO DO (written down
-  2026-08-07.)** `skim_spot_out_emit()` quantises with no memory:
+- **Hysteresis on the reported spot frequency. (Written down 2026-08-07;
+  DONE 2026-08-08.)** `skim_spot_out_emit()` quantised with no memory:
   `out_hz = round(freq_hz / rh) * rh` (`src/engine/spot_out.c`). A station
   whose frequency estimate wanders across a grid boundary therefore gets a
   DIFFERENT reported frequency on every re-announce (180 s) although it never
@@ -489,6 +489,18 @@ where relevant, a live check against a running `sdr-for-linux`.
   separate *reported* one that is updated only past half a bin (widths past
   0.75 bin). **Principle only — neither repository carries any licence, so
   none of their code may be copied into this GPLv3 tree.**
+  Implementation (2026-08-08): `SpotMemo` carries `out_hz` + `out_rh` (the
+  grid it was quantised to); emit re-sends the stored value unless the raw
+  estimate sits > ¾ step from it (the "half a step plus a small margin",
+  matching the fork's 0.75-bin figure) OR the grid setting changed
+  (`out_rh` differs — a preference flip re-quantises on the next
+  re-announce instead of leaving the label on the old grid forever);
+  `Exact` is untouched (follows the estimate, no memory). Recolour resends
+  the stored `out_hz`. Gate `skimmer-spot-test` +5 checks (26 total):
+  boundary-parked station with ±few Hz jitter over four 181 s
+  re-announces keeps ONE reported value, a real QSY re-quantises at once,
+  a grid change re-quantises, Exact follows raw; verified the new check
+  FAILS on the pre-fix code (the alternation is what it catches).
 - **Later — RTTY backend** (FSK 45.45 bd, Baudot/ITA2), **PSK backend**
   (BPSK31 + BPSK63, Costas loop, varicode), and an optional **own-panorama
   waterfall** (port `waterfall.c`).

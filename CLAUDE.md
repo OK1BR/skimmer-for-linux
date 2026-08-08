@@ -562,6 +562,18 @@ the running logbook mid-WAE: DL1AA→INV, K1AA→NEW, OK1BR→INV. The visual
 chain (gray label on the live panadapter) rides the exact path DUP
 live-verified 2026-08-01; a live INV look during a contest is welcome but
 nothing new executes there.
+**Reported-frequency hysteresis (offline-proven 2026-08-08).** With a
+frequency grid on (Preferences → Frequency step 10/20/50/100; default
+Exact untouched), `spot_out` re-quantised from the raw estimate on every
+re-announce — a station parked on a cell edge alternated a whole grid step
+on the label and in the telnet feed. Now `SpotMemo` keeps the reported
+`out_hz` + its grid `out_rh`; a re-announce re-sends the stored value
+unless the raw sits > ¾ step away (s53zo/DeepCW principle, no code —
+their trees carry no licence) or the grid setting changed; recolour
+resends the stored value instead of recomputing. Gate `skimmer-spot-test`
+21 → 26 checks (boundary jitter over four re-announces = ONE value, QSY
+re-quantises, grid change re-quantises, Exact follows raw) — and the new
+check was run against the pre-fix code to confirm it goes red.
 
 ## Layout
 
