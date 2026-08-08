@@ -389,7 +389,28 @@ where relevant, a live check against a running `sdr-for-linux`.
   re-announce would repaint green until its cache expires). Gate
   `skimmer-dup-test` covers the push path (unsolicited datagram →
   change queue → cache flip; 15 checks).
-- **A GNOME-correct About dialog. TO DO (written down 2026-08-04 at
+- **INV verdict — contest-invalid stations must gray out like dups.
+  PRIORITY TO DO (Richard, 2026-08-08, mid-WAE).** The logbook's :2238
+  dup service grew a FOURTH verdict on 2026-08-08 (log-for-linux commit
+  `8093437`): `INV <call>` = under the ACTIVE CONTEST's rules no valid
+  QSO with this station is possible at all — e.g. WAE scores only
+  EU↔non-EU, so for OK1BR every EU station answers INV; EUHFC is the
+  inverse (non-EU → INV). The logbook resolves country/continent from
+  cty.dat and knows each contest's verified rule; the skimmer must NOT
+  re-derive any of that (the UDP answer stays the whole contract — same
+  reasoning as "do not read the logbook's SQLite"). Skimmer work is
+  deliberately small: treat `INV` exactly like the existing worked/dup
+  path everywhere a verdict lands — parser (query answers AND
+  unsolicited pushes may both carry it), TTL cache, `SPOT:` ARGB via
+  `skim_spot_argb_for_dup` (gray, same as DUP — the operator meaning is
+  identical: do not call), decode-pane underline tint. An unknown
+  verdict string from a NEWER logbook must keep collapsing to UNKNOWN =
+  default color, never crash the parser (that tolerance is why INV can
+  ship on the logbook side first). Extend gate `skimmer-dup-test`:
+  INV round-trip, INV via push, unknown-verdict tolerance. Until this
+  lands, an EU spot during WAE stays bright green and invites a QSO the
+  rules score at zero — the logbook's entry row already warns in red,
+  but the operator hunts from the panadapter, hence the priority.
   Richard's request, across every app of the family).** Every app must open
   the same kind of About from its primary menu, and its strings must agree
   with what the `.desktop` entry and the AppStream metainfo already say —
