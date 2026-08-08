@@ -463,14 +463,15 @@ where relevant, a live check against a running `sdr-for-linux`.
   live mid-WAE, and a second GApplication instance would either forward
   to or visually poke the operator's session. Look pending after the
   contest (the running binary is the installed pre-About one anyway).
-- **The Website field in the repo header. TO DO (written down 2026-08-04 at
-  Richard's request, across every one of his projects).** Every OK1BR repo
-  has that field empty while its README already points at
-  [rifak.cz](https://rifak.cz) — so the GitHub sidebar, which is the first
-  place a visitor looks, links nowhere. It is repo metadata, not code:
-  `gh repo edit OK1BR/skimmer-for-linux --homepage https://rifak.cz` (or the
-  web UI). Whoever next works this project sets it; the same note is in the
-  scope of every sibling.
+- **The Website field in the repo header. (Written down 2026-08-04 at
+  Richard's request, across every one of his projects; DONE for THIS repo
+  2026-08-08.)** Every OK1BR repo had that field empty while its README
+  already points at [rifak.cz](https://rifak.cz) — so the GitHub sidebar,
+  the first place a visitor looks, linked nowhere. Set via
+  `gh repo edit OK1BR/skimmer-for-linux --homepage https://rifak.cz` and
+  verified by reading it back (`gh repo view --json homepageUrl`). The
+  sibling repos keep their own copy of this note — each gets set when
+  someone works that project.
 - **Hysteresis on the reported spot frequency. (Written down 2026-08-07;
   DONE 2026-08-08.)** `skim_spot_out_emit()` quantised with no memory:
   `out_hz = round(freq_hz / rh) * rh` (`src/engine/spot_out.c`). A station
