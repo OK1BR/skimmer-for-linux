@@ -50,6 +50,18 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.2.0" date="2026-08-09">
+      <description>
+        <p>
+          Contest awareness and polish: stations the active contest scores no
+          points for gray out like dups (INV verdict from log-for-linux, seen
+          live mid-WAE), reported spot frequencies hold steady across a grid
+          cell boundary instead of flickering a whole step, and the app gained
+          its About dialog, a primary menu and a --version flag that never
+          disturbs a running instance.
+        </p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-08-04">
       <description>
         <p>
