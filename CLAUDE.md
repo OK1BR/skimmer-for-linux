@@ -585,6 +585,30 @@ live: printed 0.1.0 while Richard's instance ran mid-WAE, untouched).
 10 gates green. NOT yet seen on screen — both family apps were live in
 the contest; visual look + a menu click pending after WAE (his running
 binary is the installed pre-About build anyway).
+**AUR: the package is published (2026-08-12).** The git/SSH backend at
+`ssh://aur@aur.archlinux.org` came back from the maintenance that had
+blocked the v0.2.0 publication on 2026-08-09 (web + RPC had stayed up
+throughout — only git/SSH was down). A fresh `makepkg` from the
+published tag tarball went first: the recorded sha256 matches, `check()`
+= 10 gates green, `skimmer-for-linux-0.2.0-1-x86_64.pkg.tar.zst` built,
+`namcap PKGBUILD` clean (the package's three warnings are informative —
+implicit glibc + hicolor-icon-theme, plus an unused `libfftw3.so.3`: the
+binary links both fftw flavours and only calls the single-precision one,
+and the `fftw` package provides both, so the dependency is right). Then
+`PKGBUILD` + `.SRCINFO` (`makepkg --printsrcinfo`) went out as an
+"Initial import" commit on master of
+`ssh://aur@aur.archlinux.org/skimmer-for-linux.git` (account ok1br, key
+`~/.ssh/aur_ed25519` — the flow sdr-for-linux took). Verified after the
+push: the package page answers 200 with "skimmer-for-linux 0.2.0-1",
+cgit shows the import commit, `list-repos` lists it beside
+sdr-for-linux; the RPC info/search index lags the push by minutes, so an
+empty RPC answer right after a push means nothing. **Next release:** bump
+`pkgver`/`_pkgtag`, tag FIRST and take the tarball's sha256 from the
+published tag (the two-step flow), regenerate `.SRCINFO`, commit + push
+to the AUR remote — `packaging/PKGBUILD` in this repo stays the single
+source, the AUR clone is a copy of it. README's Install section now
+names the AUR package (`paru -S skimmer-for-linux`) instead of the old
+"AUR package to follow".
 
 ## Layout
 

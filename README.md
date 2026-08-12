@@ -224,9 +224,13 @@ packages on the [Releases page](https://github.com/OK1BR/skimmer-for-linux/relea
   run. Everything bundled, nothing to install.
 - **Ubuntu 24.04+ / Debian 13+**: `sudo apt install ./skimmer-for-linux_*.deb`
 - **Fedora 40+**: `sudo dnf install ./skimmer-for-linux-*.rpm`
-- **Arch Linux**: `makepkg -si` in `packaging/` of a repo clone — the
-  [PKGBUILD](packaging/PKGBUILD) builds the tagged release tarball (AUR
-  package to follow)
+- **Arch Linux (AUR)** —
+  [`skimmer-for-linux`](https://aur.archlinux.org/packages/skimmer-for-linux):
+  `paru -S skimmer-for-linux` (or `yay -S skimmer-for-linux`). Without a
+  helper: `git clone https://aur.archlinux.org/skimmer-for-linux.git &&
+  cd skimmer-for-linux && makepkg -si`. The same recipe lives in this repo
+  as [`packaging/PKGBUILD`](packaging/PKGBUILD) — it builds the tagged
+  release tarball and runs the ten gates in `check()` before packaging.
 
 Both distro packages are install-tested in clean containers before they are
 attached to a release.
