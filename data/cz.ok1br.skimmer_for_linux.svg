@@ -1,91 +1,17 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
-  <!-- Skimmer for Linux application icon: several carriers standing in one
-       band segment (the cyan streaks, as on the sdr-for-linux panadapter)
-       and the Morse each of them decodes into, in the app's own spot green.
-       Blue goes in, green comes out — many channels at once, which is the
-       whole point of a skimmer. The marks are deliberately generic rhythm
-       rather than a real callsign: at 32 px a literal one is unreadable and
-       a wrong one would be worse. Same plate, gradients and palette as the
-       sdr-for-linux and log-for-linux icons. -->
-  <defs>
-    <clipPath id="plate">
-      <rect x="8" y="8" width="112" height="112" rx="26"/>
-    </clipPath>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#232833"/>
-      <stop offset="1" stop-color="#0c0e13"/>
-    </linearGradient>
-    <linearGradient id="wf" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#123a5e"/>
-      <stop offset="1" stop-color="#0a1626"/>
-    </linearGradient>
-    <linearGradient id="streak" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#bdf0ff" stop-opacity="0.95"/>
-      <stop offset="1" stop-color="#2f9fd8" stop-opacity="0.55"/>
-    </linearGradient>
-    <linearGradient id="mark" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#5ce08a"/>
-      <stop offset="1" stop-color="#30c060"/>
-    </linearGradient>
-    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
-      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
-    </linearGradient>
-  </defs>
-
-  <g clip-path="url(#plate)">
-    <rect x="8" y="8" width="112" height="112" fill="url(#bg)"/>
-
-    <!-- Four channels copying at once. No grid up here on purpose: ruled
-         lanes would read as a table (that is the log-for-linux icon), and
-         these are Morse runs — ragged starts, two element lengths, equal
-         tight gaps. -->
-    <g fill="url(#mark)">
-      <g>
-        <rect x="18" y="22" width="7"  height="7" rx="3.5"/>
-        <rect x="30" y="22" width="19" height="7" rx="3.5"/>
-        <rect x="54" y="22" width="7"  height="7" rx="3.5"/>
-        <rect x="66" y="22" width="7"  height="7" rx="3.5"/>
-        <rect x="78" y="22" width="19" height="7" rx="3.5"/>
-      </g>
-      <g opacity="0.78">
-        <rect x="28" y="38" width="19" height="7" rx="3.5"/>
-        <rect x="52" y="38" width="7"  height="7" rx="3.5"/>
-        <rect x="64" y="38" width="19" height="7" rx="3.5"/>
-        <rect x="88" y="38" width="19" height="7" rx="3.5"/>
-      </g>
-      <g opacity="0.55">
-        <rect x="14" y="54" width="7"  height="7" rx="3.5"/>
-        <rect x="26" y="54" width="7"  height="7" rx="3.5"/>
-        <rect x="38" y="54" width="19" height="7" rx="3.5"/>
-        <rect x="62" y="54" width="7"  height="7" rx="3.5"/>
-      </g>
-      <g opacity="0.34">
-        <rect x="36" y="70" width="19" height="7" rx="3.5"/>
-        <rect x="60" y="70" width="7"  height="7" rx="3.5"/>
-        <rect x="72" y="70" width="7"  height="7" rx="3.5"/>
-        <rect x="84" y="70" width="19" height="7" rx="3.5"/>
-      </g>
-    </g>
-
-    <!-- the segment itself: carriers standing in the waterfall -->
-    <rect x="8" y="84" width="112" height="36" fill="url(#wf)"/>
-    <g>
-      <rect x="27" y="84" width="6"  height="36" fill="url(#streak)" opacity="0.85"/>
-      <rect x="49" y="84" width="10" height="36" fill="url(#streak)"/>
-      <rect x="71" y="84" width="5"  height="36" fill="url(#streak)" opacity="0.60"/>
-      <rect x="93" y="84" width="7"  height="36" fill="url(#streak)" opacity="0.75"/>
-      <rect x="110" y="84" width="4" height="36" fill="url(#streak)" opacity="0.35"/>
-      <rect x="14" y="84" width="4"  height="36" fill="url(#streak)" opacity="0.30"/>
-    </g>
-    <rect x="8" y="83" width="112" height="1.5" fill="#ffffff" fill-opacity="0.12"/>
-
-    <!-- top gloss -->
-    <rect x="8" y="8" width="112" height="40" fill="url(#gloss)"/>
-  </g>
-
-  <!-- plate edge -->
-  <rect x="8.5" y="8.5" width="111" height="111" rx="25.5" fill="none"
-        stroke="#ffffff" stroke-opacity="0.08"/>
+<svg width="64" height="64" version="1.1" xmlns="http://www.w3.org/2000/svg">
+ <!-- Skimmer for Linux — Papirus-style icon: dark plate, CW morse rows.
+      Construction and palette follow the Papirus icon set conventions. -->
+ <rect x="6" y="8" width="52" height="48" rx="3.319149" ry="3" style="opacity:.2"/>
+ <rect x="6" y="7" width="52" height="48" rx="3.319149" ry="3" style="fill:#4f4f4f"/>
+ <g transform="translate(0 1)" style="fill:none;stroke-linecap:round;stroke-width:4;stroke:#000000;opacity:.2">
+  <path d="m13 20h6m6 0h0m6 0h8m6 0h6"/>
+  <path d="m13 31h0m6 0h8m6 0h0m6 0h8m6 0h8"/>
+  <path d="m13 42h8m6 0h0m6 0h0m6 0h10"/>
+ </g>
+ <g style="fill:none;stroke-linecap:round;stroke-width:4;stroke:#4caf50">
+  <path d="m13 20h6m6 0h0m6 0h8m6 0h6"/>
+  <path d="m13 31h0m6 0h8m6 0h0m6 0h8m6 0h8"/>
+  <path d="m13 42h8m6 0h0m6 0h0m6 0h10"/>
+ </g>
+ <path d="m9.3183594 7c-1.8388086 0-3.3183594 1.338-3.3183594 3v1c0-1.662 1.4795508-3 3.3183594-3h45.363282c1.838808 0 3.318359 1.338 3.318359 3v-1c0-1.662-1.479551-3-3.318359-3h-45.363282z" style="fill:#ffffff;opacity:.1"/>
 </svg>
