@@ -17,6 +17,8 @@ configure_file(
 
 install_data('cz.ok1br.skimmer_for_linux.svg',
   install_dir : get_option('datadir') / 'icons' / 'hicolor' / 'scalable' / 'apps')
+install_data('cz.ok1br.skimmer_for_linux-symbolic.svg',
+  install_dir : get_option('datadir') / 'icons' / 'hicolor' / 'symbolic' / 'apps')
 install_data('cz.ok1br.skimmer_for_linux.metainfo.xml',
   install_dir : get_option('datadir') / 'metainfo')
 

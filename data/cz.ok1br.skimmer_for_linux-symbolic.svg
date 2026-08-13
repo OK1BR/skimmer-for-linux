@@ -1,0 +1,8 @@
+<svg width="16" height="16" version="1.1" xmlns="http://www.w3.org/2000/svg">
+ <!-- Skimmer for Linux — symbolic: CW morse rows -->
+ <g style="fill:none;stroke-linecap:round;stroke-width:2;stroke:#2e3436">
+  <path d="m2 3h5m4 0h0"/>
+  <path d="m2 8h0m4 0h6"/>
+  <path d="m2 13h6m4 0h0"/>
+ </g>
+</svg>
