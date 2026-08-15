@@ -94,16 +94,22 @@ int main(int argc, char **argv) {
                                 "master.scp", NULL);
   char *dlog = g_strdup_printf("%s.decodes.log", path);
   remove(dlog);                        /* fresh log — runs must diff cleanly  */
+  /* SKIM_MODE=rtty replays through the RTTY backend + wide bank (the same
+   * config path the app's Mode preference takes); default CW. */
+  const char *menv = g_getenv("SKIM_MODE");
+  const gboolean rtty = menv && g_ascii_strcasecmp(menv, "rtty") == 0;
   SkimPipelineConfig cfg = {
     .host = NULL,
     .port = 0,
     .iq_rate = 0,
-    .chan_bw_hz = 125.0,
+    .mode = rtty ? SKIM_PIPELINE_MODE_RTTY : SKIM_PIPELINE_MODE_CW,
+    .chan_bw_hz = 0,                   /* mode default: 125 Hz CW, 250 RTTY  */
     .dict_path = g_file_test(dict, G_FILE_TEST_EXISTS) ? dict : NULL,
     .decode_log_path = dlog,
   };
-  printf("=== skimmer-replay %s — %.0f Hz, centre %.0f Hz, dict %s ===\n",
-         path, rate, center, cfg.dict_path ? "yes" : "NO");
+  printf("=== skimmer-replay %s — %.0f Hz, centre %.0f Hz, %s, dict %s ===\n",
+         path, rate, center, rtty ? "RTTY" : "CW",
+         cfg.dict_path ? "yes" : "NO");
 
   SkimPipeline *p = skim_pipeline_new(&cfg);
   g_free(dict);
@@ -141,7 +147,7 @@ int main(int argc, char **argv) {
   while (g_hash_table_iter_next(&it, &key, &val)) { g_ptr_array_add(rows, val); }
   g_ptr_array_sort(rows, by_freq);
   printf("\n%-12s %10s %5s %5s %7s %6s %3s\n",
-         "call", "kHz", "wpm", "dB", "reports", "score", "cq");
+         "call", "kHz", rtty ? "bd" : "wpm", "dB", "reports", "score", "cq");
   for (guint i = 0; i < rows->len; i++) {
     const SkimStation *st = g_ptr_array_index(rows, i);
     char khz[G_ASCII_DTOSTR_BUF_SIZE];
