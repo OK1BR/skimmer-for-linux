@@ -512,9 +512,42 @@ where relevant, a live check against a running `sdr-for-linux`.
   re-announces keeps ONE reported value, a real QSY re-quantises at once,
   a grid change re-quantises, Exact follows raw; verified the new check
   FAILS on the pre-fix code (the alternation is what it catches).
-- **Later — RTTY backend** (FSK 45.45 bd, Baudot/ITA2), **PSK backend**
-  (BPSK31 + BPSK63, Costas loop, varicode), and an optional **own-panorama
-  waterfall** (port `waterfall.c`).
+- **M7 — RTTY backend. IMPLEMENTED (offline gates 2026-08-15, mid-contest;
+  live validation pending).** `decode_rtty.c` implements `decode.h` for
+  45.45 Bd / 170 Hz-shift Baudot: a Hann-periodogram pair finder (the WEAKER
+  tone scores, so a lone carrier can never acquire; sub-bin centre from
+  floor-subtracted tone centroids) → two NCOs riding the tracked centre
+  ±85 Hz into one-bit moving-sum matched filters with per-tone peak
+  normalisation (ATC — a mark faded 10 dB below the space still slices) →
+  TWO start-bit-anchored UARTs on y and −y (every character re-syncs on its
+  own start edge; whichever polarity sustains valid framing is elected, so
+  reversed signals copy) → ITA2 letters + US-TTY figures, unshift-on-space.
+  Layered squelch, each layer gate-measured: pair above the floor AND
+  mark/space envelope ANTI-correlation (true FSK −0.8…−1.0, two unrelated
+  carriers 170 Hz apart hover at 0; open < −0.35, close > −0.15, moments
+  primed neutral at acquire) AND valid-frame EMA (0.55/0.35) AND a fast
+  per-char presence gate (τ 60 ms) covering the ~2 s between a transmitter
+  stopping and the slow periodogram release, plus a 0.7 s post-acquisition
+  settle embargo. Chars framed while the squelch proves are buffered and
+  flushed on open — over heads are not eaten. The channelizer grew
+  `skim_channelizer_new_ex(rate, spacing, passband, taps)`: RTTY needs a
+  passband ≥ 85 + spacing/2 so BOTH tones of a station anywhere between
+  channel centres land in one channel — the RTTY bank is 250 Hz spacing,
+  ±225 Hz cutoff, K = 16 (the critical +415 Hz alias onto the −85 Hz space
+  tone measures −124 dBc). Pipeline: `SkimPipelineConfig.mode` picks
+  backend, bank geometry and the mode string on stations/spots/dup queries;
+  the tone splitter/focus env vars are CW-only (an FSK pair IS two carriers
+  to the splitter). App: Preferences → Decoding → Mode (CW/RTTY, persisted
+  `[decode] mode`, change reconnects the engine), speed column and tuned
+  header show Bd, About debug_info carries the mode. Gates:
+  `skimmer-rtty-test` (25 checks: hardcoded ITA2 bit vectors as the
+  independent table witness, offsets, figures/UOS, reversed polarity, AWGN,
+  QSB, selective fade, squelch on noise/keyed-CW/two-carrier, worst-case
+  straddler through the real wide bank, and the WHOLE offline pipeline in
+  RTTY mode — two CQing stations tabled exactly, mode RTTY, ±4 Hz, no
+  phantoms); `skimmer-chan-test` 18 → 25. 11 gates total.
+- **Later — PSK backend** (BPSK31 + BPSK63, Costas loop, varicode) and an
+  optional **own-panorama waterfall** (port `waterfall.c`).
 
 ## Safety / etiquette
 

@@ -79,6 +79,9 @@ typedef struct {
   gboolean        cq_only;       /* spot only CALLING stations (persisted)    */
   guint           spot_round;    /* outgoing spot freq grid Hz, 0=exact
                                   * (persisted; SDC-style spot accuracy)      */
+  guint           dec_mode;      /* 0 = CW, 1 = RTTY (persisted [decode]) —
+                                  * picks the engine backend + bank geometry;
+                                  * a change reconnects the pipeline          */
   SkimRbnFeed    *rbn;           /* RBN telnet server — app-owned so
                                   * aggregator sessions ride out reconnects   */
   gboolean        rbn_enabled;   /* persisted [rbn]                           */
@@ -94,6 +97,7 @@ typedef struct {
                                   * can never disagree                        */
   double          tuned_slot_hz; /* its pinned frequency (slot key)           */
   GListStore     *stations;      /* of SkimRow                                */
+  GtkColumnViewColumn *speed_col; /* header follows the mode (WPM / Bd)       */
   GHashTable     *row_by_call;   /* call → SkimRow* (owns a ref) — O(1) event
                                   * application; the per-event store scan
                                   * pegged the UI thread (2026-08-01)         */
@@ -139,8 +143,9 @@ typedef struct {
 static void tuned_label_update(App *app, const SkimStation *st) {
   char s[128];
   if (st) {
-    g_snprintf(s, sizeof(s), "%s · %.0f WPM · %.0f dB",
-               st->call, st->speed, st->snr_db);
+    g_snprintf(s, sizeof(s), "%s · %.0f %s · %.0f dB",
+               st->call, st->speed,
+               g_strcmp0(st->mode, "RTTY") == 0 ? "Bd" : "WPM", st->snr_db);
   } else {
     g_strlcpy(s, "—", sizeof(s));
   }
@@ -876,6 +881,20 @@ static guint settings_load_spot_round(void) {
   return v;
 }
 
+static guint settings_load_mode(void) {
+  char *path = settings_file();
+  GKeyFile *kf = g_key_file_new();
+  guint v = 0;                                 /* CW by default              */
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
+    char *m = g_key_file_get_string(kf, "decode", "mode", NULL);
+    if (m && g_ascii_strcasecmp(m, "rtty") == 0) { v = 1; }
+    g_free(m);
+  }
+  g_key_file_free(kf);
+  g_free(path);
+  return v;
+}
+
 static void settings_load_rbn(App *app) {
   char *path = settings_file();
   GKeyFile *kf = g_key_file_new();
@@ -904,6 +923,7 @@ static void settings_save(const App *app) {
   GKeyFile *kf = g_key_file_new();
   g_key_file_load_from_file(kf, path, G_KEY_FILE_KEEP_COMMENTS, NULL);
   g_key_file_set_string(kf, "tci", "host", app->host);
+  g_key_file_set_string(kf, "decode", "mode", app->dec_mode ? "rtty" : "cw");
   g_key_file_set_boolean(kf, "spots", "cq_only", app->cq_only);
   g_key_file_set_integer(kf, "spots", "round_hz", (gint)app->spot_round);
   g_key_file_set_boolean(kf, "rbn", "enabled", app->rbn_enabled);
@@ -1043,7 +1063,8 @@ static void probe_done(GObject *src, GAsyncResult *res, gpointer user) {
     .host = app->host,
     .port = 40001,
     .iq_rate = 192000,
-    .chan_bw_hz = 125.0,
+    .mode = app->dec_mode ? SKIM_PIPELINE_MODE_RTTY : SKIM_PIPELINE_MODE_CW,
+    .chan_bw_hz = 0,                           /* mode default: 125/250 Hz   */
     .dict_path = g_file_test(dict, G_FILE_TEST_EXISTS) ? dict : NULL,
     .decode_log_path = dlog,
     .rbn = app->rbn,                           /* NULL when the feed is off  */
@@ -1081,9 +1102,18 @@ static gboolean scan_tick(gpointer data) {
 
 /* --- preferences -------------------------------------------------------------------------- */
 
+/* The station list's speed column: WPM in CW, Bd in RTTY. */
+static void speed_col_retitle(App *app) {
+  if (app->speed_col) {
+    gtk_column_view_column_set_title(app->speed_col,
+                                     app->dec_mode ? "Bd" : "WPM");
+  }
+}
+
 static void prefs_closed(AdwDialog *dlg, gpointer user) {
   App *app = user;
   GtkWidget *row  = g_object_get_data(G_OBJECT(dlg), "host-row");
+  GtkWidget *mrow = g_object_get_data(G_OBJECT(dlg), "mode-row");
   GtkWidget *sw   = g_object_get_data(G_OBJECT(dlg), "cq-row");
   GtkWidget *qrow = g_object_get_data(G_OBJECT(dlg), "round-row");
   GtkWidget *frow = g_object_get_data(G_OBJECT(dlg), "font-row");
@@ -1101,7 +1131,9 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   gboolean rbn_enabled = adw_switch_row_get_active(ADW_SWITCH_ROW(rsw));
   char *rbn_call = g_strstrip(g_strdup(gtk_editable_get_text(GTK_EDITABLE(rcall))));
   int rbn_port = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rport));
+  guint dec_mode = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(mrow)), 1u);
   gboolean host_changed = host[0] && g_strcmp0(host, app->host) != 0;
+  gboolean mode_changed = dec_mode != app->dec_mode;
   gboolean cq_changed   = cq_only != app->cq_only;
   gboolean round_changed = spot_round != app->spot_round;
   gboolean font_changed = font_pt != app->decode_font;
@@ -1139,13 +1171,18 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   } else {
     g_free(rbn_call);
   }
-  if (host_changed || cq_changed || round_changed || font_changed ||
-      rbn_changed) {
+  if (mode_changed) {
+    app->dec_mode = dec_mode;
+    speed_col_retitle(app);
+  }
+  if (host_changed || mode_changed || cq_changed || round_changed ||
+      font_changed || rbn_changed) {
     settings_save(app);
   }
   /* The pipeline's config carries the feed pointer — an RBN change needs a
-   * fresh pipeline just like a host change does. */
-  if (host_changed || rbn_changed) {
+   * fresh pipeline just like a host change does; a mode change swaps the
+   * backend and the bank geometry, which only a rebuild can do. */
+  if (host_changed || mode_changed || rbn_changed) {
     if (app->pipeline) {
       skim_pipeline_stop(app->pipeline);
       g_clear_pointer(&app->pipeline, skim_pipeline_free);
@@ -1174,6 +1211,21 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(grp), row);
   adw_preferences_page_add(ADW_PREFERENCES_PAGE(page),
                            ADW_PREFERENCES_GROUP(grp));
+
+  GtkWidget *dgrp = adw_preferences_group_new();
+  adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(dgrp), "Decoding");
+  GtkWidget *mrow = adw_combo_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(mrow), "Mode");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(mrow),
+      "The whole IQ segment decodes as one mode — a change reconnects "
+      "the engine");
+  static const char *MODES[] = { "CW", "RTTY", NULL };
+  adw_combo_row_set_model(ADW_COMBO_ROW(mrow),
+                          G_LIST_MODEL(gtk_string_list_new(MODES)));
+  adw_combo_row_set_selected(ADW_COMBO_ROW(mrow), app->dec_mode);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(dgrp), mrow);
+  adw_preferences_page_add(ADW_PREFERENCES_PAGE(page),
+                           ADW_PREFERENCES_GROUP(dgrp));
 
   GtkWidget *sgrp = adw_preferences_group_new();
   adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(sgrp), "Spots");
@@ -1240,6 +1292,7 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   adw_preferences_dialog_add(ADW_PREFERENCES_DIALOG(dlg),
                              ADW_PREFERENCES_PAGE(page));
   g_object_set_data(G_OBJECT(dlg), "host-row", row);
+  g_object_set_data(G_OBJECT(dlg), "mode-row", mrow);
   g_object_set_data(G_OBJECT(dlg), "cq-row", sw);
   g_object_set_data(G_OBJECT(dlg), "round-row", qrow);
   g_object_set_data(G_OBJECT(dlg), "font-row", frow);
@@ -1295,6 +1348,7 @@ static void act_about(GSimpleAction *action, GVariant *param, gpointer user) {
   char *dbg = g_strdup_printf(
       "GTK %u.%u.%u, libadwaita %u.%u.%u\n"
       "TCI: %s:40001\n"
+      "Mode: %s\n"
       "Telnet feed: %s\n"
       "Settings: %s/skimmer-for-linux/settings.ini\n"
       "MASTER.SCP: %s/skimmer-for-linux/master.scp (%s)\n"
@@ -1303,7 +1357,7 @@ static void act_about(GSimpleAction *action, GVariant *param, gpointer user) {
       gtk_get_micro_version(),
       adw_get_major_version(), adw_get_minor_version(),
       adw_get_micro_version(),
-      app->host, feed,
+      app->host, app->dec_mode ? "RTTY" : "CW", feed,
       g_get_user_config_dir(), g_get_user_config_dir(), scp_note,
       g_get_user_data_dir());
   adw_about_dialog_set_debug_info(ad, dbg);
@@ -1369,15 +1423,16 @@ static void fmt_age(const SkimStation *st, char *o, gsize n) {
   }
 }
 
-static void add_column(GtkColumnView *view, const char *title, RowToText fmt,
-                       gboolean expand) {
+static GtkColumnViewColumn *add_column(GtkColumnView *view, const char *title,
+                                       RowToText fmt, gboolean expand) {
   GtkListItemFactory *f = gtk_signal_list_item_factory_new();
   g_signal_connect(f, "setup", G_CALLBACK(cell_setup), NULL);
   g_signal_connect(f, "bind", G_CALLBACK(cell_bind), (gpointer)fmt);
   GtkColumnViewColumn *col = gtk_column_view_column_new(title, f);
   gtk_column_view_column_set_expand(col, expand);
   gtk_column_view_append_column(view, col);
-  g_object_unref(col);
+  g_object_unref(col);                        /* the view holds the ref      */
+  return col;
 }
 
 static int freq_cmp(gconstpointer a, gconstpointer b, gpointer u) {
@@ -1525,6 +1580,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   gtk_window_set_default_size(GTK_WINDOW(window), 900, 640);
   app->window       = GTK_WINDOW(window);
   app->host         = settings_load_host();
+  app->dec_mode     = settings_load_mode();
   app->cq_only      = settings_load_cq_only();
   app->spot_round   = settings_load_spot_round();
   app->decode_font  = settings_load_decode_font();
@@ -1583,7 +1639,8 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   g_signal_connect(view, "activate", G_CALLBACK(on_row_activated), app);
   add_column(GTK_COLUMN_VIEW(view), "Call", fmt_call, TRUE);
   add_column(GTK_COLUMN_VIEW(view), "kHz", fmt_freq, FALSE);
-  add_column(GTK_COLUMN_VIEW(view), "WPM", fmt_wpm, FALSE);
+  app->speed_col = add_column(GTK_COLUMN_VIEW(view),
+                              app->dec_mode ? "Bd" : "WPM", fmt_wpm, FALSE);
   add_column(GTK_COLUMN_VIEW(view), "SNR", fmt_snr, FALSE);
   add_column(GTK_COLUMN_VIEW(view), "Heard", fmt_heard, FALSE);
   add_column(GTK_COLUMN_VIEW(view), "CQ", fmt_cq, FALSE);

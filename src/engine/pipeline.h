@@ -19,11 +19,24 @@
 
 G_BEGIN_DECLS
 
+/* Decoded mode: one pipeline decodes ONE mode segment at a time (the CW
+ * Skimmer model — the IQ stream covers a mode subband). The mode picks the
+ * decode backend, the bank geometry (CW: 125 Hz channels; RTTY: 250 Hz
+ * spacing with a wide ±225 Hz passband so both FSK tones of a station
+ * anywhere between channel centres stay in one channel) and the mode string
+ * on stations/spots/dup queries. */
+typedef enum {
+  SKIM_PIPELINE_MODE_CW = 0,
+  SKIM_PIPELINE_MODE_RTTY,
+} SkimPipelineMode;
+
 typedef struct {
   const char *host;           /* TCI server (default 127.0.0.1)              */
   guint16     port;           /* default 40001                               */
   guint       iq_rate;        /* 48/96/192/384 kHz; 0 = keep device rate     */
-  double      chan_bw_hz;     /* channel spacing (default 125 Hz)            */
+  SkimPipelineMode mode;      /* decoded mode (default CW)                   */
+  double      chan_bw_hz;     /* channel spacing (default 125 Hz CW,
+                               * 250 Hz RTTY)                                */
   const char *dict_path;      /* optional MASTER.SCP; NULL = none            */
   const char *decode_log_path; /* append raw decodes here; NULL = no log     */
 

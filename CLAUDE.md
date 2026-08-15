@@ -609,6 +609,41 @@ to the AUR remote — `packaging/PKGBUILD` in this repo stays the single
 source, the AUR clone is a copy of it. README's Install section now
 names the AUR package (`paru -S skimmer-for-linux`) instead of the old
 "AUR package to follow".
+**M7 — RTTY mode (offline-proven 2026-08-15, built mid-RTTY-contest; live
+validation pending).** `decode_rtty.c` implements decode.h: periodogram
+pair finder (WEAKER tone scores — a lone carrier can never acquire;
+sub-bin centre via floor-subtracted centroids) → NCOs on the tracked
+centre ±85 Hz → one-bit moving-sum matched filters + per-tone peak
+normalisation (ATC; mark −10 dB under space still copies exact) → dual
+start-bit-anchored UARTs at 45.45 Bd on y AND −y (elected by sustained
+framing validity — reversed/wrong-sideband signals copy) → ITA2 +
+US-TTY figures, UOS. Layered squelch, every layer gate-measured: pair
+over floor + envelope ANTI-correlation (FSK −0.8…−1.0, two unrelated
+carriers ~0 → open −0.35/close −0.15, moments primed neutral at
+acquire) + frame-valid EMA 0.55/0.35 + fast presence gate (τ60 ms —
+kills the 2 s of noise-framing between TX stop and the slow release)
++ 0.7 s settle embargo (half-converged slicer minted a phantom V).
+Pend-buffer flushes on squelch open — over heads not eaten. Channelizer
+grew `skim_channelizer_new_ex(rate, spacing, passband, K)`: RTTY bank
+= 250 Hz spacing, ±225 Hz passband (both tones of ANY straddler in one
+channel needs ≥ 85+spacing/2), K=16 (critical +415 Hz alias onto the
+space tone: −124 dBc). Pipeline `SkimPipelineConfig.mode` (CW default)
+picks backend + bank + mode string (station/spot/dup/decode-log);
+splitter/focus env vars are CW-only (FSK pair = two carriers to the
+splitter — RTTY mód je ignoruje). App: Preferences → Decoding → Mode
+(persisted `[decode] mode`, change reconnects), speed column + tuned
+header show Bd, About debug_info carries the mode. Gates:
+`skimmer-rtty-test` 25 checks (hardcoded ITA2 bit vectors as the
+independent table witness; offsets; figures/UOS; reversed; AWGN; QSB;
+selective fade; squelch noise/keyed-CW/two-carrier; worst-case
+straddler through the real wide bank exact in BOTH channels; whole
+offline pipeline in RTTY mode — 2 CQ stations tabled, RTTY, ±4 Hz,
+zero phantoms), chan-test 18→25 (wide-bank geometry + alias).
+**12 gates green.** Open: live session on the contest band (mode
+switch, real pileups, spot colours vs logbook RTTY dup service),
+reported-frequency convention (we spot the pair CENTRE; RBN convention
+is the MARK tone — decide with Richard before the telnet feed carries
+RTTY), per-channel CPU at M=768 RTTY channels unmeasured live.
 
 ## Layout
 
@@ -617,7 +652,8 @@ src/engine/   headless, GLib-only:
   tci_client   WS client, IQ ingest (true orientation), outgoing SPOT
   channelizer  polyphase filter bank → complex baseband per channel
   decode.h     backend interface: channel → { text, confidence, freq, wpm/baud }
-  decode_cw    CW backend (phase 1); later decode_rtty, decode_psk
+  decode_cw    CW backend (phase 1: v1 classical + v2 Viterbi)
+  decode_rtty  RTTY backend (M7: Baudot FSK 45.45 Bd); later decode_psk
   station      per-frequency station tracker
   callsign     extraction + validation (RBN-grade)
   spot_out     TCI SPOT feed + RBN telnet feed

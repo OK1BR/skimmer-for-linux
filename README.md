@@ -202,7 +202,9 @@ compatible should that ever change.
 1. **CW** — shipping (the v2 Viterbi decoder is the default; the classical v1
    is one env var away, `SKIM_CW_V1=1`; tone splitter still opt-in behind
    `SKIM_TONE_SPLIT=1` / `SKIM_TONE_FOCUS=1` pending its live validation).
-2. **RTTY** — next: FSK 45.45 bd, Baudot/ITA2.
+2. **RTTY** — shipping (45.45 Bd / 170 Hz shift Baudot: mark/space matched
+   filters with ATC, automatic polarity, unshift-on-space; Preferences →
+   Decoding → Mode switches the whole segment between CW and RTTY).
 3. **PSK** — BPSK31/63 (Costas loop, varicode).
 
 The channelizer is mode-agnostic and phase-preserving from day one, so each

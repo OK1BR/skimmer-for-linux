@@ -27,6 +27,7 @@
 
 #include "engine/channelizer.h"
 #include "engine/decode_rtty.h"
+#include "engine/pipeline.h"
 
 #define RATE  500.0
 #define BAUD  45.45
@@ -203,6 +204,30 @@ static char *tidy(const char *s) {
   }
   *w = '\0';
   return r;
+}
+
+/* Station-callback collector for the offline pipeline section: keeps the
+ * LATEST report per call. */
+static SkimStation seen[16];
+static guint n_seen;
+
+static void collect_station(const SkimStation *st, gpointer user) {
+  (void)user;
+  for (guint i = 0; i < n_seen; i++) {
+    if (g_strcmp0(seen[i].call, st->call) == 0) {
+      seen[i] = *st;
+      return;
+    }
+  }
+  if (n_seen < G_N_ELEMENTS(seen)) { seen[n_seen++] = *st; }
+}
+
+static const SkimStation *seen_find(const char *call) {
+  for (guint i = 0; i < n_seen; i++) {
+    if (g_strcmp0(seen[i].call, call) == 0)
+      return &seen[i];
+  }
+  return NULL;
 }
 
 static guint lev(const char *a, const char *b) {
@@ -567,6 +592,72 @@ int main(void) {
     } else {
       checks += 4; fails += 4;
     }
+  }
+
+  /* -- the WHOLE offline pipeline in RTTY mode --------------------------------- */
+  {
+    /* Two CQing RTTY stations on a 48 kHz band: OK1BR on the worst-case
+     * channel straddle (+2625), DL1ABC at −3010. The pipeline must table
+     * exactly those two calls, mode RTTY, on the right absolute Hz —
+     * bank geometry, backend pick, ghost/same-tone arbitration and the
+     * extractor over ITA2 text all in one pass. */
+    const double CENTER = 14085000.0;
+    GArray *sym1 = g_array_new(FALSE, FALSE, sizeof(Sym));
+    enc_diddle(sym1, 10);
+    enc_text(sym1, "CQ TEST DE OK1BR OK1BR CQ");
+    enc_text(sym1, " CQ TEST DE OK1BR OK1BR CQ");
+    enc_diddle(sym1, 2);
+    GArray *sym2 = g_array_new(FALSE, FALSE, sizeof(Sym));
+    enc_diddle(sym2, 14);
+    enc_text(sym2, "CQ TEST DE DL1ABC DL1ABC CQ");
+    enc_text(sym2, " CQ TEST DE DL1ABC DL1ABC CQ");
+    enc_diddle(sym2, 2);
+    GArray *iq1 = render(sym1, 48000.0, 2625.0, FALSE, 0.4, 0.4);
+    GArray *iq2 = render(sym2, 48000.0, -3010.0, FALSE, 0.25, 0.25);
+    GArray *band = iq1->len >= iq2->len ? iq1 : iq2;
+    GArray *othr = band == iq1 ? iq2 : iq1;
+    for (guint i = 0; i < othr->len; i++) {
+      g_array_index(band, float, i) += g_array_index(othr, float, i);
+    }
+    add_tail(band, 3.0, 0.002, rng);
+    add_noise(band, 0.002, rng);
+
+    SkimPipelineConfig cfg = { 0 };
+    cfg.mode = SKIM_PIPELINE_MODE_RTTY;
+    SkimPipeline *pl = skim_pipeline_new(&cfg);
+    skim_pipeline_set_station_cb(pl, collect_station, NULL);
+    GError *err = NULL;
+    check("offline RTTY pipeline starts", skim_pipeline_start_offline(pl, &err));
+    const float *p = (const float *)band->data;
+    guint nframes = band->len / 2;
+    for (guint at = 0; at < nframes; at += 4800) {
+      skim_pipeline_feed(pl, p + 2 * at, MIN(4800u, nframes - at), 48000.0,
+                         CENTER);
+    }
+    guint nst = skim_pipeline_stations(pl);
+    printf("       stations tabled: %u (seen %u calls)\n", nst, n_seen);
+    check("exactly the two stations tabled (no phantoms)",
+          nst == 2 && n_seen == 2);
+    const SkimStation *ok = seen_find("OK1BR");
+    const SkimStation *dl = seen_find("DL1ABC");
+    if (ok) {
+      printf("       OK1BR: %s %.1f Hz cq=%d\n", ok->mode, ok->freq_hz, ok->cq);
+    }
+    if (dl) {
+      printf("       DL1ABC: %s %.1f Hz cq=%d\n", dl->mode, dl->freq_hz, dl->cq);
+    }
+    check("OK1BR tabled as RTTY on 14087625 ± 10 Hz",
+          ok && g_strcmp0(ok->mode, "RTTY") == 0 &&
+          fabs(ok->freq_hz - (CENTER + 2625.0)) < 10.0 && ok->cq);
+    check("DL1ABC tabled as RTTY on 14081990 ± 10 Hz",
+          dl && g_strcmp0(dl->mode, "RTTY") == 0 &&
+          fabs(dl->freq_hz - (CENTER - 3010.0)) < 10.0 && dl->cq);
+    skim_pipeline_stop(pl);
+    skim_pipeline_free(pl);
+    g_array_free(iq1, TRUE);
+    g_array_free(iq2, TRUE);
+    g_array_free(sym1, TRUE);
+    g_array_free(sym2, TRUE);
   }
 
   g_rand_free(rng);

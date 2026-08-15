@@ -24,6 +24,7 @@
 #include "callsign.h"
 #include "channelizer.h"
 #include "decode_cw.h"
+#include "decode_rtty.h"
 #include "spot_out.h"
 #include "tci_client.h"
 #include "tone_split.h"
@@ -218,6 +219,17 @@ static const SkimDecodeBackend *cw_backend(void) {
   return g_getenv("SKIM_CW_V1") ? skim_decode_cw() : skim_decode_cw_v2();
 }
 
+/* The pipeline's backend follows its configured mode. One process = one
+ * backend per pipeline (per-channel states are not mixable). */
+static const SkimDecodeBackend *pipe_backend(const SkimPipeline *p) {
+  return p->cfg.mode == SKIM_PIPELINE_MODE_RTTY ? skim_decode_rtty()
+                                                : cw_backend();
+}
+
+static const char *pipe_mode_str(const SkimPipeline *p) {
+  return p->cfg.mode == SKIM_PIPELINE_MODE_RTTY ? "RTTY" : "CW";
+}
+
 static void station_gone_fwd(const SkimStation *st, gpointer user);
 
 /* RBN spot_out sink → the telnet feed (user = the borrowed SkimRbnFeed). */
@@ -232,16 +244,24 @@ SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg) {
   p->host = g_strdup(cfg->host ? cfg->host : "127.0.0.1");
   p->cfg.host = p->host;
   p->dlog_path = g_strdup(cfg->decode_log_path);
-  if (p->cfg.chan_bw_hz <= 0) { p->cfg.chan_bw_hz = 125.0; }
+  if (p->cfg.chan_bw_hz <= 0) {
+    p->cfg.chan_bw_hz =
+        p->cfg.mode == SKIM_PIPELINE_MODE_RTTY ? 250.0 : 125.0;
+  }
   /* SKIM_TONE_FOCUS arms the splitter too (focus lives inside it): a lone
    * carrier gets a narrow slot on its own tone (~4 dB of envelope SNR on a
-   * 125 Hz channel). Numeric values ≥ 5 pick the cutoff; "1" = 25 Hz. */
-  const char *fenv = g_getenv("SKIM_TONE_FOCUS");
-  if (fenv) {
-    const double v = g_ascii_strtod(fenv, NULL);
-    p->focus_fc = (v >= 5.0) ? v : 25.0;
+   * 125 Hz channel). Numeric values ≥ 5 pick the cutoff; "1" = 25 Hz.
+   * CW machinery only: to the splitter an FSK pair IS two carriers — in
+   * RTTY mode it would tear every station into two half-signal slots, so
+   * the mode ignores both env vars. */
+  if (p->cfg.mode == SKIM_PIPELINE_MODE_CW) {
+    const char *fenv = g_getenv("SKIM_TONE_FOCUS");
+    if (fenv) {
+      const double v = g_ascii_strtod(fenv, NULL);
+      p->focus_fc = (v >= 5.0) ? v : 25.0;
+    }
+    p->use_split = g_getenv("SKIM_TONE_SPLIT") != NULL || fenv != NULL;
   }
-  p->use_split = g_getenv("SKIM_TONE_SPLIT") != NULL || fenv != NULL;
   p->stations = skim_station_table_new();
   skim_station_table_set_gone_cb(p->stations, station_gone_fwd, p);
   p->queue    = g_async_queue_new();
@@ -272,7 +292,7 @@ SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg) {
 }
 
 static void bank_teardown(SkimPipeline *p) {
-  const SkimDecodeBackend *cw = cw_backend();
+  const SkimDecodeBackend *cw = pipe_backend(p);
   for (guint i = 0; i < p->nchan * NSLOT; i++) {
     if (p->dec && p->dec[i]) { cw->channel_free(p->dec[i]); }
     if (p->ext && p->ext[i]) { skim_callsign_extractor_free(p->ext[i]); }
@@ -390,7 +410,13 @@ static void iq_cb(const float *iq, guint nframes, double rate, double center,
 
 static void bank_build(SkimPipeline *p, double rate) {
   bank_teardown(p);
-  p->bank = skim_channelizer_new(rate, p->cfg.chan_bw_hz);
+  /* RTTY: wide passband (0.9·spacing — 225 Hz at the default 250, holding
+   * both ±85 Hz tones of a worst-case straddler) + K=16 for the alias
+   * skirt; measured in skimmer-chan-test. CW keeps the classic geometry. */
+  p->bank = p->cfg.mode == SKIM_PIPELINE_MODE_RTTY
+                ? skim_channelizer_new_ex(rate, p->cfg.chan_bw_hz,
+                                          0.9 * p->cfg.chan_bw_hz, 16)
+                : skim_channelizer_new(rate, p->cfg.chan_bw_hz);
   if (!p->bank) {
     g_warning("pipeline: no channelizer for %.0f Hz / %.0f Hz", rate,
               p->cfg.chan_bw_hz);
@@ -405,7 +431,7 @@ static void bank_build(SkimPipeline *p, double rate) {
   p->flock = g_new0(FreqLock, p->nchan * NSLOT);
   if (p->use_split) { p->split = g_new0(SkimToneSplit *, p->nchan); }
   p->center_hz = 0;                            /* fresh states — no flush    */
-  const SkimDecodeBackend *cw = cw_backend();
+  const SkimDecodeBackend *cw = pipe_backend(p);
   const double out_rate = skim_channelizer_out_rate(p->bank);
   for (guint c = 0; c < p->nchan; c++) {
     p->dec[SL(c, WIDE_LANE)] = cw->channel_new(out_rate);
@@ -436,7 +462,7 @@ static void bank_build(SkimPipeline *p, double rate) {
  * channel away from a big gun. */
 static gboolean ghost_suppressed(SkimPipeline *p, const double *lvl, guint c,
                                  guint slot, double eff_off) {
-  const SkimDecodeBackend *cw = cw_backend();
+  const SkimDecodeBackend *cw = pipe_backend(p);
   const gint M = (gint)p->nchan;
   const gint k = (c <= p->nchan / 2) ? (gint)c : (gint)c - M;
   const double mine = lvl[SL(c, slot)];
@@ -527,7 +553,7 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
    * records (really heard — they age out via their own TTL). */
   if (b->center_hz != p->center_hz) {
     if (p->center_hz != 0) {
-      const SkimDecodeBackend *cwf = cw_backend();
+      const SkimDecodeBackend *cwf = pipe_backend(p);
       const double out_rate = skim_channelizer_out_rate(p->bank);
       for (guint c = 0; c < p->nchan; c++) {
         for (guint s = 0; s < NSLOT; s++) {
@@ -561,7 +587,7 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
   p->stream_us = (gint64)((double)p->frames * G_USEC_PER_SEC /
                           MAX(b->rate, 1.0));
 
-  const SkimDecodeBackend *cw = cw_backend();
+  const SkimDecodeBackend *cw = pipe_backend(p);
   float buf[DRAIN_FRAMES * 2];
   SkimDecode d;
 
@@ -705,8 +731,10 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
         char khz[G_ASCII_DTOSTR_BUF_SIZE];   /* C locale — parseable dot     */
         g_ascii_formatd(khz, sizeof(khz), "%.2f", sig_hz / 1000.0);
         if (d.text[0]) {
-          fprintf(p->dlog, "%s %9s %2.0fwpm %3.0fdB |%s|\n",
-                  tbuf, khz, d.speed, d.snr_db, d.text);
+          fprintf(p->dlog, "%s %9s %2.0f%s %3.0fdB |%s|\n",
+                  tbuf, khz, d.speed,
+                  p->cfg.mode == SKIM_PIPELINE_MODE_RTTY ? "bd " : "wpm",
+                  d.snr_db, d.text);
         }
         if (h->aux) {
           fprintf(p->dlog, "%s %9s   aux        |%s|\n", tbuf, khz, h->aux);
@@ -796,7 +824,7 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
       SkimStation st;
       memset(&st, 0, sizeof(st));
       g_strlcpy(st.call, call, sizeof(st.call));
-      g_strlcpy(st.mode, "CW", sizeof(st.mode));
+      g_strlcpy(st.mode, pipe_mode_str(p), sizeof(st.mode));
       st.freq_hz    = sig_hz;
       st.speed      = d.speed;
       st.snr_db     = d.snr_db;
@@ -984,7 +1012,7 @@ SkimDupVerdict skim_pipeline_dup_verdict(SkimPipeline *p, const char *call,
                                          double freq_hz) {
   /* wait 0: the GTK thread must never stall on the socket — a miss fires
    * the request and the answer colours the next highlight pass. */
-  return skim_dup_query_lookup(p->dupq, call, freq_hz, "CW", 0);
+  return skim_dup_query_lookup(p->dupq, call, freq_hz, pipe_mode_str(p), 0);
 }
 
 void skim_pipeline_set_spot_cq_only(SkimPipeline *p, gboolean cq_only) {
