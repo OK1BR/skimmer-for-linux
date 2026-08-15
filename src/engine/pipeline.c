@@ -31,6 +31,9 @@
 
 #define QUEUE_MAX      64                     /* blocks in flight            */
 #define DRAIN_FRAMES   64                     /* per-channel read chunk      */
+#define HOLD_GRACE_S   0.3                    /* post-TX settle (T/R + att)  */
+#define HOLD_CAP_S     30.0                   /* a stuck trx must not freeze
+                                                 the skimmer forever         */
 #define PRUNE_EVERY_US (2 * G_USEC_PER_SEC)
 /* RBN policy: the network keeps its own history, so re-announce sparsely
  * (the panadapter's 180 s is about keeping labels alive — not needed here)
@@ -155,6 +158,14 @@ struct _SkimPipeline {
   gboolean          offline;                   /* fed by skim_pipeline_feed  */
   gint64            stream_us;                 /* stream time (offline clock) */
   volatile gint     cq_only;                   /* spot only CALLING stations */
+
+  /* TX hold (TX-HOLD-SCOPE): own TX deafens the band — swallow blocks so
+   * decode state freezes instead of releasing every channel. */
+  volatile gint     tx_now;                    /* TCI trx/tune, or the setter */
+  gboolean          holding;                   /* feed side: swallowing       */
+  gboolean          hold_capped;               /* cap hit — decoding resumed  */
+  guint64           hold_frames;               /* swallowed this episode      */
+  guint64           grace_frames;              /* post-TX settle left         */
 
   char             *dlog_path;                 /* decode log (engine thread) */
   FILE             *dlog;
@@ -384,9 +395,17 @@ static void vfo_fwd_cb(double vfo_hz, gpointer user) {
 
 static void closed_cb(gpointer user) {
   SkimPipeline *p = user;
+  g_atomic_int_set(&p->tx_now, 0);   /* a drop mid-TX must not stick the hold */
   /* The owner reacts (stops the pipeline from ITS thread — never from here:
    * stop() joins threads and would deadlock inside the LWS callback). */
   if (p->state_cb) { p->state_cb(FALSE, "connection lost", p->state_user); }
+}
+
+/* trx/tune broadcast → the TX hold (LWS thread; an atomic flag the engine
+ * thread reads per block). */
+static void tx_fwd_cb(gboolean tx, gpointer user) {
+  SkimPipeline *p = user;
+  g_atomic_int_set(&p->tx_now, tx ? 1 : 0);
 }
 
 /* ---- LWS-thread side: queue the block ---------------------------------------- */
@@ -538,7 +557,65 @@ static void slot_sync(SkimPipeline *p, guint c, guint s,
   p->sgen[i] = g;
 }
 
+/* Resume after a TX hold: bit-level resync on every live channel state —
+ * acquisition survives the gap, mid-character framer state does not
+ * (decode.h resync; optional per backend). */
+static void hold_resume(SkimPipeline *p) {
+  const SkimDecodeBackend *be = pipe_backend(p);
+  if (!be->resync || !p->dec || !p->bank)
+    return;
+  for (guint i = 0; i < p->nchan * NSLOT; i++) {
+    if (p->dec[i]) { be->resync(p->dec[i]); }
+  }
+}
+
 static void process_block(SkimPipeline *p, IqBlock *b) {
+  /* TX hold (TX-HOLD-SCOPE): while the operator's own TX deafens the RX
+   * (T/R relay + 31 dB TX attenuators), the band the decoders would see is
+   * self-inflicted silence — evaluating it releases every channel and the
+   * ANSWERING station is re-acquired seconds late (Richard, live
+   * 2026-08-15). Swallow the blocks instead: unfed decoders freeze all
+   * their time constants for free. Stream time keeps ticking (TTLs). */
+  const gboolean tx = g_atomic_int_get(&p->tx_now) != 0;
+  if (tx || p->holding) {
+    if (tx) {
+      if (!p->holding) {
+        p->holding     = TRUE;
+        p->hold_capped = FALSE;
+        p->hold_frames = 0;
+        g_message("pipeline: TX hold — decode frozen (own transmission)");
+      }
+      p->grace_frames = (guint64)(HOLD_GRACE_S * b->rate);
+      p->hold_frames += b->nframes;
+      if (p->hold_frames <= (guint64)(HOLD_CAP_S * b->rate)) {
+        p->frames += b->nframes;
+        p->stream_us = (gint64)((double)p->frames * G_USEC_PER_SEC /
+                                MAX(b->rate, 1.0));
+        return;
+      }
+      if (!p->hold_capped) {
+        p->hold_capped = TRUE;
+        g_message("pipeline: TX hold cap (%.0f s) exceeded — decoding "
+                  "resumes on the live band", HOLD_CAP_S);
+      }
+      /* fall through: decode normally under a stuck/very long TX */
+    } else if (p->hold_capped) {
+      p->holding = FALSE;            /* already live-decoding since the cap */
+      p->grace_frames = 0;
+    } else if (p->grace_frames >= b->nframes) {
+      p->grace_frames -= b->nframes; /* post-TX settle: swallow the T/R glitch */
+      p->frames += b->nframes;
+      p->stream_us = (gint64)((double)p->frames * G_USEC_PER_SEC /
+                              MAX(b->rate, 1.0));
+      return;
+    } else {
+      p->grace_frames = 0;
+      p->holding = FALSE;
+      hold_resume(p);
+      g_message("pipeline: TX hold released — decode resumed");
+    }
+  }
+
   if (!p->bank || p->bank_rate != b->rate) { bank_build(p, b->rate); }
   if (!p->bank)
     return;
@@ -892,9 +969,14 @@ gboolean skim_pipeline_start(SkimPipeline *p, GError **error) {
                 "pipeline already running");
     return FALSE;
   }
+  g_atomic_int_set(&p->tx_now, 0);   /* fresh session — no hold carried over */
+  p->holding = FALSE;
+  p->hold_capped = FALSE;
+  p->grace_frames = 0;
   p->tci = skim_tci_client_new(p->cfg.host, p->cfg.port);
   skim_tci_client_set_iq_cb(p->tci, iq_cb, p);
   skim_tci_client_set_vfo_cb(p->tci, vfo_fwd_cb, p);
+  skim_tci_client_set_tx_cb(p->tci, tx_fwd_cb, p);
   skim_tci_client_set_closed_cb(p->tci, closed_cb, p);
   if (!skim_tci_client_start(p->tci, p->cfg.iq_rate, error)) {
     g_clear_pointer(&p->tci, skim_tci_client_free);
@@ -939,6 +1021,10 @@ gboolean skim_pipeline_start_offline(SkimPipeline *p, GError **error) {
   p->offline = TRUE;
   p->stream_us  = 0;
   p->last_prune = 0;
+  g_atomic_int_set(&p->tx_now, 0);
+  p->holding = FALSE;
+  p->hold_capped = FALSE;
+  p->grace_frames = 0;
   if (p->dlog_path) {
     p->dlog = fopen(p->dlog_path, "a");
     if (p->dlog) {
@@ -994,6 +1080,10 @@ void skim_pipeline_stop(SkimPipeline *p) {
 }
 
 /* ---- counters -------------------------------------------------------------------- */
+
+void skim_pipeline_set_tx_hold(SkimPipeline *p, gboolean tx) {
+  g_atomic_int_set(&p->tx_now, tx ? 1 : 0);
+}
 
 double skim_pipeline_vfo_hz(const SkimPipeline *p) {
   return p->tci ? skim_tci_client_vfo_hz(p->tci) : 0;

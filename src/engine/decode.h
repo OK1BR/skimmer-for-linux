@@ -99,6 +99,13 @@ struct _SkimDecodeBackend {
    * rule as aux text: pane + decode log only, NEVER the extractor.
    * Optional. */
   gboolean (*take_pane_op)(gpointer state, SkimPaneOp *op);
+
+  /* Resynchronize after a gap the channel did NOT see (the pipeline's TX
+   * hold swallows blocks while the operator's own TX deafens the band —
+   * TX-HOLD-SCOPE): drop mid-character framer state and sub-bit
+   * accumulators, KEEP acquisition/tracking — the channel must decode the
+   * answering station from its first characters. Optional. */
+  void (*resync)(gpointer state);
 };
 
 G_END_DECLS

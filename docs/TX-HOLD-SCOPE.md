@@ -1,5 +1,15 @@
 # TX hold — freeze decode state during own transmission (zadání, 2026-08-15)
 
+> **STATUS: IMPLEMENTED the same evening** (trx/tune parse + tx callback in
+> tci_client, block-swallow hold + 0.3 s grace + 30 s cap in the pipeline,
+> optional `resync` backend hook — RTTY implements it, `set_tx_hold` public
+> for the offline harness). Gate: the RTTY suite grew a hold-vs-control
+> pass — WITH the hold the reply decodes complete from its first character
+> and NOTHING decodes from the held band; WITHOUT it (the old behaviour)
+> 77 garbage decodes leak during the own-TX silence and the reply's head is
+> lost to re-acquisition. Full suite 11/11. Live pass with the radio
+> (needs sdr-for-linux ≥ cc470af running) pending.
+
 Reported by Richard live, first RTTY QSO attempts with sdr-for-linux's new
 RTTY mode: **"when I answer a call, after my over it hangs and doesn't
 decode for a while."** Mechanism verified from the radio side the same

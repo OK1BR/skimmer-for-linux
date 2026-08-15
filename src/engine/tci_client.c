@@ -40,6 +40,8 @@ struct _SkimTciClient {
   gpointer    iq_cb_data;
   SkimTciVfoCb    vfo_cb;       /* fires on the LWS thread                     */
   gpointer        vfo_cb_data;
+  SkimTciTxCb     tx_cb;        /* fires on the LWS thread (TX-HOLD-SCOPE)     */
+  gpointer        tx_cb_data;
   SkimTciClosedCb closed_cb;    /* fires on the LWS thread                     */
   gpointer        closed_cb_data;
 
@@ -55,6 +57,8 @@ struct _SkimTciClient {
   GQueue   out;               /* outgoing text commands (char*)              */
   double   center_hz;         /* dds:0,<hz>                                  */
   double   vfo_hz;            /* vfo:0,0,<hz> — the tuned frequency          */
+  gboolean trx;               /* trx:0,<bool> — the radio's REAL keyed state */
+  gboolean tune;              /* tune:0,<bool>                               */
   guint    iq_rate;           /* iq_samplerate announced/echoed              */
   char     device[64];
   char     protocol[64];
@@ -89,6 +93,9 @@ static void handle_command(SkimTciClient *c, char *cmd) {
   SkimTciVfoCb vfo_cb = NULL;
   gpointer     vfo_user = NULL;
   double       vfo_hz = 0;
+  SkimTciTxCb  tx_cb = NULL;
+  gpointer     tx_user = NULL;
+  gboolean     tx_val = FALSE;
 
   g_mutex_lock(&c->lock);
   if (strcmp(cmd, "ready") == 0) {
@@ -121,10 +128,28 @@ static void handle_command(SkimTciClient *c, char *cmd) {
   } else if (strcmp(cmd, "iq_samplerate") == 0 && args) {
     long r = strtol(args, NULL, 10);
     if (r > 0) { c->iq_rate = (guint)r; }
+  } else if ((strcmp(cmd, "trx") == 0 || strcmp(cmd, "tune") == 0) && args) {
+    /* trx:<rx>,<bool> / tune:<rx>,<bool> — rx 0. sdr-for-linux ≥ cc470af
+     * reports the REAL keyed state (CW/RTTY text keying included); tune is
+     * OR-ed in for servers where a tune carrier does not raise trx. The
+     * combined value drives the pipeline's TX hold (TX-HOLD-SCOPE). */
+    char *comma = strchr(args, ',');
+    if (comma && strtol(args, NULL, 10) == 0) {
+      const gboolean v = g_ascii_strncasecmp(comma + 1, "true", 4) == 0;
+      const gboolean was = c->trx || c->tune;
+      if (cmd[1] == 'r') { c->trx = v; } else { c->tune = v; }
+      const gboolean now = c->trx || c->tune;
+      if (now != was) {
+        tx_cb   = c->tx_cb;          /* fire outside the lock */
+        tx_user = c->tx_cb_data;
+        tx_val  = now;
+      }
+    }
   }
   g_mutex_unlock(&c->lock);
 
   if (vfo_cb) { vfo_cb(vfo_hz, vfo_user); }
+  if (tx_cb) { tx_cb(tx_val, tx_user); }
 }
 
 static void drain_text(SkimTciClient *c) {
@@ -298,6 +323,11 @@ void skim_tci_client_free(SkimTciClient *c) {
 void skim_tci_client_set_iq_cb(SkimTciClient *c, SkimTciIqCb cb, gpointer user_data) {
   c->iq_cb      = cb;
   c->iq_cb_data = user_data;
+}
+
+void skim_tci_client_set_tx_cb(SkimTciClient *c, SkimTciTxCb cb, gpointer user_data) {
+  c->tx_cb      = cb;
+  c->tx_cb_data = user_data;
 }
 
 void skim_tci_client_set_vfo_cb(SkimTciClient *c, SkimTciVfoCb cb, gpointer user_data) {

@@ -32,6 +32,11 @@ typedef void (*SkimTciIqCb)(const float *iq, guint nframes,
 /* Tuned frequency changed (vfo:0,0,<hz> — rx 0 channel A). LWS thread. */
 typedef void (*SkimTciVfoCb)(double vfo_hz, gpointer user_data);
 
+/* The radio keyed/unkeyed (trx:0 OR tune:0 — sdr-for-linux ≥ cc470af reports
+ * the REAL keyed state, CW/RTTY text keying included). tx = combined
+ * trx||tune. Fires on change only. LWS thread. TX-HOLD-SCOPE. */
+typedef void (*SkimTciTxCb)(gboolean tx, gpointer user_data);
+
 /* The server dropped the connection (WS closed while running). LWS thread.
  * Does NOT fire on skim_tci_client_stop(). */
 typedef void (*SkimTciClosedCb)(gpointer user_data);
@@ -41,6 +46,7 @@ void           skim_tci_client_free(SkimTciClient *c);
 
 void     skim_tci_client_set_iq_cb(SkimTciClient *c, SkimTciIqCb cb, gpointer user_data);
 void     skim_tci_client_set_vfo_cb(SkimTciClient *c, SkimTciVfoCb cb, gpointer user_data);
+void     skim_tci_client_set_tx_cb(SkimTciClient *c, SkimTciTxCb cb, gpointer user_data);
 void     skim_tci_client_set_closed_cb(SkimTciClient *c, SkimTciClosedCb cb, gpointer user_data);
 
 /* Connect, handshake (wait for ready;), request iq_samplerate + iq_start:0.

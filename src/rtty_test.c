@@ -230,6 +230,25 @@ static const SkimStation *seen_find(const char *call) {
   return NULL;
 }
 
+/* Text-callback collector for the TX-hold section: counts decodes landing
+ * inside the [g_txh_quiet0, g_txh_mark) window (the held/silent stretch)
+ * and accumulates everything decoded at/after g_txh_mark (the band-return)
+ * — the content assertion is whether the resumed message's HEAD survived. */
+static guint64  g_txh_fed;      /* frames fed so far (the test's own clock) */
+static guint64  g_txh_mark;     /* resume point                            */
+static guint64  g_txh_quiet0;   /* silence start                           */
+static guint    g_txh_quiet_n;  /* decodes inside the quiet window         */
+static GString *g_txh_post;     /* text decoded at/after the mark          */
+
+static void collect_text(double freq_hz, const char *text, gpointer user) {
+  (void)freq_hz; (void)user;
+  if (!text || !*text) { return; }
+  if (g_txh_fed >= g_txh_quiet0 && g_txh_fed < g_txh_mark) { g_txh_quiet_n++; }
+  if (g_txh_post && g_txh_fed >= g_txh_mark) {
+    g_string_append(g_txh_post, text);
+  }
+}
+
 static guint lev(const char *a, const char *b) {
   guint la = (guint)strlen(a), lb = (guint)strlen(b);
   guint *row = g_new(guint, lb + 1);
@@ -658,6 +677,90 @@ int main(void) {
     g_array_free(iq2, TRUE);
     g_array_free(sym1, TRUE);
     g_array_free(sym2, TRUE);
+  }
+
+  /* -- TX hold (docs/TX-HOLD-SCOPE.md): own-transmission freeze --------------- */
+  {
+    /* One station, an over → 8 s of dead band (the operator's own TX: the
+     * radio's RX is deafened) → the station continues. WITH the hold the
+     * channel stays acquired and the continuation decodes within ~1.5 s of
+     * band-return (grace 0.3 s included); WITHOUT it (control) the channel
+     * released during the silence and must re-acquire — measurably slower.
+     * Same IQ both passes; only the hold differs. */
+    const double CENTER = 14085000.0;
+    GArray *s1 = g_array_new(FALSE, FALSE, sizeof(Sym));
+    enc_diddle(s1, 10);
+    enc_text(s1, "CQ TEST DE OK1BR OK1BR CQ");
+    enc_diddle(s1, 2);
+    GArray *s2 = g_array_new(FALSE, FALSE, sizeof(Sym));
+    enc_diddle(s2, 2);
+    enc_text(s2, "TEST TEST DE OK1BR OK1BR TEST");
+    enc_diddle(s2, 2);
+    GArray *iq_a = render(s1, 48000.0, 2625.0, FALSE, 0.4, 0.4);
+    GArray *iq_b = render(s2, 48000.0, 2625.0, FALSE, 0.4, 0.4);
+    add_noise(iq_a, 0.002, rng);
+    add_noise(iq_b, 0.002, rng);
+    const guint quiet_frames = 8 * 48000;
+    const char *HEAD = "TEST TEST DE OK1BR";   /* the reply's first words   */
+    gboolean head_ok[2] = { FALSE, FALSE };
+    for (int pass = 0; pass < 2; pass++) {         /* 0 = hold, 1 = control */
+      SkimPipelineConfig cfg = { 0 };
+      cfg.mode = SKIM_PIPELINE_MODE_RTTY;
+      SkimPipeline *pl = skim_pipeline_new(&cfg);
+      skim_pipeline_set_text_cb(pl, collect_text, NULL);
+      GError *err = NULL;
+      if (!skim_pipeline_start_offline(pl, &err)) {
+        checks += 3; fails += 3;
+        skim_pipeline_free(pl);
+        continue;
+      }
+      g_txh_fed = 0; g_txh_quiet_n = 0;
+      g_txh_quiet0 = G_MAXUINT64; g_txh_mark = G_MAXUINT64;
+      g_txh_post = g_string_new(NULL);
+      const float *pa = (const float *)iq_a->data;
+      guint na = iq_a->len / 2;
+      for (guint at = 0; at < na; at += 4800) {
+        skim_pipeline_feed(pl, pa + 2 * at, MIN(4800u, na - at), 48000.0, CENTER);
+        g_txh_fed += MIN(4800u, na - at);
+      }
+      if (pass == 0) { skim_pipeline_set_tx_hold(pl, TRUE); }
+      g_txh_quiet0 = g_txh_fed;
+      float quiet[2 * 4800];
+      for (guint i = 0; i < 2 * 4800; i++) {
+        quiet[i] = (float)(0.002 * rand_gauss(rng));
+      }
+      for (guint at = 0; at < quiet_frames; at += 4800) {
+        skim_pipeline_feed(pl, quiet, 4800, 48000.0, CENTER);
+        g_txh_fed += 4800;
+      }
+      if (pass == 0) { skim_pipeline_set_tx_hold(pl, FALSE); }
+      g_txh_mark = g_txh_fed;
+      const float *pb = (const float *)iq_b->data;
+      guint nb = iq_b->len / 2;
+      for (guint at = 0; at < nb; at += 4800) {
+        skim_pipeline_feed(pl, pb + 2 * at, MIN(4800u, nb - at), 48000.0, CENTER);
+        g_txh_fed += 4800;
+      }
+      char *post = tidy(g_txh_post->str);
+      head_ok[pass] = strstr(post, HEAD) != NULL;
+      printf("       %s: quiet decodes %u, after band-return: \"%s\"\n",
+             pass == 0 ? "hold   " : "control", g_txh_quiet_n, post);
+      g_free(post);
+      g_string_free(g_txh_post, TRUE);
+      g_txh_post = NULL;
+      if (pass == 0) {
+        check("hold: nothing decodes from the held/dead band", g_txh_quiet_n == 0);
+      }
+      skim_pipeline_stop(pl);
+      skim_pipeline_free(pl);
+    }
+    check("hold: the reply's HEAD decodes complete after band-return",
+          head_ok[0]);
+    check("control loses the head to release/re-acquisition", !head_ok[1]);
+    g_array_free(iq_a, TRUE);
+    g_array_free(iq_b, TRUE);
+    g_array_free(s1, TRUE);
+    g_array_free(s2, TRUE);
   }
 
   g_rand_free(rng);

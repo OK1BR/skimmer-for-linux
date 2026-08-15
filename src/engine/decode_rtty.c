@@ -612,6 +612,26 @@ static void rtty_set_freq(gpointer state, double freq_hz) {
   ((RttyState *)state)->freq_hz = freq_hz;
 }
 
+/* TX-hold resume (TX-HOLD-SCOPE): the channel slept through the operator's
+ * own over — bit-level state spans the gap and is meaningless (a framer
+ * mid-character would seam pre-TX bits onto the answering station), while
+ * the ACQUISITION layer (psd EMA, centre, pair quality, lost_s) is exactly
+ * what must survive so decoding continues from the first characters. */
+static void rtty_resync(gpointer state) {
+  RttyState *st = state;
+  if (!st)
+    return;
+  uart_reset(&st->uart[0]);
+  uart_reset(&st->uart[1]);
+  st->npend = 0;                     /* pre-TX pending chars: the over ended */
+  memset(st->mr, 0, sizeof st->mr);  /* sub-bit matched-filter rings: mixing */
+  memset(st->mi, 0, sizeof st->mi);  /* pre/post-gap samples would smear one */
+  memset(st->sr, 0, sizeof st->sr);  /* bit of transient into the slicer     */
+  memset(st->si, 0, sizeof st->si);
+  st->msum_r = st->msum_i = st->ssum_r = st->ssum_i = 0.0;
+  st->ms_pos = 0;
+}
+
 const SkimDecodeBackend *skim_decode_rtty(void) {
   static const SkimDecodeBackend backend = {
     .name           = "rtty",
@@ -621,6 +641,7 @@ const SkimDecodeBackend *skim_decode_rtty(void) {
     .level          = rtty_level,
     .tone_offset_hz = rtty_tone_offset_hz,
     .set_freq       = rtty_set_freq,
+    .resync         = rtty_resync,
   };
   return &backend;
 }

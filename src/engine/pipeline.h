@@ -90,6 +90,16 @@ gboolean skim_pipeline_start_offline(SkimPipeline *p, GError **error);
 void     skim_pipeline_feed(SkimPipeline *p, const float *iq, guint nframes,
                             double rate, double center_hz);
 
+/* TX hold (docs/TX-HOLD-SCOPE.md): TRUE while the operator's own radio
+ * transmits. Live it is driven automatically from the TCI trx/tune
+ * broadcasts (sdr-for-linux ≥ cc470af reports the real keyed state); the
+ * offline harness/gates drive it by hand. While held the pipeline swallows
+ * IQ blocks — every decoder/extractor/squelch time constant freezes instead
+ * of adapting to the self-deafened band — and resumes with a bit-level
+ * resync ~300 ms after release, so the answering station decodes from its
+ * first characters. A ~30 s cap unfreezes a stuck hold. Thread-safe. */
+void skim_pipeline_set_tx_hold(SkimPipeline *p, gboolean tx);
+
 /* The radio's tuned frequency (0 until the first vfo broadcast lands). */
 double skim_pipeline_vfo_hz(const SkimPipeline *p);
 
