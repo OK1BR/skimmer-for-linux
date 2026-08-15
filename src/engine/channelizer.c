@@ -1,8 +1,12 @@
 /* channelizer.c — 2×-oversampled polyphase filter bank (M2, docs/SCOPE.md).
  *
  * Geometry: M = in_rate/chan_bw channels, prototype lowpass of K·M taps
- * (WDSP fir_bandpass, Blackman-Harris 4-term, cutoff ±chan_bw/2, DC gain
- * normalised to 1), hop H = M/2 → output rate 2·chan_bw per channel.
+ * (WDSP fir_bandpass, Blackman-Harris 4-term, cutoff ±chan_bw/2 by default,
+ * DC gain normalised to 1), hop H = M/2 → output rate 2·chan_bw per channel.
+ * The _ex constructor opens the cutoff (up to the output Nyquist) and
+ * lengthens the prototype — the RTTY bank runs 250 Hz spacing with a
+ * ±225 Hz passband so both FSK tones of a station anywhere between two
+ * channel centres stay inside one channel (see channelizer.h).
  *
  * Per hop: the newest K·M input frames are folded branch-wise,
  *   acc[m] = Σ_k hist[P−1−(kM+m)] · h[kM+m],      m = 0..M−1,
@@ -36,7 +40,8 @@ extern double *fir_bandpass(int N, double f_low, double f_high,
 struct _SkimChannelizer {
   guint  M;                 /* channels                                       */
   guint  H;                 /* hop = M/2                                      */
-  guint  P;                 /* prototype taps = TAPS_PER_BRANCH·M             */
+  guint  K;                 /* taps per branch                                */
+  guint  P;                 /* prototype taps = K·M                           */
   double in_rate;
   double chan_bw;
 
@@ -56,22 +61,37 @@ struct _SkimChannelizer {
 };
 
 SkimChannelizer *skim_channelizer_new(double in_rate, double chan_bw_hz) {
+  return skim_channelizer_new_ex(in_rate, chan_bw_hz, 0.0, 0);
+}
+
+SkimChannelizer *skim_channelizer_new_ex(double in_rate, double chan_bw_hz,
+                                         double passband_hz,
+                                         guint taps_per_branch) {
   if (in_rate <= 0 || chan_bw_hz <= 0)
     return NULL;
   double md = in_rate / chan_bw_hz;
   guint  M  = (guint)(md + 0.5);
   if (fabs(md - (double)M) > 1e-6 || M < 8 || M > 16384 || (M & 1))
     return NULL;
+  if (passband_hz <= 0) { passband_hz = chan_bw_hz / 2.0; }
+  /* The output Nyquist is chan_bw (2× oversampled): a cutoff at or past it
+   * cannot be anti-aliased by any prototype length. */
+  if (passband_hz >= chan_bw_hz)
+    return NULL;
+  guint K = taps_per_branch ? taps_per_branch : TAPS_PER_BRANCH;
+  if (K < 2 || K > 64)
+    return NULL;
 
   SkimChannelizer *ch = g_new0(SkimChannelizer, 1);
   ch->M       = M;
   ch->H       = M / 2;
-  ch->P       = TAPS_PER_BRANCH * M;
+  ch->K       = K;
+  ch->P       = K * M;
   ch->in_rate = in_rate;
   ch->chan_bw = chan_bw_hz;
 
-  /* Prototype lowpass ±chan_bw/2, real taps (rtype 0), BH4 (wintype 0). */
-  double *hd = fir_bandpass((int)ch->P, -chan_bw_hz / 2.0, chan_bw_hz / 2.0,
+  /* Prototype lowpass ±passband_hz, real taps (rtype 0), BH4 (wintype 0). */
+  double *hd = fir_bandpass((int)ch->P, -passband_hz, passband_hz,
                             in_rate, 0, 0, 1.0);
   if (!hd) {
     g_free(ch);
@@ -125,7 +145,7 @@ static void hop(SkimChannelizer *ch) {
   const guint M = ch->M, P = ch->P;
   for (guint m = 0; m < M; m++) {
     float ar = 0.0f, ai = 0.0f;
-    for (guint k = 0; k < TAPS_PER_BRANCH; k++) {
+    for (guint k = 0; k < ch->K; k++) {
       const guint tap = k * M + m;
       const guint idx = P - 1 - tap;         /* x[s − tap]                   */
       const float w   = ch->proto[tap];

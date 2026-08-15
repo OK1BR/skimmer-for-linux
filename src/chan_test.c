@@ -10,6 +10,10 @@
  *   - a channel-edge tone straddles the two neighbours at ~−6 dB each,
  *   - three simultaneous tones: each recovered at its own amplitude, a far
  *     empty channel stays quiet (isolation under load),
+ *   - RTTY geometry (new_ex: 250 Hz spacing, ±225 Hz passband, K = 16):
+ *     both FSK tones of an edge-straddling station pass one channel, the
+ *     critical alias frequency (channel + 415 Hz folds onto the −85 Hz
+ *     space tone) is deep in the stopband, invalid passbands rejected,
  * and a CPU benchmark on the real M2 geometry (192 k / 125 Hz, M = 1536):
  * the whole CW segment must channelize well under one core.
  *
@@ -184,6 +188,60 @@ int main(void) {
          dbc(aq, 0.3));
   check("an empty channel stays < −70 dBc under 3-tone load", dbc(aq, 0.3) < -70);
   skim_channelizer_free(ch);
+
+  /* -- RTTY geometry: 250 Hz spacing, ±225 Hz passband, 16 taps/branch ------ */
+  /* A 170 Hz-shift FSK station sitting anywhere between two channel centres
+   * must land with BOTH tones (centre ±85 Hz) inside one channel: that takes
+   * a passband of ±(85 + spacing/2) = ±210 Hz minimum — the ±225 cutoff adds
+   * margin for the keying sidebands. The wide cutoff eats into the alias
+   * guard band, so the prototype doubles (K 8 → 16). */
+  ch = skim_channelizer_new_ex(FS, 250.0, 225.0, 16);
+  check("RTTY bank constructs (48 k / 250 Hz, ±225 Hz, K=16)", ch != NULL);
+  if (ch) {
+    check("RTTY geometry: 192 channels, out 500 Hz",
+          skim_channelizer_count(ch) == 192 &&
+          skim_channelizer_out_rate(ch) == 500.0);
+    /* Worst-case straddler: station centre at +125 off channel 10's centre
+     * (+2500) → tones at +40 and +210. Linear system: check each alone. */
+    Tone tr1[] = { { 2540.0, 0.5, 0.0 } };      /* space tone, +40 in ch10   */
+    push_tones(ch, tr1, 1, 4 * 48000);
+    guint nr = drain(ch, 10, out, 8192);
+    double ar40 = rms_tail(out, nr, 500);
+    double fr40 = freq_tail(out, nr, 400, 500.0);
+    skim_channelizer_free(ch);
+    ch = skim_channelizer_new_ex(FS, 250.0, 225.0, 16);
+    Tone tr2[] = { { 2710.0, 0.5, 0.0 } };      /* mark tone, +210 in ch10   */
+    push_tones(ch, tr2, 1, 4 * 48000);
+    nr = drain(ch, 10, out, 8192);
+    double ar210 = rms_tail(out, nr, 500);
+    double fr210 = freq_tail(out, nr, 400, 500.0);
+    printf("       straddler tones: +40 Hz %.1f dB (f %+.1f), +210 Hz %.1f dB"
+           " (f %+.1f)\n", dbc(ar40, 0.5), fr40, dbc(ar210, 0.5), fr210);
+    check("+40 Hz tone passes flat (> −1 dB, freq exact)",
+          dbc(ar40, 0.5) > -1.0 && fabs(fr40 - 40.0) < 1.0);
+    check("+210 Hz tone passes usable (> −4 dB, freq exact)",
+          dbc(ar210, 0.5) > -4.0 && fabs(fr210 - 210.0) < 1.0);
+    skim_channelizer_free(ch);
+    /* Critical alias: +415 Hz in-channel folds (out rate 500) onto −85 Hz —
+     * straight onto the space tone of a centred station. It must come out
+     * of the prototype's stopband, not the passband. */
+    ch = skim_channelizer_new_ex(FS, 250.0, 225.0, 16);
+    Tone tr3[] = { { 2915.0, 0.5, 0.0 } };      /* +415 in ch10              */
+    push_tones(ch, tr3, 1, 4 * 48000);
+    nr = drain(ch, 10, out, 8192);
+    double aal = rms_tail(out, nr, 500);
+    printf("       +415 Hz alias onto −85 Hz: %.1f dBc\n", dbc(aal, 0.5));
+    check("alias onto the space tone < −50 dBc", dbc(aal, 0.5) < -50.0);
+    skim_channelizer_free(ch);
+    check("passband ≥ spacing (output Nyquist) rejected",
+          skim_channelizer_new_ex(FS, 250.0, 250.0, 16) == NULL);
+    ch = skim_channelizer_new_ex(FS, BW, 0.0, 0);
+    check("defaulted _ex ≡ plain constructor (M = 384)",
+          ch != NULL && skim_channelizer_count(ch) == M);
+    skim_channelizer_free(ch);
+  } else {
+    checks += 6; fails += 6;
+  }
 
   /* -- CPU: the real M2 geometry, 192 k / 125 Hz (M = 1536) ----------------- */
   ch = skim_channelizer_new(192000.0, BW);

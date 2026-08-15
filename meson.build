@@ -43,6 +43,7 @@ engine_sources = [
   'src/engine/channelizer.c',  # M2: polyphase filter bank → complex channels
   'src/engine/decode_cw.c',    # M3: CW backend (implements decode.h)
   'src/engine/decode_cw_v2.c', # CW v2: semi-Markov Viterbi (QSB-proof)
+  'src/engine/decode_rtty.c',  # M7: RTTY backend (Baudot FSK)
   'src/engine/cw_reader.c',    # neural over re-reader (TCN+CTC, pane-only)
   'src/engine/pane_log.c',     # phase B: pane text + live over region (ops)
   'src/engine/tone_split.c',   # per-channel carrier splitter (multi-signal)
@@ -119,6 +120,17 @@ skimmer_cw_test = executable('skimmer-cw-test',
   link_with : engine_lib,
 )
 test('cw-decode', skimmer_cw_test, timeout : 120)
+
+# M7: offline gate — RTTY backend on synthetic Baudot FSK (ITA2 bit-vector
+# truth, offsets, figures/UOS, reversed polarity, AWGN/QSB/selective fade,
+# squelch on noise/CW/two-carrier, wide-passband channelizer integration).
+skimmer_rtty_test = executable('skimmer-rtty-test',
+  ['src/rtty_test.c'],
+  include_directories : include_directories('src'),
+  dependencies : engine_deps,
+  link_with : engine_lib,
+)
+test('rtty-decode', skimmer_rtty_test, timeout : 120)
 
 # Tone splitter: offline gate — sideband immunity, Δf 50/30 Hz splits with
 # both texts copied, Δf 15 Hz contested, slot TTL collapse/re-engage, and the

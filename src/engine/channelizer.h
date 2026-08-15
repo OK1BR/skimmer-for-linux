@@ -24,6 +24,17 @@ typedef struct _SkimChannelizer SkimChannelizer;
  * spacing. in_rate/chan_bw_hz must be an even integer (the hop is M/2).
  * NULL on invalid geometry. */
 SkimChannelizer *skim_channelizer_new(double in_rate, double chan_bw_hz);
+
+/* Extended geometry: passband_hz = one-sided prototype cutoff (0 = the
+ * default chan_bw/2), taps_per_branch = prototype length in branches
+ * (0 = the default 8). A mode whose signal is WIDER than its channel
+ * spacing (RTTY: ±85 Hz tones + keying sidebands) opens the passband up
+ * to the output Nyquist (chan_bw_hz) so a station anywhere between two
+ * channel centres still lands with BOTH tones in one channel; the longer
+ * prototype buys back the alias rejection the wide cutoff spends. */
+SkimChannelizer *skim_channelizer_new_ex(double in_rate, double chan_bw_hz,
+                                         double passband_hz,
+                                         guint taps_per_branch);
 void             skim_channelizer_free(SkimChannelizer *ch);
 
 /* Number of output channels (= M). Channel 0 is the stream centre; channels
