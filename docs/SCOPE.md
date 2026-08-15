@@ -551,6 +551,37 @@ where relevant, a live check against a running `sdr-for-linux`.
   straddler through the real wide bank, and the WHOLE offline pipeline in
   RTTY mode — two CQing stations tabled exactly, mode RTTY, ±4 Hz, no
   phantoms); `skimmer-chan-test` 18 → 25. 11 gates total.
+- **OPEN — RTTY over-head startup is confused (measured 2026-08-15 on the
+  live capture; a fix is still owed).** Live symptom (Richard, parked on a
+  fixed frequency): the first characters of every over are wrong and text
+  appears only after a delay. Measured offline on
+  `iq-20260815-rtty-live1-192k.cf32` (engine replay + a literal Python port
+  of `decode_rtty.c` on the SV1JDZ channel, text-identical to the engine):
+  every over head decodes `CQ DE SV1JDZ…` — the first `CQ ` is eaten,
+  deterministically. Four stacked causes, by share: (1) the 0.7 s
+  **settle embargo** runs before the UARTs are armed, so nothing in that
+  window is framed OR buffered — the "over heads are not eaten" pend
+  guarantee above only holds from arm onward; with the usual ~0.7 s diddle
+  preamble the acquisition hides in the preamble and settle lands exactly
+  on the first text chars; (2) **UART sync-in**: the framers arm
+  mid-character, a false start bit can frame garbage that passes the stop
+  check and flushes from pend as a garbled head (live: `L DEV1JDZ…`);
+  (3) **ok_ema reaches re-acquire at ~0** — between TX end and the ~3 s
+  periodogram release the framers grind noise and decay it, so the ×0.5
+  "keep half" at release is moot and the squelch re-proves 5 valid chars
+  every over → OPEN sits at ACQ + 1.53 s (0.7 settle + 5 × 0.165 s) on
+  every single over; (4) **acquisition** itself: PSD EMA τ 0.8 s against
+  the 8× bar = 0.5 s at 24 dB but seconds near threshold, and everything
+  sent before it is unrecoverable. Net: first text ~2.0 s after key-on for
+  a strong station. Derived, unmeasured: a FIGS falling into the settle
+  window prints the following number group as letters. Candidate fix,
+  Richard-approved direction pending: a **pre-roll replay** in the RTTY
+  backend after the CW squelch-attack pattern (~2 s baseband ring replayed
+  through the converged demod/UART after acquisition + settle) — covers
+  the settle window, pre-acquisition text and the sync-in garble at once.
+  Separate class spotted on the way (NOT startup): a reproducible mid-over
+  loss of ` S` after `DE` (`DEV1JDZ`, `VQJDZ` — engine and sim agree), to
+  be dissected on the same fixture.
 - **Later — PSK backend** (BPSK31 + BPSK63, Costas loop, varicode) and an
   optional **own-panorama waterfall** (port `waterfall.c`).
 
