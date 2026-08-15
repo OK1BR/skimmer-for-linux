@@ -512,8 +512,13 @@ where relevant, a live check against a running `sdr-for-linux`.
   re-announces keeps ONE reported value, a real QSY re-quantises at once,
   a grid change re-quantises, Exact follows raw; verified the new check
   FAILS on the pre-fix code (the alternation is what it catches).
-- **M7 — RTTY backend. IMPLEMENTED (offline gates 2026-08-15, mid-contest;
-  live validation pending).** `decode_rtty.c` implements `decode.h` for
+- **M7 — RTTY backend. IMPLEMENTED (offline gates 2026-08-15, mid-contest);
+  LIVE-VERIFIED the same morning** — real contest spots (LA1TV 14093.2,
+  IZ0FVD 14091.5 — `RTTY … 45 BPS CQ` on the telnet feed), clean
+  strong-station copy, 11 % CPU at 192 k/768 channels; open fixture-tunable
+  leaks are logged in CLAUDE.md (a non-45.45 digimode passes the squelch as
+  sustained garbage; FT8-band single-char leaks; a 297 s live capture in
+  `/var/tmp/skimmer-iq/` carries all the cases). `decode_rtty.c` implements `decode.h` for
   45.45 Bd / 170 Hz-shift Baudot: a Hann-periodogram pair finder (the WEAKER
   tone scores, so a lone carrier can never acquire; sub-bin centre from
   floor-subtracted tone centroids) → two NCOs riding the tracked centre

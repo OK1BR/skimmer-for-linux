@@ -644,6 +644,35 @@ switch, real pileups, spot colours vs logbook RTTY dup service),
 reported-frequency convention (we spot the pair CENTRE; RBN convention
 is the MARK tone — decide with Richard before the telnet feed carries
 RTTY), per-channel CPU at M=768 RTTY channels unmeasured live.
+**M7 LIVE — the RTTY mode works on a real contest band (Richard's
+verdict 2026-08-15 morning, mid-contest, 20 m).** Session: dds
+14 086 kHz, 192 k IQ, the new build launched with `[decode] mode=rtty`
+against the running sdr-for-linux. The WHOLE chain proven live: real
+spots on the telnet feed (`DX de OK1BR-#: 14093.2 LA1TV RTTY 20 dB
+45 BPS CQ 0839Z`, then IZ0FVD 14091.5) and clean strong-station text
+in the decode log ("CQ CQ DE SV1JDZ … PSE K" at 20-23 dB, LA1TV
+repeats exact at 10-16 dB). Whole-app CPU 11 % of one core at 192 k /
+768 channels, no stall, no crash over the session. Richard: "skimmer
+vypadá, že funguje." OPEN, fixture-tunable (the live band found what
+synthetic cases could not): (1) squelch LEAK classes — 14121.5 held a
+SUSTAINED garbage stream (a non-45.45 digimode passes the pair test +
+framing bar; wrong-baud discrimination is the missing layer) and the
+CW segment (14008) leaked sporadic weak fragments; neither ever
+validated into a callsign (extractor held — zero bogus spots), but
+they dirty the decode log/panes; (2) SV1JD(Z) decoded strongly for
+minutes yet was not seen in the feed watcher window — possibly spotted
+in a 30 s observation gap, possibly a call-tail flap (SV1JD ↔ SV1JDZ)
+keeping the extractor under the 0.85 feed bar — the fixture replay
+with SKIM_ST_DEBUG answers this exactly; (3) FT8 band (14074-076)
+acquires often, emits only single chars — harmless but wasted demod
+CPU; a "known non-RTTY subband" damper is a possible later lever.
+**Fresh IQ fixture recorded for all of it:**
+`/var/tmp/skimmer-iq/iq-20260815-rtty-live1-192k.cf32` (297 s, 457 MB,
+192 k, centre 14 086 960 Hz, .meta sidecar hand-written — the probe
+only writes it on its own clean exit path; capture carries LA1TV +
+SV1JD(Z) + IZ0FVD + the 14121.5 garbage source + the FT8 band).
+Threshold work happens OFFLINE against this fixture (SKIM_MODE=rtty
+replay), the established house method.
 
 ## Layout
 
