@@ -15,9 +15,7 @@ makedepends=('meson' 'desktop-file-utils' 'gtk-update-icon-cache')
 source=("$pkgname-$_pkgtag.tar.gz::$url/archive/refs/tags/v$_pkgtag.tar.gz")
 # From the published tag tarball:
 #   curl -sL <url>/archive/refs/tags/v0.3.0.tar.gz | sha256sum
-# SKIP until the v0.3.0 tarball exists — the real checksum follows in its
-# own commit once the tag is published (the v0.2.0 flow).
-sha256sums=('SKIP')
+sha256sums=('6850b0e5d07bed32b3613d4c7da50e0fc36542239a5ff5188b524494e9edda75')
 
 build() {
   arch-meson "$pkgname-$_pkgtag" build
