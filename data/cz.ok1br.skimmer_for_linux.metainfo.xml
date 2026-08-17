@@ -4,10 +4,10 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <name>Skimmer for Linux</name>
-  <summary>Multi-channel CW skimmer and spot feeder</summary>
+  <summary>Multi-channel CW/RTTY skimmer and spot feeder</summary>
   <description>
     <p>
-      A native GTK4/libadwaita CW skimmer for Linux. It pulls a wideband IQ
+      A native GTK4/libadwaita CW and RTTY skimmer for Linux. It pulls a wideband IQ
       stream from the TCI server in sdr-for-linux, splits the segment into
       hundreds of narrow channels with a polyphase filter bank, and decodes
       every signal in it at once. Validated callsigns go back to the radio as
@@ -50,6 +50,21 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.3.0" date="2026-08-17">
+      <description>
+        <p>
+          The skimmer speaks RTTY: a new Baudot FSK decoder (45.45 Bd) skims
+          the whole segment in parallel — tone-pair acquisition, per-tone
+          automatic threshold correction that copies a 10 dB tilted pair, and
+          framing that elects a reversed shift on its own — selectable under
+          Preferences → Decoding and proven live on a contest band. The
+          engine now freezes decode state while your own transmission deafens
+          the receiver, so the station answering you decodes from its first
+          character after unkey. The app icon was redrawn, with a symbolic
+          variant for the shell.
+        </p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-08-09">
       <description>
         <p>

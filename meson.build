@@ -1,5 +1,5 @@
 project('skimmer-for-linux', 'c',
-  version : '0.2.0',
+  version : '0.3.0',
   license : 'GPL-3.0-or-later',
   default_options : [
     'c_std=c11',

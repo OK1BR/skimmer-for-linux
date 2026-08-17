@@ -1,12 +1,12 @@
 [Desktop Entry]
 Type=Application
 Name=Skimmer for Linux
-Comment=Multi-channel CW skimmer and spot feeder
-Comment[cs]=Vícekanálový CW skimmer a zdroj spotů
+Comment=Multi-channel CW/RTTY skimmer and spot feeder
+Comment[cs]=Vícekanálový CW/RTTY skimmer a zdroj spotů
 Exec=@bindir@/skimmer-for-linux
 Icon=cz.ok1br.skimmer_for_linux
 Terminal=false
 Categories=Utility;HamRadio;
-Keywords=ham;radio;amateur;CW;morse;skimmer;decoder;spot;cluster;telnet;RBN;TCI;SDR;contest;
+Keywords=ham;radio;amateur;CW;morse;RTTY;skimmer;decoder;spot;cluster;telnet;RBN;TCI;SDR;contest;
 StartupNotify=true
 StartupWMClass=cz.ok1br.skimmer_for_linux

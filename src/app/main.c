@@ -1323,7 +1323,7 @@ static void act_about(GSimpleAction *action, GVariant *param, gpointer user) {
   adw_about_dialog_set_developer_name(ad, "Richard Fakenberg, OK1BR");
   /* Same one-liner the metainfo <summary> and the .desktop Comment carry. */
   adw_about_dialog_set_comments(ad,
-      "Multi-channel CW skimmer and spot feeder");
+      "Multi-channel CW/RTTY skimmer and spot feeder");
   adw_about_dialog_set_copyright(ad, "© 2026 Richard Fakenberg, OK1BR");
   adw_about_dialog_set_license_type(ad, GTK_LICENSE_GPL_3_0);
   adw_about_dialog_set_website(ad,
