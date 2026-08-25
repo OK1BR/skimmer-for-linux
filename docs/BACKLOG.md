@@ -79,6 +79,62 @@ and cannot be chased by widget address.
 cause is ours at all or a GTK 4.22 regression. Only then decide where a fix
 belongs.
 
+## Open — ideas
+
+### SKM-3 — Evaluate DeepCW as a neural decode backend alongside the DSP one
+- **Type:** idea · **Severity:** — · **Status:** open (evaluate, nothing decided)
+- **Source:** own research, 2026-08-25
+- **Detail:** upstream <https://github.com/e04/deepcw-engine> (model + minimal
+  Python/Node example), demo front-end <https://github.com/e04/web-deep-cw-decoder>
+
+`decode.h` was specified as a pluggable interface precisely so a channel can be
+handed to something other than the hand-written DSP decoder. DeepCW is the first
+credible candidate: a small ONNX model that decodes CW from audio, taking mono
+PCM at **3200 Hz** (`ffmpeg -ac 1 -ar 3200 -sample_fmt s16`), with the model and
+its metadata (`model.onnx`, `model.onnx.json`) shipped in the repo.
+
+Why it is interesting for a skimmer specifically: a threshold decoder decides
+per sample whether the tone is above a level, so any interferer at the same
+level breaks it. A trained model decides on the *rhythm* of the keying instead —
+the same thing an experienced operator's ear does — which is exactly the regime
+a band-wide skimmer lives in, where most channels are weak and crowded.
+
+**Author's own figures, not reproduced here:** 0.00% character error from 0 down
+to -4 dB SNR at all tested speeds, below 1.5% at -8 dB and below 8% at -10 dB,
+measured in AWGN at roughly 50% keying duty cycle. Treat as a claim to verify,
+not a specification.
+
+Open questions, in the order they would have to be answered:
+
+1. **Licence gate, first and blocking.** DeepCW is **AGPL-3.0-only**; this app
+   is GPLv3. Whether the model and the inference code can be linked into a
+   GPLv3 binary — and what §13 would then oblige for the RBN feed, which is a
+   network service — has to be settled before any code is written. If the answer
+   is no, the idea ends here regardless of how well it decodes. An
+   out-of-process backend talking over a pipe is the obvious fallback shape, but
+   that too needs the licence question answered first.
+2. **Where it sits in the pipeline.** The channelizer already produces complex
+   baseband per channel; DeepCW wants real audio at 3200 Hz, so a channel would
+   need a tone-detect + decimate stage in front of it. That throws away the
+   phase the channelizer is careful to keep — fine for CW, but it means this
+   backend is CW-only by construction and cannot be the path RTTY/PSK reuse.
+3. **Cost per channel.** A skimmer runs hundreds of channels at once, so the
+   question is not "does it decode" but "what does one channel-second cost".
+   Unknown until measured. If it is too expensive to run everywhere, the useful
+   shape may be a second-opinion decoder on channels the DSP backend already
+   flagged as active but could not resolve into a valid callsign.
+4. **Where it would run.** The dev machine has an Intel NPU (Core Ultra 7 265,
+   `vpu_37xx`, ~13 TOPS) reachable through OpenVINO, which is attractive because
+   it is a few watts and leaves the GPU alone — but **nothing has been compiled
+   or measured**: whether the ONNX graph converts to OpenVINO IR and whether its
+   operators are covered on that NPU generation are both open. CPU is the
+   baseline to measure against first. And an NPU-only backend would be useless
+   to anyone else, so any dependency must stay optional.
+
+Nothing here is committed to a milestone. The first cheap step is offline: run
+the upstream Python example over recorded contest audio and compare its output
+against the DSP backend on the same recording.
+
 ## Roadmap
 
 Milestones and their order live in `docs/SCOPE.md`. Nothing in this backlog
