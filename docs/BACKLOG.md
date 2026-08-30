@@ -136,11 +136,14 @@ the upstream Python example over recorded contest audio and compare its output
 against the DSP backend on the same recording.
 
 ### SKM-4 — In-app waterfall with decodes placed by frequency, click to set TX
-- **Type:** idea · **Severity:** — · **Status:** open (waiting on the reporter)
+- **Type:** idea · **Severity:** — · **Status:** open (reporter answered, not reviewed yet)
 - **Source:** e-mail from Roy Andre Løntjern, LB0EI, 2026-08-29; answered 2026-08-30
-  with a request for a step-by-step description of his workflow
-- **Detail:** original mail in the personal mailbox, thread *"Skimmer for Linux –
-  pileup use and IC-7610 IQ support"*
+  with a request for a step-by-step description of his workflow, which he sent the
+  same day
+- **Detail:** the whole thread is archived in the personal mailbox, subject
+  *"Skimmer for Linux – pileup use and IC-7610 IQ support"* — his step-by-step
+  description and a screenshot of his CW Skimmer setup are there; read it from the
+  archive when work on this item starts
 
 CW Skimmer is one of the main reasons the reporter still keeps Windows in the
 shack. His use is DX pileups: he watches where stations send `5NN`/`599` inside
@@ -163,14 +166,15 @@ Two halves, and only one of them is missing:
    been checked; that is the part that decides whether this workflow is
    supportable at all.
 
-Nothing is designed yet: the reporter's exact flow was not fully clear from the
-mail, so the next input is his answer.
+Nothing is designed yet, and nothing from his answer is summarised here on
+purpose — the detail lives in the archived mail thread (see **Detail** above).
 
 ### SKM-5 — IC-7610 wideband IQ as a source (`ic7610ftdi`)
 - **Type:** idea · **Severity:** — · **Status:** open (not investigated)
 - **Source:** same mail, LB0EI, 2026-08-29
 - **Detail:** reporter's pointer only — DF7CB's `ic7610ftdi`, a Linux driver/tool
   said to receive the IC-7610 wideband IQ stream over USB. **Not verified here.**
+  Same archived mail thread as SKM-4, in the personal mailbox.
 
 The reporter runs an IC-7610 and asks whether that IQ source is relevant or
 feasible for this project. Architecturally the work does not land in this repo:
