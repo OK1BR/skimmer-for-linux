@@ -135,6 +135,54 @@ Nothing here is committed to a milestone. The first cheap step is offline: run
 the upstream Python example over recorded contest audio and compare its output
 against the DSP backend on the same recording.
 
+### SKM-4 — In-app waterfall with decodes placed by frequency, click to set TX
+- **Type:** idea · **Severity:** — · **Status:** open (waiting on the reporter)
+- **Source:** e-mail from Roy Andre Løntjern, LB0EI, 2026-08-29; answered 2026-08-30
+  with a request for a step-by-step description of his workflow
+- **Detail:** original mail in the personal mailbox, thread *"Skimmer for Linux –
+  pileup use and IC-7610 IQ support"*
+
+CW Skimmer is one of the main reasons the reporter still keeps Windows in the
+shack. His use is DX pileups: he watches where stations send `5NN`/`599` inside
+the split window — that spot is where the DX station was just listening — then
+point-and-clicks to move **his TX frequency** there, and follows the DX as its
+listening spot drifts across the window. He asks whether this app will eventually
+offer a similar visual pileup/waterfall display with decoded CW positioned by
+frequency, including point-and-click tuning.
+
+Two halves, and only one of them is missing:
+
+1. **Decodes placed by frequency, clickable** — already exists, but in the other
+   window: validated callsigns are pushed back as spots onto the `sdr-for-linux`
+   panadapter, click to tune. What the reporter wants is that view inside the
+   skimmer itself. A horizontal waterfall as an **option** is most likely
+   feasible; the open question is where it fits in the UI, not whether the data
+   is there.
+2. **The click has to set TX, not RX** — in a split pileup the RX stays on the DX
+   frequency. Whether the tuning path can address the TX VFO (over TCI) has not
+   been checked; that is the part that decides whether this workflow is
+   supportable at all.
+
+Nothing is designed yet: the reporter's exact flow was not fully clear from the
+mail, so the next input is his answer.
+
+### SKM-5 — IC-7610 wideband IQ as a source (`ic7610ftdi`)
+- **Type:** idea · **Severity:** — · **Status:** open (not investigated)
+- **Source:** same mail, LB0EI, 2026-08-29
+- **Detail:** reporter's pointer only — DF7CB's `ic7610ftdi`, a Linux driver/tool
+  said to receive the IC-7610 wideband IQ stream over USB. **Not verified here.**
+
+The reporter runs an IC-7610 and asks whether that IQ source is relevant or
+feasible for this project. Architecturally the work does not land in this repo:
+the skimmer is a TCI client and takes its IQ from `sdr-for-linux`, so supporting a
+big-three radio (Icom, Yaesu, Kenwood) means getting its wideband IQ into TCI on
+the SDR side first. TCI stays the universal protocol between the programs.
+
+With Icom it is realistic in principle and the hardware for testing is on the
+bench — an IC-705 and an IC-7610. Not ruled out for the future; it needs study
+before anything is promised, starting with what `ic7610ftdi` actually delivers
+(sample rate, bandwidth, format, licence).
+
 ## Roadmap
 
 Milestones and their order live in `docs/SCOPE.md`. Nothing in this backlog
