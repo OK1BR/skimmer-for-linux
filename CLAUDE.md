@@ -924,6 +924,18 @@ window): live = sdr `build/` 98c57de + skimmer `builddir` c1556f5 (live21)
 + logbook `builddir` 76349f8; next session starts at SDR-13 in
 sdr-for-linux.**
 
+**2026-09-06 — open list re-cut (Richard's call).** SDR-13 read, not
+reproduced: persistence path clean, 1 Hz = the GUI tuning clamp, last
+frequency before the SIGTERM unrecoverable — stays open in sdr-for-linux's
+BACKLOG (1f288d9) with a recipe for the next planned restart. Items (4)
+coherent re-centring and (5) DDC latency are SHELVED as invisible polish
+(do not offer again without a visible symptom). **Next session, in order:
+(a) prepare and publish v0.4.0** — 40 commits since v0.3.0 (M8 waterfall +
+column + click, SKM-1/SKM-6, list gone), flow as v0.3.0: tag first, sha256
+from the published tarball, `.SRCINFO`, AUR push; **(b) RTTY over-head
+pre-roll fix** (OPEN item under M7 in SCOPE, fixture in
+`/var/tmp/skimmer-iq/`).
+
 ## Layout
 
 ```

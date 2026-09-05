@@ -1123,6 +1123,26 @@ where relevant, a live check against a running `sdr-for-linux`.
   (build, configs, CDP driver, screenshots) stays until his word to trash
   it. Next session continues at SDR-13 in sdr-for-linux.
 
+  **2026-09-06 — the open list re-cut (Richard: "nepitváme se náhodou ve
+  sračkách zbytečně?").** SDR-13 was READ, not reproduced: every tuning path
+  ends in `schedule_save`, `main()` saves once more after the run loop and
+  before the radio stops (the predecessor's log shows that path ran), the
+  keyfile write is atomic, the load applies no floor — and 1 Hz is exactly
+  the `nf < 1 → 1` clamp every GUI tuning path applies, where Richard had
+  been sweeping the DC line shortly before; the last frequency before the
+  SIGTERM is in no log and he does not remember. Hypothesis: a faithful
+  restore of operator state. Stays open in sdr-for-linux's BACKLOG
+  (1f288d9) with a recipe for the next restart that is planned anyway; the
+  live radio was not stopped for it. **Items (4) coherent re-centring and
+  (5) `SDRFL_DDC_LAT_MS` are SHELVED as polish** — sub-bin history shift and
+  sub-row latency are invisible on a waterfall he already accepted; not to
+  be offered again without a visible symptom. Item (6) stays for a contest
+  look. **Decided, in order: (a) release v0.4.0 FIRST** — 40 commits since
+  v0.3.0: M8 waterfall + callsign column + click-to-tune (LB0EI's ask),
+  SKM-1/SKM-6 fixes, the list gone, all live-verified; **(b) then the RTTY
+  over-head fix** (pre-roll replay, the OPEN item under M7 — measured
+  causes, approved direction, fixture in `/var/tmp/skimmer-iq/`).
+
 ## Safety / etiquette
 
 Read-only against the radio, with one deliberate exception: the skimmer
