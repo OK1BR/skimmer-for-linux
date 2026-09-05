@@ -746,6 +746,34 @@ radio. Lag telemetry under the replay: 94 rows/s, worst drain 0.2 ms.
 Gate 51 checks. **Palette picker** (Richard's first live-look request):
 Preferences → Display → Colour scheme, the SDR's six schemes, live apply,
 `[ui] palette`. Next: callsign column + click.
+**M8 — callsign column + click-to-tune (headless-verified 2026-09-05
+evening).** The column right of the scale is CW Skimmer's: a rail down its
+left edge, a yellow dot on it at every tracked station's frequency, the
+callsign beside it ("CQ " prefix for callers), and a connector dot→text —
+flat when the label sits on its frequency, slanted when it had to move.
+Layout is GLib-only in `wf_compose.c` (`skim_wf_layout_labels`): frequency
+order kept, crowding labels seated by isotonic regression on
+anchor − k·pitch (pool-adjacent-violators — a cluster spreads
+SYMMETRICALLY about its mean anchor instead of piling downward), edge
+clamps, and over capacity the lowest-priority labels hide (fixed station
+> CQ > SNR; the dots stay). Label colours are the spot colours
+(`SKIM_SPOT_ARGB`/`_DUP` through `skim_dup_verdict_gray` — pane,
+panadapter and column agree), the pane's fixed station bold, hover
+backdrop + pointer cursor. `skim_wf_view_set_stations` takes a snapshot of
+the station table (CQ and S&P alike — the column is the list in another
+shape), rebuilt at the end of a drain that touched the table or the
+fixation, on the view switch and à 2 s (verdict recolours). Click = the
+panadapter-spot gesture: `skim_pipeline_tune` to the station's TRACKED Hz
+(not the pixel's) + `clicked_on_spot` (logbook prefill — the same path as
+a pane click) + pane fixation; a press that travelled > 4 px is a drag,
+not a click. Gate `skimmer-spectrum-test` 61 → 75 checks (layout + hit
+test). Headless (Broadway + a CDP click, RTTY fixture, private D-Bus
+session so Richard's live instance stays untouched): SV1JDZ labelled at
+14 086.96, the click logged `wf click: SV1JDZ @ 14086964 Hz — tune +
+clicked_on_spot`, pane fixed on it, label bold. NOT verified: the live
+tune (offline `skim_pipeline_tune` is a no-op) and the logbook prefill —
+Richard's live look. 12 gates green. README regrounded: twelve gates, as
+meson lists them.
 
 ## Layout
 

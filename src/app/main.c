@@ -507,6 +507,35 @@ static void apply_gone(App *app, const SkimStation *st) {
   }
 }
 
+/* The waterfall's callsign column is a snapshot of the station table: one
+ * label per tracked station (CQ and S&P alike — the column is the list in
+ * another shape), coloured by the logbook's verdict exactly as the pane and
+ * the panadapter spots are, the pane's fixed station bold. Rebuilt at the
+ * end of a drain that touched the table or the fixation (and à 2 s for
+ * verdict recolours, like the pane tail) — a few hundred cache lookups,
+ * and only while the waterfall is the shown view. */
+static void wf_stations_sync(App *app) {
+  if (!app->wf || app->view != VIEW_WF) { return; }
+  const guint n = g_list_model_get_n_items(G_LIST_MODEL(app->stations));
+  SkimWfStation *st = g_new0(SkimWfStation, MAX(n, 1u));
+  for (guint i = 0; i < n; i++) {
+    SkimRow *r = g_list_model_get_item(G_LIST_MODEL(app->stations), i);
+    SkimWfStation *o = &st[i];
+    g_strlcpy(o->call, r->st.call, sizeof(o->call));
+    o->hz     = r->st.freq_hz;
+    o->cq     = r->st.cq;
+    o->snr_db = r->st.snr_db;
+    o->gray   = app->pipeline &&
+                skim_dup_verdict_gray(skim_pipeline_dup_verdict(app->pipeline,
+                                                                r->st.call,
+                                                                r->st.freq_hz));
+    o->tuned  = g_strcmp0(r->st.call, app->tuned_call) == 0;
+    g_object_unref(r);
+  }
+  skim_wf_view_set_stations(app->wf, st, n);
+  g_free(st);
+}
+
 static void pane_flush(App *app, GString *pane);
 
 /* Is this event's frequency routed into the tuned pane? The pane belongs to
@@ -685,7 +714,7 @@ static gboolean evq_drain(gpointer data) {
     }
   }
   GString *pane = g_string_new(NULL);
-  gboolean wf_dirty = FALSE;
+  gboolean wf_dirty = FALSE, st_dirty = FALSE;
   for (guint i = 0; i < batch->len; i++) {
     Ev *ev = g_ptr_array_index(batch, i);
     if (ev->kind != EV_TEXT && ev->kind != EV_SPECTRUM) { pane_flush(app, pane); }
@@ -699,10 +728,12 @@ static gboolean evq_drain(gpointer data) {
     case EV_STATION:
       if (GPOINTER_TO_UINT(g_hash_table_lookup(last, ev->st.call)) == i + 1) {
         apply_station(app, &ev->st);
+        st_dirty = TRUE;
       }
       break;
     case EV_GONE:
       apply_gone(app, &ev->st);
+      st_dirty = TRUE;
       break;
     case EV_TEXT:
       apply_text(app, ev->hz, ev->str, pane);
@@ -713,6 +744,7 @@ static gboolean evq_drain(gpointer data) {
       break;
     case EV_VFO:
       apply_vfo(app, ev->hz);
+      st_dirty = TRUE;                         /* the fixation may move      */
       break;
     case EV_STATE:
       apply_state(app, ev->connected, ev->str);
@@ -729,7 +761,10 @@ static gboolean evq_drain(gpointer data) {
      * pileup report (49 ms drains, live-measured 2026-08-01). */
     app->resolve_pending = FALSE;
     if (tuned_station_refresh(app)) { tuned_pane_reload(app); }
+    st_dirty = TRUE;
   }
+  if (st_dirty) { wf_stations_sync(app); }     /* after the resolver: the
+                                                * bold label is the pane's   */
   app->ctr_ev += batch->len;
   g_ptr_array_unref(batch);
   const gint64 drain_us = g_get_monotonic_time() - drain_t0;
@@ -844,6 +879,7 @@ static gboolean age_tick(gpointer data) {
    * logged a moment ago must gray out in place, not only in new text.
    * The no-churn guard in scp_tag_token makes an unchanged pass free. */
   scp_highlight(app, 2000);
+  wf_stations_sync(app);                       /* verdict recolours          */
   return G_SOURCE_CONTINUE;
 }
 
@@ -1071,6 +1107,7 @@ static void view_apply(App *app) {
   if (app->pipeline) {
     skim_pipeline_set_spectrum_enabled(app->pipeline, app->view == VIEW_WF);
   }
+  wf_stations_sync(app);                       /* no-op unless waterfall     */
   app->view_syncing = TRUE;
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->list_btn), app->view == VIEW_LIST);
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->wf_btn), app->view == VIEW_WF);
@@ -1721,7 +1758,31 @@ static void on_row_activated(GtkColumnView *view, guint position, gpointer user)
     app->tuned_slot_hz = r->st.freq_hz;
     tuned_label_update(app, &r->st);
     tuned_pane_reload(app);
+    wf_stations_sync(app);
     g_object_unref(r);
+  }
+}
+
+/* A click on a callsign in the waterfall column is the panadapter-spot
+ * gesture: tune the radio to the station's exact frequency, fix the pane on
+ * it, and announce the click over TCI so the logbook prefills its Call entry
+ * — the same path a click on a call in the decode pane takes (Richard,
+ * 2026-08-01). */
+static void on_wf_call_clicked(const char *call, double hz, gpointer user) {
+  App *app = user;
+  if (app->pipeline) {
+    skim_pipeline_tune(app->pipeline, hz);
+    skim_pipeline_spot_clicked(app->pipeline, call, hz);
+  }
+  g_strlcpy(app->tuned_call, call, sizeof(app->tuned_call));
+  app->tuned_slot_hz = hz;
+  SkimRow *r = g_hash_table_lookup(app->row_by_call, call);
+  tuned_label_update(app, r ? &r->st : NULL);
+  tuned_pane_reload(app);
+  wf_stations_sync(app);
+  if (g_getenv("SKIM_PANE_DEBUG")) {
+    g_message("wf click: %s @ %.0f Hz — tune + clicked_on_spot%s", call, hz,
+              app->pipeline ? "" : " (no pipeline — not sent)");
   }
 }
 
@@ -2061,6 +2122,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   gtk_stack_add_named(GTK_STACK(app->top_stack), list_scroll, "list");
   app->wf = SKIM_WF_VIEW(skim_wf_view_new());
   skim_wf_view_set_palette(app->wf, app->palette);
+  skim_wf_view_set_click_cb(app->wf, on_wf_call_clicked, app);
   gtk_stack_add_named(GTK_STACK(app->top_stack), GTK_WIDGET(app->wf), "waterfall");
   gtk_widget_set_vexpand(app->top_stack, TRUE);
   gtk_box_append(GTK_BOX(box), app->top_stack);

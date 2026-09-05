@@ -507,12 +507,99 @@ static void compose_section(void) {
   skim_wf_history_free(h);
 }
 
+/* --- callsign column layout (wf_compose.c) ---------------------------------------- */
+
+static void labels_section(void) {
+  printf("--- callsign column layout ---\n");
+  const double P = 14.0, H = 400.0;
+
+  /* Far apart: nobody moves. */
+  SkimWfLabel a[3] = { { 100, 0, 0 }, { 200, 0, 0 }, { 300, 0, 0 } };
+  guint shown = skim_wf_layout_labels(a, 3, P, H);
+  check("far apart: all shown, none moved",
+        shown == 3 && a[0].y == 100 && a[1].y == 200 && a[2].y == 300);
+
+  /* Two labels 3 px apart, given out of order: pushed to ±P/2 about their
+   * mean, the higher-frequency (smaller y) one stays above. */
+  SkimWfLabel b[2] = { { 203, 0, 0 }, { 200, 0, 0 } };
+  skim_wf_layout_labels(b, 2, P, H);
+  check("pair 3 px apart: spread symmetrically about the mean anchor",
+        fabs(b[1].y - (201.5 - P / 2)) < 1e-9 && fabs(b[0].y - (201.5 + P / 2)) < 1e-9);
+  check("pair: frequency order kept", b[1].y < b[0].y);
+
+  /* Five on one frequency: spaced ≥ pitch, the run centred on the anchor. */
+  SkimWfLabel c[5];
+  for (int i = 0; i < 5; i++) { c[i] = (SkimWfLabel){ 150, 0, 0 }; }
+  skim_wf_layout_labels(c, 5, P, H);
+  double lo = 1e9, hi = -1e9;
+  gboolean spaced = TRUE;
+  for (int i = 0; i < 5; i++) { lo = MIN(lo, c[i].y); hi = MAX(hi, c[i].y); }
+  for (int i = 0; i < 5; i++) {
+    for (int j = i + 1; j < 5; j++) { if (fabs(c[i].y - c[j].y) < P - 1e-9) { spaced = FALSE; } }
+  }
+  check("cluster of five: spaced ≥ pitch, centred on the anchor",
+        spaced && fabs((lo + hi) / 2 - 150) < 1e-9 && fabs(hi - lo - 4 * P) < 1e-9);
+
+  /* A neighbour 20 px under a triple is nudged down, never overrun. */
+  SkimWfLabel d[4] = { { 150, 0, 0 }, { 150, 0, 0 }, { 150, 0, 0 }, { 170, 0, 0 } };
+  skim_wf_layout_labels(d, 4, P, H);
+  check("near neighbour: pushed down by the cluster, order kept",
+        d[3].y >= d[2].y + P - 1e-9 && d[3].y > 170);
+
+  /* Edges: a run at the top slides down until its first band starts at 0,
+   * one at the bottom slides up until its last band ends at hgt. */
+  SkimWfLabel e[3] = { { 2, 0, 0 }, { 2, 0, 0 }, { 2, 0, 0 } };
+  skim_wf_layout_labels(e, 3, P, H);
+  const double emin = MIN(e[0].y, MIN(e[1].y, e[2].y));
+  check("top edge: first label's band starts at 0", fabs(emin - P / 2) < 1e-9);
+  SkimWfLabel f[3] = { { 398, 0, 0 }, { 398, 0, 0 }, { 398, 0, 0 } };
+  skim_wf_layout_labels(f, 3, P, H);
+  const double fmax = MAX(f[0].y, MAX(f[1].y, f[2].y));
+  check("bottom edge: last label's band ends at hgt", fabs(fmax - (H - P / 2)) < 1e-9);
+
+  /* Anchors outside the column are hidden, not pulled in. */
+  SkimWfLabel g[2] = { { -5, 0, 0 }, { H + 1, 0, 0 } };
+  check("outside the column: hidden",
+        skim_wf_layout_labels(g, 2, P, H) == 0 && g[0].y < 0 && g[1].y < 0);
+
+  /* Over capacity: 40 labels on 400 px at 14 px pitch seat 28 — the 12
+   * lowest-priority ones go, the rest stay ordered and spaced. */
+  SkimWfLabel o[40];
+  for (int i = 0; i < 40; i++) {
+    o[i] = (SkimWfLabel){ 5 + i * 9.7, (i % 3 == 0) ? 1 : 100 + i, 0 };
+  }
+  shown = skim_wf_layout_labels(o, 40, P, H);
+  guint hidden_low = 0, hidden_high = 0;
+  for (int i = 0; i < 40; i++) {
+    if (o[i].y < 0) { if (o[i].prio == 1) { hidden_low++; } else { hidden_high++; } }
+  }
+  check("over capacity: exactly floor(H/P) labels shown", shown == 28);
+  check("over capacity: only the lowest-priority labels are hidden",
+        hidden_low == 12 && hidden_high == 0);
+  gboolean ordered = TRUE, sp = TRUE;
+  double prev = -1e9;
+  for (int i = 0; i < 40; i++) {
+    if (o[i].y < 0) { continue; }
+    if (o[i].y < prev + P - 1e-9) { sp = FALSE; }
+    if (o[i].y < prev) { ordered = FALSE; }
+    prev = o[i].y;
+  }
+  check("over capacity: the shown labels stay ordered and spaced", ordered && sp);
+
+  /* Hit test: the band of a shown label, nothing between labels, and a
+   * hidden label's anchor never resolves to it. */
+  check("hit: y inside a label's band finds it", skim_wf_label_at(a, 3, P, 205.0) == 1);
+  check("hit: y between labels finds nothing", skim_wf_label_at(a, 3, P, 150.0) == -1);
+  check("hit: a hidden label is never hit", o[0].y < 0 && skim_wf_label_at(o, 40, P, 5.0) != 0);
+}
+
 int main(void) {
   printf("=== skimmer-spectrum-test — M8 spectrum tap ===\n");
   const double rates[] = { 48000.0, 96000.0, 192000.0, 384000.0 };
   for (guint i = 0; i < G_N_ELEMENTS(rates); i++) { rate_section(rates[i]); }
   pipeline_section();
   compose_section();
+  labels_section();
   printf("=== %d checks, %d failed ===\n", checks, fails);
   return fails ? 1 : 0;
 }

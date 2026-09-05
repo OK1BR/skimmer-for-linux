@@ -753,6 +753,41 @@ where relevant, a live check against a running `sdr-for-linux`.
   SDR's `[display] palette`); default Classic, the SDR's default too.
   **Next: the callsign column + click-to-tune; the live look decides
   bin/hop/span.**
+  **The callsign column landed the same evening (headless-verified).**
+  CW Skimmer's layout to the letter of the brief: a rail down the column's
+  left edge, a yellow dot on it at every tracked station's frequency, the
+  callsign beside it with a "CQ " prefix for callers, and a connector from
+  the dot to the text — flat while the label sits on its frequency, slanted
+  once a crowd pushed it off. The seating is a pure function in
+  `wf_compose.c` so the spectrum gate covers it: labels keep frequency
+  order (a higher station's label never drops below a lower's); a crowd is
+  seated by isotonic regression on anchor − k·pitch (pool adjacent
+  violators), which is the least-squares answer to "consecutive centres
+  ≥ pitch apart" and makes a cluster spread SYMMETRICALLY about its mean
+  anchor instead of piling downward; runs at the edges slide inside; and
+  when more labels want seats than the column has, the lowest-priority ones
+  hide (fixed station > CQ > SNR) while their dots stay. Colours are the
+  spot colours through `skim_dup_verdict_gray` — pane, panadapter and column
+  can never disagree; the pane's fixed station is bold; hover gives a faint
+  backdrop and the pointer cursor. The widget gets a snapshot of the station
+  table (CQ and S&P alike) at the end of any drain that touched the table or
+  the fixation, on the view switch, and à 2 s for verdict recolours. A click
+  on a label is the panadapter-spot gesture: tune to the station's TRACKED
+  frequency (its carrier, not the pixel's Hz), `clicked_on_spot` over TCI so
+  the logbook prefills (the pane-click path), the pane fixed on the station;
+  a press that travelled more than 4 px is a drag, not a click. Gate
+  `skimmer-spectrum-test` 61 → 75 checks (far-apart unmoved, pair spread
+  ±pitch/2 about the mean, five-cluster centred, neighbour nudged, top and
+  bottom clamps, outside hidden, over-capacity count + priority + order,
+  hit test incl. a hidden label). Headless with the RTTY fixture (Broadway,
+  a CDP-driven click, a private D-Bus session so the live instance stayed
+  untouched): SV1JDZ labelled at 14 086.96, the click logged `wf click:
+  SV1JDZ @ 14086964 Hz — tune + clicked_on_spot` and fixed the pane on it.
+  **Not verified:** the radio actually tuning and the logbook prefilling —
+  the offline replay has no TCI, `skim_pipeline_tune` is a no-op there;
+  Richard's live look decides. Still open from the morning: the SDR-side
+  `p2_set_frequency` kick + the label delay line (Richard reprioritised the
+  column over it).
 
 ## Safety / etiquette
 

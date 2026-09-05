@@ -357,3 +357,91 @@ void skim_wf_compose(const SkimWfHistory *h, const SkimWfWindow *win,
   g_free(b0);
   g_free(b1);
 }
+
+/* -------- callsign column layout ---------------------------------------------- */
+
+typedef struct { double a; guint i; } LabKey;
+
+static int labkey_cmp(gconstpointer pa, gconstpointer pb) {
+  const LabKey *x = pa, *y = pb;
+  if (x->a != y->a) { return x->a < y->a ? -1 : 1; }
+  return (x->i > y->i) - (x->i < y->i);         /* ties: input order        */
+}
+
+guint skim_wf_layout_labels(SkimWfLabel *lab, guint n, double pitch, double hgt) {
+  for (guint i = 0; i < n; i++) { lab[i].y = -1.0; }
+  if (n == 0 || pitch <= 0 || hgt < pitch) { return 0; }
+
+  /* Candidates: anchors inside the column. */
+  GArray *keys = g_array_sized_new(FALSE, FALSE, sizeof(LabKey), n);
+  for (guint i = 0; i < n; i++) {
+    if (lab[i].anchor_y >= 0 && lab[i].anchor_y < hgt) {
+      LabKey k = { lab[i].anchor_y, i };
+      g_array_append_val(keys, k);
+    }
+  }
+  /* Over capacity: shed the weakest claims until the rest fit. */
+  const guint cap = (guint)floor(hgt / pitch);
+  while (keys->len > cap) {
+    guint worst = 0;
+    for (guint k = 1; k < keys->len; k++) {
+      const LabKey *w = &g_array_index(keys, LabKey, worst);
+      const LabKey *c = &g_array_index(keys, LabKey, k);
+      if (lab[c->i].prio < lab[w->i].prio) { worst = k; }
+    }
+    g_array_remove_index(keys, worst);
+  }
+  g_array_sort(keys, labkey_cmp);                /* top of the picture first */
+  const guint m = keys->len;
+  if (m == 0) { g_array_unref(keys); return 0; }
+
+  /* Least-squares seating under "consecutive centres ≥ pitch apart": with
+   * z_k = anchor_k − k·pitch the constraint reads "z non-decreasing", and
+   * the closest such sequence is the isotonic regression — pool adjacent
+   * violators. A block of mutually crowding labels takes the MEAN of its
+   * anchors, i.e. spreads symmetrically about it. */
+  double *mean = g_new(double, m);
+  guint  *cnt  = g_new(guint, m);
+  guint   nb   = 0;
+  for (guint k = 0; k < m; k++) {
+    mean[nb] = g_array_index(keys, LabKey, k).a - (double)k * pitch;
+    cnt[nb]  = 1;
+    nb++;
+    while (nb >= 2 && mean[nb - 2] > mean[nb - 1]) {
+      const guint tot = cnt[nb - 2] + cnt[nb - 1];
+      mean[nb - 2] = (mean[nb - 2] * cnt[nb - 2] + mean[nb - 1] * cnt[nb - 1]) / tot;
+      cnt[nb - 2]  = tot;
+      nb--;
+    }
+  }
+  double *y = g_new(double, m);
+  for (guint b = 0, k = 0; b < nb; b++) {
+    for (guint j = 0; j < cnt[b]; j++, k++) { y[k] = mean[b] + (double)k * pitch; }
+  }
+  /* Keep every label inside the column: a run pushed off the top slides
+   * down, one off the bottom slides up (m ≤ cap, so both fit together). */
+  const double half = pitch / 2.0;
+  for (guint k = 0; k < m; k++) {
+    const double lo = half + (double)k * pitch;
+    if (y[k] < lo) { y[k] = lo; }
+    if (k > 0 && y[k] < y[k - 1] + pitch) { y[k] = y[k - 1] + pitch; }
+  }
+  for (guint k = m; k-- > 0;) {
+    const double hi = hgt - half - (double)(m - 1 - k) * pitch;
+    if (y[k] > hi) { y[k] = hi; }
+    if (k + 1 < m && y[k] > y[k + 1] - pitch) { y[k] = y[k + 1] - pitch; }
+  }
+  for (guint k = 0; k < m; k++) { lab[g_array_index(keys, LabKey, k).i].y = y[k]; }
+  g_free(y); g_free(mean); g_free(cnt);
+  g_array_unref(keys);
+  return m;
+}
+
+int skim_wf_label_at(const SkimWfLabel *lab, guint n, double pitch, double py) {
+  for (guint i = 0; i < n; i++) {
+    if (lab[i].y >= 0 && py >= lab[i].y - pitch / 2.0 && py < lab[i].y + pitch / 2.0) {
+      return (int)i;
+    }
+  }
+  return -1;
+}

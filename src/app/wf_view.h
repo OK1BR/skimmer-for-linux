@@ -3,11 +3,12 @@
  *
  * Frequency vertical (highest at the top), time flowing to the right, a kHz
  * scale strip to the right of the picture, the tuned frequency as a green
- * marker, and a column for the callsigns (filled in by the station model —
- * see skim_wf_view_set_stations). Pixels come from wf_compose.c; this file
- * owns the texture, the scale, the marker and the mouse: the wheel pans the
- * frequency window, Ctrl+wheel zooms it, and the scale strip can be GRABBED
- * and dragged. A retune of the radio moves ONLY the green marker — the
+ * marker, and the callsign column (CW Skimmer's: a rail with a dot on every
+ * station's frequency, the callsign beside it, crowded labels fanned apart
+ * with a connector back to the dot — a click on a label tunes the radio).
+ * Pixels come from wf_compose.c; this file owns the texture, the scale, the
+ * marker, the column and the mouse: the wheel pans the frequency window,
+ * Ctrl+wheel zooms it, and the scale strip can be GRABBED and dragged. A retune of the radio moves ONLY the green marker — the
  * window never jumps under the operator's eyes (Richard, 2026-09-05); when
  * the marker leaves the window a small arrow on the scale says which way.
  */
@@ -30,6 +31,27 @@ void skim_wf_view_push(SkimWfView *v, const guint8 *row, guint nbins,
 
 /* The radio's tuned frequency (marker + follow). */
 void skim_wf_view_set_vfo(SkimWfView *v, double hz);
+
+/* The callsign column: a snapshot of the station table, one entry per
+ * tracked station (CQ and S&P alike — the column is the station list in
+ * another shape). The widget copies the array; call again on every change.
+ * Colours follow the logbook verdict exactly as the pane and the panadapter
+ * spots do (gray = DUP/B4/INV); the pane's fixed station is drawn bold. */
+typedef struct {
+  char     call[16];
+  double   hz;
+  gboolean cq;       /* heard CALLING → "CQ " prefix                         */
+  gboolean gray;     /* the logbook says do not call (skim_dup_verdict_gray) */
+  gboolean tuned;    /* the decode pane's fixed station                      */
+  double   snr_db;   /* seat priority when the column is over capacity       */
+} SkimWfStation;
+
+void skim_wf_view_set_stations(SkimWfView *v, const SkimWfStation *st, guint n);
+
+/* A click on a callsign label — the panadapter-spot gesture. Fires with the
+ * station's tracked frequency (its exact carrier, not the pixel's Hz). */
+typedef void (*SkimWfViewClickCb)(const char *call, double hz, gpointer user);
+void skim_wf_view_set_click_cb(SkimWfView *v, SkimWfViewClickCb cb, gpointer user);
 
 /* Colour scheme: index into wf_compose's palette table (sdr-for-linux's
  * set); recolours the whole picture at once. */

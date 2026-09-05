@@ -108,4 +108,30 @@ void        skim_wf_set_palette(int idx);
 void        skim_wf_palette_rgb(double t, double *r, double *g, double *b);
 guint32     skim_wf_palette_argb(guint8 idx);          /* LUT entry            */
 
+/* -------- callsign column layout ---------------------------------------------- */
+
+/* One label of the callsign column: the caller fills anchor_y (the station's
+ * frequency as a pixel y in the picture, skim_wf_y_of_hz) and prio; the
+ * layout fills y — the label's CENTRE line — or −1 when the label is hidden
+ * for lack of room. */
+typedef struct {
+  double anchor_y;
+  int    prio;      /* higher wins a seat when the column is over capacity   */
+  double y;
+} SkimWfLabel;
+
+/* Seat n labels of `pitch` px each on a column `hgt` px tall (CW Skimmer's
+ * callsign column): no two overlap, the frequency ORDER is kept (a higher
+ * station's label never drops below a lower's), every label sits as close to
+ * its anchor as the neighbours allow — a cluster of near-coincident stations
+ * spreads symmetrically about its mean anchor instead of piling downward —
+ * and nothing leaves the column. More labels than fit: the lowest-priority
+ * ones are hidden (y = −1; their dots still mark the frequency). Any input
+ * order is accepted; anchors outside [0, hgt) are hidden. Returns the number
+ * shown. */
+guint skim_wf_layout_labels(SkimWfLabel *lab, guint n, double pitch, double hgt);
+
+/* The shown label whose band [y − pitch/2, y + pitch/2) contains py, or −1. */
+int skim_wf_label_at(const SkimWfLabel *lab, guint n, double pitch, double py);
+
 #endif /* SKIM_WF_COMPOSE_H */

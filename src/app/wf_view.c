@@ -15,10 +15,15 @@
 #include <math.h>
 #include <string.h>
 
+#include "spot_out.h"
 #include "wf_compose.h"
 
 #define SCALE_W        46     /* kHz scale strip                            */
 #define COLUMN_W      180     /* callsign column                            */
+#define COL_RAIL_X      9     /* the column's vertical rail (dots ride it)  */
+#define COL_TEXT_X     26     /* label text starts here                     */
+#define LABEL_FONT   "Sans 9"
+#define CLICK_SLOP_PX   4     /* press→release travel that still clicks     */
 #define MIN_SPAN_HZ  2000.0
 #define DEF_SPAN_HZ 20000.0
 #define REFLOOR_DB    1.0     /* floor drift that forces a full recompose   */
@@ -34,6 +39,17 @@ struct _SkimWfView {
   guint          rows_per_px;
   gboolean       dragging;                     /* scale strip grabbed        */
   double         drag_centre0;                 /* centre when the grab began */
+
+  SkimWfStation *st;                           /* callsign column snapshot   */
+  guint          nst;
+  SkimWfLabel   *lab;                          /* nst entries, index-aligned */
+  gboolean       labels_stale;
+  int            lab_h;                        /* height the layout is for   */
+  double         lab_pitch;                    /* label pitch of that layout */
+  int            hover;                        /* label under the pointer/−1 */
+  double         press_x, press_y;             /* where the primary went down*/
+  SkimWfViewClickCb click_cb;
+  gpointer       click_user;
 
   guint32       *pix;                          /* wf_w × h                   */
   int            pix_w, pix_h;
@@ -57,6 +73,8 @@ static void clamp_window(SkimWfView *v) {
    * drags the band edge past a standing window must not drag the window
    * along with it (the half outside the band simply shows floor). */
   v->centre_hz = CLAMP(v->centre_hz, lo, hi);
+  v->labels_stale = TRUE;                      /* the column follows the
+                                                * window                     */
 }
 
 static void window_of(const SkimWfView *v, SkimWfWindow *win) {
@@ -184,6 +202,77 @@ void skim_wf_view_set_palette(SkimWfView *v, int idx) {
   gtk_widget_queue_draw(GTK_WIDGET(v));
 }
 
+/* --- callsign column: data + layout ----------------------------------------------- */
+
+void skim_wf_view_set_stations(SkimWfView *v, const SkimWfStation *st, guint n) {
+  g_free(v->st);
+  v->st  = n ? g_memdup2(st, (gsize)n * sizeof(*st)) : NULL;
+  v->nst = n;
+  v->labels_stale = TRUE;
+  gtk_widget_queue_draw(GTK_WIDGET(v));
+}
+
+void skim_wf_view_set_click_cb(SkimWfView *v, SkimWfViewClickCb cb, gpointer user) {
+  v->click_cb   = cb;
+  v->click_user = user;
+}
+
+static PangoFontDescription *label_font(gboolean bold) {
+  PangoFontDescription *fd = pango_font_description_from_string(LABEL_FONT);
+  if (bold) { pango_font_description_set_weight(fd, PANGO_WEIGHT_BOLD); }
+  return fd;
+}
+
+/* One line of label text plus a pixel of air — the seat pitch. Measured
+ * off the widget's own Pango context, so a theme font change re-seats. */
+static double label_pitch(SkimWfView *v) {
+  PangoLayout *lay = gtk_widget_create_pango_layout(GTK_WIDGET(v), "CQ OK1BR/P");
+  PangoFontDescription *fd = label_font(TRUE);
+  pango_layout_set_font_description(lay, fd);
+  pango_font_description_free(fd);
+  int tw, th;
+  pango_layout_get_pixel_size(lay, &tw, &th);
+  g_object_unref(lay);
+  return th + 1.0;
+}
+
+/* Seat the labels for the current window and height (wf_compose.c does the
+ * geometry: frequency order kept, crowds fanned apart, edges respected,
+ * the weakest hidden when the column is over capacity). Only when the
+ * snapshot or the window changed — never per frame. */
+static void layout_labels(SkimWfView *v, int H) {
+  if (!v->labels_stale && v->lab_h == H && v->lab) { return; }
+  g_free(v->lab);
+  v->lab = g_new0(SkimWfLabel, MAX(v->nst, 1u));
+  SkimWfWindow win;
+  window_of(v, &win);
+  for (guint i = 0; i < v->nst; i++) {
+    const SkimWfStation *s = &v->st[i];
+    v->lab[i].anchor_y = skim_wf_y_of_hz(&win, H, s->hz);
+    /* Seat priority: the fixed station always, then callers, then SNR. */
+    v->lab[i].prio = (s->tuned ? 100000 : 0) + (s->cq ? 1000 : 0) +
+                     (int)lrint(CLAMP(s->snr_db, -99.0, 999.0));
+  }
+  v->lab_pitch = label_pitch(v);
+  skim_wf_layout_labels(v->lab, v->nst, v->lab_pitch, (double)H);
+  v->lab_h = H;
+  v->labels_stale = FALSE;
+}
+
+static gboolean in_column(const SkimWfView *v, double x) {
+  return x >= wf_width(v) + SCALE_W;
+}
+
+/* The label under a widget coordinate, or −1. */
+static int label_hit(SkimWfView *v, double x, double y) {
+  if (!in_column(v, x) || v->nst == 0 || !v->have_centre ||
+      skim_wf_history_rows(v->hist) == 0) {
+    return -1;
+  }
+  layout_labels(v, gtk_widget_get_height(GTK_WIDGET(v)));
+  return skim_wf_label_at(v->lab, v->nst, v->lab_pitch, y);
+}
+
 /* --- wheel: pan / zoom ------------------------------------------------------------ */
 
 static gboolean on_scroll(GtkEventControllerScroll *ctl, double dx, double dy,
@@ -241,9 +330,45 @@ static void on_drag_end(GtkGestureDrag *g, double dx, double dy, gpointer user) 
 }
 
 static void on_motion(GtkEventControllerMotion *m, double x, double y, gpointer user) {
-  (void)m; (void)y;
+  (void)m;
   SkimWfView *v = user;
-  gtk_widget_set_cursor_from_name(GTK_WIDGET(v), in_scale(v, x) ? "grab" : NULL);
+  const int hit = label_hit(v, x, y);
+  if (hit != v->hover) {
+    v->hover = hit;
+    gtk_widget_queue_draw(GTK_WIDGET(v));
+  }
+  gtk_widget_set_cursor_from_name(GTK_WIDGET(v),
+                                  hit >= 0 ? "pointer" : in_scale(v, x) ? "grab" : NULL);
+}
+
+static void on_leave(GtkEventControllerMotion *m, gpointer user) {
+  (void)m;
+  SkimWfView *v = user;
+  if (v->hover >= 0) {
+    v->hover = -1;
+    gtk_widget_queue_draw(GTK_WIDGET(v));
+  }
+}
+
+/* --- click a callsign ------------------------------------------------------------- */
+
+static void on_press(GtkGestureClick *g, gint n_press, double x, double y, gpointer user) {
+  (void)g; (void)n_press;
+  SkimWfView *v = user;
+  v->press_x = x;
+  v->press_y = y;
+}
+
+/* Fires on release like the decode pane's click: a press that travelled
+ * (a drag through the column) is not a click. */
+static void on_release(GtkGestureClick *g, gint n_press, double x, double y, gpointer user) {
+  (void)g;
+  SkimWfView *v = user;
+  if (n_press != 1 || !v->click_cb) { return; }
+  if (fabs(x - v->press_x) > CLICK_SLOP_PX || fabs(y - v->press_y) > CLICK_SLOP_PX) { return; }
+  const int hit = label_hit(v, x, y);
+  if (hit < 0) { return; }
+  v->click_cb(v->st[hit].call, v->st[hit].hz, v->click_user);
 }
 
 /* --- rendering -------------------------------------------------------------------- */
@@ -359,6 +484,68 @@ static void draw_marker(SkimWfView *v, cairo_t *cr, int wf_w, int h) {
   cairo_fill(cr);
 }
 
+/* The callsign column (CW Skimmer's): a rail down the column's left edge, a
+ * dot on it at every station's frequency, the callsign beside it — "CQ "
+ * prefixed for callers — and, where the seat had to move off the frequency,
+ * a connector from the dot to the text. Label colours are the spot colours
+ * (bright = call it, gray = the logbook says no), the fixed station bold,
+ * the label under the pointer on a faint backdrop. */
+static void draw_labels(SkimWfView *v, cairo_t *cr, int x0, int H, const GdkRGBA *fg) {
+  layout_labels(v, H);
+  const double rail = x0 + COL_RAIL_X + 0.5;
+  cairo_set_line_width(cr, 1.0);
+  cairo_set_source_rgba(cr, fg->red, fg->green, fg->blue, 0.22);
+  cairo_move_to(cr, rail, 0);
+  cairo_line_to(cr, rail, H);
+  cairo_stroke(cr);
+  if (v->nst == 0) { return; }
+
+  PangoLayout *lay = gtk_widget_create_pango_layout(GTK_WIDGET(v), NULL);
+  PangoFontDescription *fd_reg = label_font(FALSE), *fd_bold = label_font(TRUE);
+  const guint32 argb_ok = SKIM_SPOT_ARGB, argb_gray = SKIM_SPOT_ARGB_DUP;
+  for (guint i = 0; i < v->nst; i++) {
+    const SkimWfStation *s = &v->st[i];
+    const SkimWfLabel   *l = &v->lab[i];
+    const double ay = l->anchor_y;
+    if (ay < -4 || ay > H + 4) { continue; }
+    /* The dot: CW Skimmer's yellow, outlined so it reads on a light theme. */
+    cairo_arc(cr, rail, ay, 3.0, 0, 2 * G_PI);
+    cairo_set_source_rgb(cr, 0.96, 0.82, 0.18);
+    cairo_fill_preserve(cr);
+    cairo_set_source_rgba(cr, 0, 0, 0, 0.55);
+    cairo_stroke(cr);
+    if (l->y < 0) { continue; }                /* over capacity: dot only    */
+
+    const guint32 argb = s->gray ? argb_gray : argb_ok;
+    const double r = ((argb >> 16) & 255) / 255.0, g = ((argb >> 8) & 255) / 255.0,
+                 b = (argb & 255) / 255.0;
+    pango_layout_set_font_description(lay, s->tuned ? fd_bold : fd_reg);
+    char txt[24];
+    g_snprintf(txt, sizeof(txt), "%s%s", s->cq ? "CQ " : "", s->call);
+    pango_layout_set_text(lay, txt, -1);
+    int tw, th;
+    pango_layout_get_pixel_size(lay, &tw, &th);
+    const double tx = x0 + COL_TEXT_X, ty = l->y - th / 2.0;
+    if ((int)i == v->hover) {
+      cairo_set_source_rgba(cr, fg->red, fg->green, fg->blue, 0.12);
+      cairo_rectangle(cr, tx - 3, floor(ty) - 1, tw + 6, th + 2);
+      cairo_fill(cr);
+    }
+    /* Connector dot → text: flat on the frequency, slanted when seated
+     * elsewhere. */
+    cairo_set_source_rgba(cr, r, g, b, 0.75);
+    cairo_move_to(cr, rail + 4, floor(ay) + 0.5);
+    cairo_line_to(cr, tx - 4, floor(l->y) + 0.5);
+    cairo_stroke(cr);
+    cairo_set_source_rgb(cr, r, g, b);
+    cairo_move_to(cr, tx, ty);
+    pango_cairo_show_layout(cr, lay);
+  }
+  pango_font_description_free(fd_reg);
+  pango_font_description_free(fd_bold);
+  g_object_unref(lay);
+}
+
 static void skim_wf_view_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   SkimWfView *v = SKIM_WF_VIEW(widget);
   const int W = gtk_widget_get_width(widget), H = gtk_widget_get_height(widget);
@@ -395,10 +582,13 @@ static void skim_wf_view_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     pango_cairo_show_layout(cr, lay);
     g_object_unref(lay);
   }
-  /* Callsign column background (labels come with the station model). */
+  /* Callsign column. */
   cairo_set_source_rgba(cr, fg.red, fg.green, fg.blue, 0.04);
   cairo_rectangle(cr, wf_w + SCALE_W, 0, COLUMN_W, H);
   cairo_fill(cr);
+  if (skim_wf_history_rows(v->hist) > 0 && v->have_centre) {
+    draw_labels(v, cr, wf_w + SCALE_W, H, &fg);
+  }
   cairo_destroy(cr);
 }
 
@@ -410,6 +600,8 @@ static void skim_wf_view_dispose(GObject *obj) {
   g_clear_pointer(&v->guard, skim_wf_guard_free);
   g_clear_pointer(&v->hist, skim_wf_history_free);
   g_clear_pointer(&v->pix, g_free);
+  g_clear_pointer(&v->st, g_free);
+  g_clear_pointer(&v->lab, g_free);
   G_OBJECT_CLASS(skim_wf_view_parent_class)->dispose(obj);
 }
 
@@ -428,6 +620,8 @@ static void skim_wf_view_init(SkimWfView *v) {
   v->rows_per_px = SKIM_WF_ROWS_PER_PX;
   v->need_full   = TRUE;
   v->tex_stale   = TRUE;
+  v->hover       = -1;
+  v->labels_stale = TRUE;
   gtk_widget_set_hexpand(GTK_WIDGET(v), TRUE);
   gtk_widget_set_vexpand(GTK_WIDGET(v), TRUE);
   gtk_widget_set_size_request(GTK_WIDGET(v), SCALE_W + COLUMN_W + 200, 160);
@@ -443,7 +637,13 @@ static void skim_wf_view_init(SkimWfView *v) {
   gtk_widget_add_controller(GTK_WIDGET(v), GTK_EVENT_CONTROLLER(drag));
   GtkEventController *mo = gtk_event_controller_motion_new();
   g_signal_connect(mo, "motion", G_CALLBACK(on_motion), v);
+  g_signal_connect(mo, "leave", G_CALLBACK(on_leave), v);
   gtk_widget_add_controller(GTK_WIDGET(v), mo);
+  GtkGesture *click = gtk_gesture_click_new();
+  gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_PRIMARY);
+  g_signal_connect(click, "pressed", G_CALLBACK(on_press), v);
+  g_signal_connect(click, "released", G_CALLBACK(on_release), v);
+  gtk_widget_add_controller(GTK_WIDGET(v), GTK_EVENT_CONTROLLER(click));
 }
 
 GtkWidget *skim_wf_view_new(void) {
