@@ -153,6 +153,19 @@ A trace through `gtk_layout_manager_measure` with zero Pango metrics is this
 again — check the font cache (`fc-cache -rv`, `~/.cache/fontconfig`), not the
 code.
 
+**Update 2026-09-05 (observation, item stays closed for now):** during the M8
+live look the warning came back on Richard's desktop in BOTH launches of the
+day — 8 lines (4 `GtkImage` × 2) within 10 ms of window open at 14:14:03, and
+in the earlier instance 4 × 2 at 13:59:57 plus 4 NEW × 2 at 14:06:27 (the
+day-1 shape exactly) — while the same binary headless on Broadway with the
+same fonts printed none across a dozen runs. So "transient font-metrics
+failure" is at best half the story: on the live Wayland session it is
+reproducible at launch. Still cosmetic. Next time the desktop instance is
+restarted anyway, launch it once as
+`G_DEBUG=fatal-warnings gdb -batch -ex "catch signal SIGTRAP" -ex run -ex bt
+--args builddir/skimmer-for-linux` and keep the first backtrace; only then
+decide whether to reopen.
+
 ### SKM-6 — A second launch opens a second window inside the primary instance
 - **Type:** bug · **Severity:** low · **Status:** done — reproduced, fixed, harness-verified (2026-09-05)
 - **Source:** noticed while fixing SKM-1, 2026-09-05
