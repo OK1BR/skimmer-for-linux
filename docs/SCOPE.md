@@ -796,7 +796,8 @@ where relevant, a live check against a running `sdr-for-linux`.
   what only the list shows today (SNR, speed, heard, age); then the list —
   widget, sorter, columns, toggle — goes entirely.
   Same look, same minute: a hairline separator between the header bar and
-  the top view, matching the one above the decode pane.
+  the top view, matching the one above the decode pane — visible only while
+  the waterfall is the top view (his second remark), hidden otherwise.
 
 ## Safety / etiquette
 

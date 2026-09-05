@@ -129,6 +129,7 @@ typedef struct {
   GtkWidget      *tuned_scroll;  /* the decode pane's scroller                */
   GtkWidget      *list_scroll;   /* the station list's scroller               */
   GtkWidget      *list_sep;      /* separator between list and decode pane    */
+  GtkWidget      *head_sep;      /* hairline under the header — waterfall only */
   guint           view;          /* top area: VIEW_NONE / VIEW_LIST / VIEW_WF
                                   * (persisted [ui] view); the decode pane is
                                   * ALWAYS visible                            */
@@ -1104,6 +1105,7 @@ static void view_apply(App *app) {
   const gboolean top = app->view != VIEW_NONE;
   gtk_widget_set_visible(app->top_stack, top);
   gtk_widget_set_visible(app->list_sep, top);
+  gtk_widget_set_visible(app->head_sep, app->view == VIEW_WF);
   gtk_widget_set_vexpand(app->tuned_scroll, !top);
   if (top) {
     gtk_stack_set_visible_child_name(GTK_STACK(app->top_stack),
@@ -2125,8 +2127,10 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   gtk_box_append(GTK_BOX(box), header);
   /* A hairline under the header, the same faint line that separates the
    * decode pane below (Richard, 2026-09-05 — the waterfall met the header
-   * with no edge). Always shown: the boundary is header | content. */
-  gtk_box_append(GTK_BOX(box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+   * with no edge). Shown ONLY while the waterfall is the top view, hidden
+   * for the list and the pane-only layout (his second remark). */
+  app->head_sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+  gtk_box_append(GTK_BOX(box), app->head_sep);
   app->top_stack = gtk_stack_new();
   gtk_stack_add_named(GTK_STACK(app->top_stack), list_scroll, "list");
   app->wf = SKIM_WF_VIEW(skim_wf_view_new());

@@ -783,7 +783,9 @@ place showing SNR, WPM/Bd, heard and age; once the column carries those
 (tooltip or dB after the call, CW Skimmer style) the list goes entirely
 (Richard's two-step call). Same look: a hairline `GtkSeparator` under the
 header bar, the faint line the decode pane already had above it — the
-waterfall used to meet the header with no edge.
+waterfall used to meet the header with no edge; shown ONLY while the
+waterfall is the top view (Richard's second remark), hidden for the list
+and the pane-only layout.
 
 ## Layout
 
