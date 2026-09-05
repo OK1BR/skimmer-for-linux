@@ -972,10 +972,15 @@ static int settings_load_palette(void) {
   return (v < 0 || v >= skim_wf_palette_count()) ? 0 : v;
 }
 
+/* The top view. A fresh install opens on the WATERFALL: with the callsign
+ * column it is the view one works from (Richard, 2026-09-05 — "the list
+ * probably isn't needed"); the list stays reachable by its toggle for what
+ * the column does not show yet (SNR, speed, heard, age). A saved choice —
+ * including the pre-M8 list-only key — always wins. */
 static guint settings_load_view(void) {
   char *path = settings_file();
   GKeyFile *kf = g_key_file_new();
-  guint v = VIEW_LIST;
+  guint v = VIEW_WF;
   if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
     char *s = g_key_file_get_string(kf, "ui", "view", NULL);
     if (s) {
@@ -2118,6 +2123,10 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
 
   GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_box_append(GTK_BOX(box), header);
+  /* A hairline under the header, the same faint line that separates the
+   * decode pane below (Richard, 2026-09-05 — the waterfall met the header
+   * with no edge). Always shown: the boundary is header | content. */
+  gtk_box_append(GTK_BOX(box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
   app->top_stack = gtk_stack_new();
   gtk_stack_add_named(GTK_STACK(app->top_stack), list_scroll, "list");
   app->wf = SKIM_WF_VIEW(skim_wf_view_new());

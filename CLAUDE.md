@@ -774,6 +774,16 @@ clicked_on_spot`, pane fixed on it, label bold. NOT verified: the live
 tune (offline `skim_pipeline_tune` is a no-op) and the logbook prefill —
 Richard's live look. 12 gates green. README regrounded: twelve gates, as
 meson lists them.
+**Waterfall is the DEFAULT view (Richard's first live look at the column,
+2026-09-05: "the station list probably isn't needed, the waterfall view is
+much clearer").** `settings_load_view` falls back to `VIEW_WF` when no
+`[ui] view` (nor the pre-M8 `station_list`) key is saved; a saved choice
+always wins. The list and its toggle STAY for now — it is still the only
+place showing SNR, WPM/Bd, heard and age; once the column carries those
+(tooltip or dB after the call, CW Skimmer style) the list goes entirely
+(Richard's two-step call). Same look: a hairline `GtkSeparator` under the
+header bar, the faint line the decode pane already had above it — the
+waterfall used to meet the header with no edge.
 
 ## Layout
 

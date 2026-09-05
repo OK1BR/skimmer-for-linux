@@ -788,6 +788,15 @@ where relevant, a live check against a running `sdr-for-linux`.
   Richard's live look decides. Still open from the morning: the SDR-side
   `p2_set_frequency` kick + the label delay line (Richard reprioritised the
   column over it).
+  **Richard's first live look at the column (2026-09-05, ~17:00):** "the
+  station list probably isn't needed, the waterfall view is much clearer"
+  → the WATERFALL is now the default top view for a fresh install
+  (`settings_load_view` → `VIEW_WF` with no saved key; a saved choice wins).
+  Two-step decision: the list and its toggle stay until the column shows
+  what only the list shows today (SNR, speed, heard, age); then the list —
+  widget, sorter, columns, toggle — goes entirely.
+  Same look, same minute: a hairline separator between the header bar and
+  the top view, matching the one above the decode pane.
 
 ## Safety / etiquette
 
