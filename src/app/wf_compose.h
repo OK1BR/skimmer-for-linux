@@ -30,16 +30,21 @@
 #define SKIM_WF_FLOOR_PCT     20     /* percentile used as the floor estimate     */
 #define SKIM_WF_FLOOR_SMOOTH  0.01   /* EMA per row (τ ≈ 1 s at 94 rows/s)        */
 #define SKIM_WF_DB_OFFSET     200.0  /* spectrum.h byte encoding                  */
-#define SKIM_WF_LABEL_LAG     3      /* rows the centre LABEL leads the DATA by:
+#define SKIM_WF_LABEL_LAG     2      /* rows the centre LABEL leads the DATA by:
                                       * the label leaves the server the moment
                                       * the knob moves, the IQ captured at that
                                       * centre lands here after the DDC apply,
-                                      * the IQ transport and half an FFT window
-                                      * (≈ 32 ms at 94 rows/s: the FLOOR of the
-                                      * 3–11 row spread measured live 2026-09-05
-                                      * — the spread was sdr-for-linux's 100 ms
-                                      * keepalive quantum, fixed there the same
-                                      * day; re-measure with SKIM_WF_DEBUG=1)   */
+                                      * the IQ transport and half an FFT window.
+                                      * MEASURED live 2026-09-05 evening against
+                                      * sdr-for-linux with the immediate HP
+                                      * kick (51f981a): 972 voting rows of a
+                                      * knob sweep — L=2: 557, L=1: 305, L=3:
+                                      * 103; four discrete TCI steps with the
+                                      * knob still: data flipped 3, 2, 3, 2 rows
+                                      * after the label (≈ 21 ms at 94 rows/s).
+                                      * Before the kick: 3–11 rows, the SDR's
+                                      * 100 ms keepalive quantum. Re-measure
+                                      * with SKIM_WF_DEBUG=1 (episode summary) */
 #define SKIM_WF_LABEL_LAG_MAX 63     /* ceiling for the SKIM_WF_LAG_ROWS override  */
 
 typedef struct _SkimWfHistory SkimWfHistory;

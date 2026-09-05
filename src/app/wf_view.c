@@ -146,7 +146,30 @@ static void view_commit_row(SkimWfView *v, const guint8 *row, guint nbins,
  * bins moves it S bins DOWN: row[i] ≈ ref[i + S]. */
 #define DBG_LMAX  16
 #define DBG_RING  (DBG_LMAX + 1)
-static double dbg_corr(const guint8 *a, const guint8 *b, guint n, int lag) {
+#define DBG_BOX   32          /* detrend half-width, bins                       */
+#define DBG_DC    8           /* bins masked either side of the centre (DC spur)*/
+/* The raw rows are dominated by a STATIONARY shape — the IQ passband roll-off
+ * at the band edges and the DC spur sit on the same bins whatever the
+ * tuning — so a Pearson correlation at zero shift read 0.87 across an
+ * 8 kHz retune (live13) and the true shift only 0.10. Strip it: subtract a
+ * running mean (±DBG_BOX bins), mask the outer 5 % and the DC window, keep
+ * only the POSITIVE excursions (the lines; noise below the trend is zeroed),
+ * then correlate. Signals move with the band, the fixture does not. */
+static void dbg_prep(const guint8 *row, float *out, guint n) {
+  double acc = 0; guint lo = 0, hi = 0;          /* window [lo, hi)          */
+  for (guint i = 0; i < n; i++) {
+    const guint wlo = i > DBG_BOX ? i - DBG_BOX : 0, whi = MIN(i + DBG_BOX + 1, n);
+    while (hi < whi) { acc += row[hi++]; }
+    while (lo < wlo) { acc -= row[lo++]; }
+    const double v = (double)row[i] - acc / (double)(hi - lo);
+    out[i] = v > 0 ? (float)v : 0.0f;
+  }
+  const guint edge = n / 20, mid = n / 2;
+  for (guint i = 0; i < n; i++) {
+    if (i < edge || i >= n - edge || (i + DBG_DC >= mid && i < mid + DBG_DC)) { out[i] = 0; }
+  }
+}
+static double dbg_corr(const float *a, const float *b, guint n, int lag) {
   const int i0 = MAX(0, -lag), i1 = MIN((int)n, (int)n - lag);
   if (i1 - i0 < 64) { return -2.0; }
   double ma = 0, mb = 0;
@@ -163,20 +186,22 @@ static double dbg_corr(const guint8 *a, const guint8 *b, guint n, int lag) {
 
 static void debug_lag(const guint8 *row, guint nbins, double center_hz, double bin_hz,
                       guint cfg_lag) {
-  static guint8 *ref, *prev; static guint pn;
+  static float *ref, *prev, *cur; static guint pn;
   static double labels[DBG_RING]; static guint64 seq; static double prev_label;
   static gboolean active; static guint64 ep_start, ep_last_change;
-  static double ref_label; static int flip;
+  static double ref_label; static int flip; static guint hist[DBG_LMAX + 1], nhist;
   if (pn != nbins) {
-    g_free(ref); g_free(prev);
-    ref = g_malloc(nbins); prev = g_malloc(nbins);
+    g_free(ref); g_free(prev); g_free(cur);
+    ref = g_new0(float, nbins); prev = g_new0(float, nbins); cur = g_new0(float, nbins);
     pn = nbins; seq = 0; active = FALSE;
   }
+  dbg_prep(row, cur, nbins);
   labels[seq % DBG_RING] = center_hz;
   const gboolean changed = seq > 0 && fabs(center_hz - prev_label) > 0.5;
   if (!active && changed) {
     active = TRUE; ep_start = ep_last_change = seq; ref_label = prev_label; flip = -1;
-    memcpy(ref, prev, nbins);
+    memcpy(ref, prev, nbins * sizeof(float));
+    memset(hist, 0, sizeof hist); nhist = 0;
   }
   if (active) {
     if (changed) { ep_last_change = seq; }
@@ -188,25 +213,38 @@ static void debug_lag(const guint8 *row, guint nbins, double center_hz, double b
       lags[L] = (int)lrint((lab - ref_label) / bin_hz);
       corr[L] = -3.0;
       for (int k = 0; k < L; k++) { if (lags[k] == lags[L]) { corr[L] = corr[k]; break; } }
-      if (corr[L] <= -3.0) { corr[L] = dbg_corr(row, ref, nbins, lags[L]); }
+      if (corr[L] <= -3.0) { corr[L] = dbg_corr(cur, ref, nbins, lags[L]); }
       if (corr[L] > best_c) { best_c = corr[L]; best = L; }   /* ties → smallest L */
     }
-    const double c0 = dbg_corr(row, ref, nbins, 0);
-    const double cS = step ? dbg_corr(row, ref, nbins, step) : c0;
+    const double c0 = dbg_corr(cur, ref, nbins, 0);
+    const double cS = step ? dbg_corr(cur, ref, nbins, step) : c0;
     if (flip < 0 && step != 0 && cS > c0) { flip = (int)(seq - ep_start); }
-    g_message("wf: row %" G_GUINT64_FORMAT " +%d: label step %+d bins, best lag L=%d (shift %+d, r %.2f), "
+    /* a row VOTES for its best L only where the shift can be told apart —
+     * and not in the steady state after a step, where every candidate lag
+     * implies the same shift and the tie always falls on L=0 */
+    const gboolean votes = abs(lags[best]) >= 4 && best_c > c0 + 0.05 &&
+                           lags[0] != lags[DBG_LMAX];
+    if (votes) { hist[best]++; nhist++; }
+    g_message("wf: row %" G_GUINT64_FORMAT " +%d: label step %+d bins, best lag L=%d (shift %+d, r %.2f)%s, "
               "cfg L=%u (shift %+d, r %.2f), r0 %.2f rS %.2f",
-              seq, (int)(seq - ep_start), step, best, lags[best], best_c,
+              seq, (int)(seq - ep_start), step, best, lags[best], best_c, votes ? " VOTE" : "",
               cfg_lag, lags[MIN(cfg_lag, (guint)DBG_LMAX)], corr[MIN(cfg_lag, (guint)DBG_LMAX)], c0, cS);
     if (seq - ep_last_change > DBG_LMAX + 4 || seq - ep_start > 300) {
+      GString *hs = g_string_new(NULL);
+      int mode = -1; guint mode_n = 0;
+      for (int L = 0; L <= DBG_LMAX; L++) {
+        if (hist[L]) { g_string_append_printf(hs, " L%d:%u", L, hist[L]); }
+        if (hist[L] > mode_n) { mode_n = hist[L]; mode = L; }
+      }
       g_message("wf: retune episode rows %" G_GUINT64_FORMAT "..%" G_GUINT64_FORMAT ": label step %+d bins, "
-                "data flipped %d rows after the first label change (cfg lag %u)",
-                ep_start, seq, step, flip, cfg_lag);
+                "data flipped %d rows after the first label change; %u voting rows, mode L=%d (%s) (cfg lag %u)",
+                ep_start, seq, step, flip, nhist, mode, nhist ? hs->str + 1 : "none", cfg_lag);
+      g_string_free(hs, TRUE);
       active = FALSE;
     }
   }
   prev_label = center_hz;
-  memcpy(prev, row, nbins);
+  memcpy(prev, cur, nbins * sizeof(float));
   seq++;
 }
 

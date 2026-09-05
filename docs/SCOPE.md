@@ -872,12 +872,25 @@ where relevant, a live check against a running `sdr-for-linux`.
   and one summary line per episode ("data flipped N rows after the first
   label change"). Gate `skimmer-spectrum-test` 75 → 76 (delay line: discrete
   step, turning knob row-exact, steady, lag 0, rate restart, cap). Headless
-  replay of the RTTY fixture: draws as before, drain ≤ 0.3 ms. **NEXT:
-  restart both apps on the new builds (Richard's word), a few DISCRETE
-  ≥ 1 kHz steps with `SKIM_WF_DEBUG=1`, read the episode summaries, set
-  `SKIM_WF_LABEL_LAG` to that N (expect ~3 ± 1 — the floor), then his look
-  at a knob sweep: the traces should SLOPE, not tear, and the picture must
-  never pause.** Not built, on purpose: a polling-server fallback (settle
+  replay of the RTTY fixture: draws as before, drain ≤ 0.3 ms. **LIVE
+  MEASUREMENT DONE the same evening (Richard's "ok, zkusíme to"; both apps
+  restarted on the new builds, SDR first):** the first probe build was
+  blind — a Pearson correlation of raw rows read 0.87 at ZERO shift across
+  an 8 kHz retune, because the IQ passband roll-off and the DC spur sit on
+  the same bins whatever the tuning; the probe now detrends each row
+  (running mean ±32 bins), masks the outer 5 % and ±8 bins around DC, keeps
+  only the positive excursions (the lines) and correlates those. With that:
+  Richard's own knob sweeps gave 972 voting rows — **L=2: 557, L=1: 305,
+  L=3: 103** — and four discrete steps sent over TCI (`vfo:0,0,<hz>;` from
+  a stdlib WebSocket client, `/var/tmp/skimmer-wf-calls/tci_step.py`,
+  the knob still) flipped the data **3, 2, 3, 2 rows** after the label
+  (a first round was contaminated by his concurrent tuning — the echo
+  showed a VFO value nobody sent). **`SKIM_WF_LABEL_LAG` = 2** (≈ 21 ms);
+  his instance runs it via `SKIM_WF_LAG_ROWS=2` (log live15). Probe rows
+  in the steady state after a step no longer vote (every candidate lag
+  implies the same shift there — the tie fell on L=0 and swamped the
+  histogram). His look at a knob sweep — slope, no tear, never a pause —
+  is the open verdict. Not built, on purpose: a polling-server fallback (settle
   when labels arrive in ≥ 400 ms steps) — one click followed by stillness is
   indistinguishable from a polling label, so any cadence detector would bring
   the pause back on his most common gesture; no such server is measured.

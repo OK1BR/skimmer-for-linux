@@ -817,10 +817,15 @@ delayed or dropped, `SKIM_WF_LAG_ROWS=<n>` overrides for measurement; the
 view no longer full-recomposes on a mere centre change (would be per row
 during a sweep). `SKIM_WF_DEBUG=1` probe rebuilt for any step size (best lag
 L 0..16 per row + flip row + per-episode summary). Gate spectrum 75 → 76;
-headless replay draws as before. **NEXT: restart both apps on the new builds,
-discrete ≥ 1 kHz steps with the probe, set the lag to the measured N, then
-Richard's look at a sweep (slope, no tear, never a pause).** Not built by
-design: a polling-server settle fallback (a click + stillness looks the same).
+headless replay draws as before. **Live-measured the same evening** (both
+apps restarted on the new builds at Richard's "ok"): the raw-row probe was
+blind (passband roll-off + DC spur correlate at zero shift; fixed by
+detrend + masks + positive excursions only); then his knob sweeps voted
+L=2: 557 / L=1: 305 / L=3: 103 rows and four discrete TCI steps flipped
+the data 3, 2, 3, 2 rows after the label → **`SKIM_WF_LABEL_LAG` = 2**
+(his instance: `SKIM_WF_LAG_ROWS=2`, log live15). Open: his look at a sweep
+(slope, no tear, never a pause). Not built by design: a polling-server
+settle fallback (a click + stillness looks the same).
 
 ## Layout
 
