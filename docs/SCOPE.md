@@ -1116,6 +1116,13 @@ where relevant, a live check against a running `sdr-for-linux`.
   measurement → `SDRFL_DDC_LAT_MS` → bin/hop/span, crowded fan-out, column
   drain cost under contest load.
 
+  **Richard's live look at the list-less window (2026-09-05 ~23:45): "jo,
+  je to dobrý" — session closed.** Live at close: sdr-for-linux `build/`
+  98c57de, skimmer `builddir` c1556f5 (log live21, no `SKIM_WF_DEBUG`),
+  log-for-linux `builddir` 76349f8. Scratch `/var/tmp/skimmer-wf-col/`
+  (build, configs, CDP driver, screenshots) stays until his word to trash
+  it. Next session continues at SDR-13 in sdr-for-linux.
+
 ## Safety / etiquette
 
 Read-only against the radio, with one deliberate exception: the skimmer

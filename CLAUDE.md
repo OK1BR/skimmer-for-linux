@@ -919,6 +919,11 @@ warnings); 12 gates green. **Open, in order: SDR-13 → coherent re-centring
 only after the NCO phase measurement → DDC latency → bin/hop/span, fan-out,
 column drain cost under contest load.**
 
+**END OF 2026-09-05 (Richard ~23:45, "jo, je to dobrý" on the list-less
+window): live = sdr `build/` 98c57de + skimmer `builddir` c1556f5 (live21)
++ logbook `builddir` 76349f8; next session starts at SDR-13 in
+sdr-for-linux.**
+
 ## Layout
 
 ```
