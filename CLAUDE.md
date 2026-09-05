@@ -686,8 +686,10 @@ fixed with `app_teardown()` on `close-request` + `shutdown` backstop
 (source ids cleared, pipeline stopped = engine thread joined, feed freed)
 and ONE sentinel `app->closing` for every late callback; a
 `GTK_IS_LABEL()` probe on the freed label would be UB, not a guard.
-Same reproduction after: zero criticals, close→exit 4 ms. Connected close
-unverified live (no radio to spare). **11 gates green — the "12" in the M7
+Same reproduction after: zero criticals, close→exit 4 ms. **Connected
+close LIVE-VERIFIED the same afternoon** (Richard closed the builddir app
+mid-session against his running sdr-for-linux: exit 0, one teardown line,
+zero criticals). **11 gates green — the "12" in the M7
 entry above was a miscount; meson lists 11.** **SKM-2 closed the same day
 as upstream GTK/Pango, no code change:** the day-1 numbers were 16
 warnings (8 images × 2, INT_MIN baseline, 16/16), reproduced byte-identical

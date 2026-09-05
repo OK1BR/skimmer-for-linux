@@ -88,13 +88,14 @@ running pipeline is stopped there (engine thread joined) and the telnet feed
 freed after it, so nothing is minted past the close. Verified: the same gdb
 reproduction → zero criticals, one `app: window closed — engine stopped,
 timers cleared` line (both hooks fired, one teardown), close→exit 4 ms in the
-disconnected state; 11 gates green. **Unverified:** the CONNECTED close — no
-radio could be used (see above) and the mock TCI server lives inside a gate.
-What holds by reading: `skim_pipeline_stop` joins the engine thread before its
-own state callback, so no engine-thread event can race the teardown, and
-stop-from-the-main-thread is the path `apply_state` and the mode change
-already exercise. The next live close is the check: the message line, no
-critical.
+disconnected state; 11 gates green. **Connected close LIVE-VERIFIED the same
+afternoon:** Richard launched `builddir/skimmer-for-linux` against his running
+sdr-for-linux (TCI session on 127.0.0.1:40001, CW mode, telnet feed on) and
+closed the window — exit code 0, stderr holds exactly one line
+(`13:04:20 app: window closed — engine stopped, timers cleared`), zero
+criticals or warnings, TCI socket gone. By reading, the same holds in
+general: `skim_pipeline_stop` joins the engine thread before its own state
+callback, so no engine-thread event can race the teardown.
 
 ### SKM-2 — GtkImage baseline warnings flood stderr, non-deterministically
 - **Type:** bug · **Severity:** low · **Status:** done — diagnosed, upstream GTK/Pango, no code change (2026-09-05)

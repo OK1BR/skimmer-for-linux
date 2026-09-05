@@ -171,11 +171,14 @@ Stojí za to log po zavření zkontrolovat, než se sáhne na kód.
 - **Ověřeno:** tatáž reprodukce → 0 CRITICAL, jedna zpráva `app: window
   closed — engine stopped, timers cleared` (oba hooky, jeden teardown),
   zavření → exit 4 ms (odpojený stav); 11 gate zelených.
-  **Neověřeno:** zavření s BĚŽÍCÍ pipeline (rádio nešlo použít, mock TCI
-  server je uvnitř gate). Ze čtení: `skim_pipeline_stop` joinuje engine
-  vlákno před vlastním state callbackem, takže engine nemůže teardown
-  předběhnout, a stop z hlavního vlákna už jede v `apply_state` a při změně
-  módu. **Příští živé zavření = kontrola: zpráva ano, CRITICAL ne.**
+- **Zavření s BĚŽÍCÍ pipeline ověřeno ŽIVĚ** téhož odpoledne: Richard
+  spustil `builddir/skimmer-for-linux` proti svému běžícímu sdr-for-linux
+  (TCI na 127.0.0.1:40001, CW, telnet feed zapnutý) a okno zavřel — exit
+  kód 0, ve stderr přesně jeden řádek `13:04:20 app: window closed —
+  engine stopped, timers cleared`, nula CRITICAL i WARNING, TCI socket
+  zmizel (`/var/tmp/skimmer-app-20260905-skm1-live.log`). Ze čtení navíc
+  drží obecně: `skim_pipeline_stop` joinuje engine vlákno před vlastním
+  state callbackem, takže engine nemůže teardown předběhnout.
 
 ### N2 — čísla opravena, uzavřeno jako chování GTK/Pango
 Sesterský rozbor v sdr-for-linux (`docs/CONTEST-NOTES-2026-08-22.md`,
