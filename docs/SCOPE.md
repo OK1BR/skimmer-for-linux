@@ -837,6 +837,25 @@ where relevant, a live check against a running `sdr-for-linux`.
   the bin; the `dbus-run-session` trick is what lets a headless test
   instance coexist with Richard's live one (GApplication uniqueness is per
   session bus).
+  **STATE AT THE END OF 2026-09-05, NIGHT (next session continues HERE —
+  supersedes the EVENING block for the open list).** Live on Richard's
+  desk at close: sdr-for-linux from `build/` at 98c57de (HP kick on every
+  frequency change; IQ centre stamps opt-in; boundary by the capture
+  clock) and the skimmer from `builddir` at 2ec8fd1 (stamps honoured,
+  largest-segment rows, delay line default 0), log
+  `/var/tmp/skimmer-app-20260905-m8-live18.log`, `SKIM_WF_DEBUG=1`. Richard's
+  verdict on 80 m: the waterfall flows through a retune — no teeth, no
+  bars, no pause. Both repos pushed; scratch dirs trashed. **Open, in
+  order:** (1) the callsign click LIVE (tune + logbook prefill) — still
+  unreported; (2) the column takes over SNR/WPM/heard/age, THEN the
+  station list is deleted; (3) SDR-13 in sdr-for-linux (came up at 1 Hz
+  after a restart); (4) coherent re-centring of the window — ONLY after
+  measuring the DDC NCO's phase across a retune on a strong stable
+  carrier; (5) `SDRFL_DDC_LAT_MS` 1.0 ms unmeasured below a row; (6)
+  bin/hop/span, crowded fan-out, column drain cost under contest load.
+  Family-extension inventory for TCI now: `clicked_on_spot`, `rtty`,
+  `iq_stamp` (all in sdr's TCI-SCOPE; spec 1.9 says invalid commands are
+  ignored and the reserved header words are ours to use).
   **The waterfall FLOWS through a retune — both halves built and gated
   (offline-proven 2026-09-05 evening; live measurement + Richard's look
   pending).** Open item (3) above. **SDR side** (sdr-for-linux):

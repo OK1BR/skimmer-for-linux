@@ -860,7 +860,11 @@ pause; open item (3) CLOSED.** His first look had been at 1 Hz on the DC
 line at 50–100 kHz/s, where a line is inherently ~4× wider while turning.
 Left, each a separate decision: coherent re-centring of the window (only if
 the DDC NCO is phase-continuous — measure first), `SDRFL_DDC_LAT_MS` 1.0 ms
-unmeasured below a row, the SDR coming up at 1 Hz after a restart. ⚠ 20:44 a peek script
+unmeasured below a row, the SDR coming up at 1 Hz after a restart. **END OF
+2026-09-05 (night): live = sdr `build/` 98c57de + skimmer `builddir` 2ec8fd1;
+open in order: callsign click live → column takes over the list's columns,
+list deleted → SDR-13 → coherent re-centring only after a phase measurement
+→ DDC latency → bin/hop/span + fan-out + drain cost.** ⚠ 20:44 a peek script
 imported the TCI client (main ran at import) and tuned his radio to 4 Hz for
 ~25 s; restored, main-guarded. Not built by design: a polling-server settle
 fallback (a click + stillness looks the same).
