@@ -47,7 +47,7 @@ static GString    *s_rx;              /* text received from the client         *
 static char        s_spot[256];       /* last spot: command                    */
 static struct lws *s_wsi;
 static struct lws_context *s_ctx;
-static volatile gint s_run = 1, s_streaming, s_push_dds, s_blocks_sent;
+static volatile gint s_run = 1, s_streaming, s_push_dds, s_blocks_sent, s_stamp_req;
 
 static void srv_queue_text(const char *txt) {
   Msg *m = g_new0(Msg, 1);
@@ -62,13 +62,15 @@ static void srv_queue_text(const char *txt) {
  * the centre arrives at +12 kHz on the wire (true orientation — the server has
  * already conjugated its RF-inverted DDC feed on send). Blocks are 512 whole
  * cycles, so per-block phase restarts at 0. */
-static void srv_queue_iq_block(void) {
+/* hz0/off/hz1 = sdr-for-linux's centre stamps in the reserved words (0 = none) */
+static void srv_queue_iq_block_ex(guint32 hz0, guint32 off, guint32 hz1) {
   Msg *m = g_new0(Msg, 1);
   m->len    = 64 + BLK * 2 * sizeof(float);
   m->data   = g_malloc0(m->len);
   m->binary = 1;
   guint32 h[16] = { 0 };
   h[1] = RATE; h[2] = 3; h[5] = BLK * 2; h[6] = 0; h[7] = 2;
+  h[8] = hz0; h[9] = off; h[10] = hz1;
   memcpy(m->data, h, sizeof(h));
   float *iq = (float *)(void *)(m->data + 64);
   for (int i = 0; i < BLK; i++) {
@@ -81,6 +83,7 @@ static void srv_queue_iq_block(void) {
   g_mutex_unlock(&s_lock);
   g_atomic_int_inc(&s_blocks_sent);
 }
+static void srv_queue_iq_block(void) { srv_queue_iq_block_ex(0, 0, 0); }
 
 /* Complete command from the client (no ';'). Echo iq_* like the real server. */
 static void srv_exec(char *cmd) {
@@ -99,6 +102,8 @@ static void srv_exec(char *cmd) {
   } else if (g_str_has_prefix(cmd, "iq_stop:")) {
     g_atomic_int_set(&s_streaming, 0);
     srv_queue_text("iq_stop:0;");
+  } else if (g_str_has_prefix(cmd, "iq_stamp:")) {
+    srv_queue_text("iq_stamp:1;");             /* the family extension echo   */
   } else if (g_str_has_prefix(cmd, "spot:")) {
     g_mutex_lock(&s_lock);
     g_strlcpy(s_spot, cmd, sizeof(s_spot));
@@ -174,6 +179,9 @@ static gpointer server_thread(gpointer data) {
       g_atomic_int_set(&s_push_dds, 0);
       srv_queue_text("dds:0,7030000;");
     }
+    const gint sr = g_atomic_int_get(&s_stamp_req);
+    if (sr == 1) { g_atomic_int_set(&s_stamp_req, 0); srv_queue_iq_block_ex(7021000, 0, 0); }
+    if (sr == 2) { g_atomic_int_set(&s_stamp_req, 0); srv_queue_iq_block_ex(7020000, 700, 7025000); }
     /* Keep a small stock of IQ blocks queued while streaming. */
     if (g_atomic_int_get(&s_streaming)) {
       g_mutex_lock(&s_lock);
@@ -199,10 +207,14 @@ static volatile gint c_blocks, c_have_block;
 static guint        c_nframes;
 static double       c_rate, c_center;
 
+#define CAP_RING 8
+static guint  c_ring_n[CAP_RING]; static double c_ring_hz[CAP_RING]; static guint c_ring_i;
+
 static void iq_cb(const float *iq, guint nframes, double rate, double center,
                   gpointer user) {
   (void)user;
   g_mutex_lock(&c_lock);
+  c_ring_n[c_ring_i % CAP_RING] = nframes; c_ring_hz[c_ring_i % CAP_RING] = center; c_ring_i++;
   if (!c_have_block && nframes == BLK) {
     memcpy(c_block, iq, sizeof(c_block));
     c_have_block = 1;
@@ -212,6 +224,26 @@ static void iq_cb(const float *iq, guint nframes, double rate, double center,
   c_center  = center;
   g_mutex_unlock(&c_lock);
   g_atomic_int_inc(&c_blocks);
+}
+
+/* centre-stamp captures: a stamped block's own centre, and a stamped
+ * boundary → two callbacks (700 old-centre frames, 1348 new-centre ones) */
+static gboolean cond_stamp_single(void) {
+  gboolean ok = FALSE;
+  g_mutex_lock(&c_lock);
+  for (guint k = 0; k < CAP_RING; k++) { if (c_ring_n[k] == BLK && c_ring_hz[k] == 7021000.0) { ok = TRUE; } }
+  g_mutex_unlock(&c_lock);
+  return ok;
+}
+static gboolean cond_stamp_pair(void) {
+  gboolean ok = FALSE;
+  g_mutex_lock(&c_lock);
+  for (guint k = 0; k < CAP_RING; k++) {
+    const guint a = k, b = (k + 1) % CAP_RING;
+    if (c_ring_n[a] == 700 && c_ring_hz[a] == 7020000.0 && c_ring_n[b] == BLK - 700 && c_ring_hz[b] == 7025000.0) { ok = TRUE; }
+  }
+  g_mutex_unlock(&c_lock);
+  return ok;
 }
 
 /* ---- helpers ------------------------------------------------------------------ */
@@ -304,6 +336,14 @@ int main(void) {
   check("block geometry: 2048 frames @ 48 kHz (length = frames×2)",
         nframes == BLK && rate == (double)RATE);
   check("IQ callback carries the dds centre", center == 7020000.0);
+  /* centre stamps (sdr-for-linux family extension): the client asked for
+   * them, a stamped block's own centre beats the dds label, and a stamped
+   * boundary splits the block into two callbacks at the stamped frame */
+  check("client asked for centre stamps (iq_stamp:1 after iq_start)", srv_rx_contains("iq_stamp:1;"));
+  g_atomic_int_set(&s_stamp_req, 1);
+  check("stamped block: the callback carries h[8] (7021000), not the dds label", wait_ms(cond_stamp_single, 3000));
+  g_atomic_int_set(&s_stamp_req, 2);
+  check("stamped boundary at 700: two callbacks — 700 frames @ 7020000, 1348 @ 7025000", wait_ms(cond_stamp_pair, 3000));
 
   if (have) {
     /* Correlate the ingested block against e^{±j2π·12k·t}: ingest is

@@ -30,7 +30,12 @@
 #define SKIM_WF_FLOOR_PCT     20     /* percentile used as the floor estimate     */
 #define SKIM_WF_FLOOR_SMOOTH  0.01   /* EMA per row (τ ≈ 1 s at 94 rows/s)        */
 #define SKIM_WF_DB_OFFSET     200.0  /* spectrum.h byte encoding                  */
-#define SKIM_WF_LABEL_LAG     2      /* rows the centre LABEL leads the DATA by:
+#define SKIM_WF_LABEL_LAG     0      /* rows the centre LABEL leads the DATA by.
+                                      * 0 since the engine labels every row
+                                      * with the centre at its window middle
+                                      * (spectrum.c) from per-block stamps
+                                      * (sdr-for-linux iq_stamp:1) — the row
+                                      * arrives on its true centre. History:
                                       * the label leaves the server the moment
                                       * the knob moves, the IQ captured at that
                                       * centre lands here after the DDC apply,

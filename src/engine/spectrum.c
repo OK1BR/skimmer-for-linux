@@ -7,6 +7,7 @@
 
 #include <fftw3.h>
 #include <math.h>
+#include <string.h>
 
 struct _SkimSpectrum {
   guint          n;                            /* FFT size (power of two)    */
@@ -17,6 +18,11 @@ struct _SkimSpectrum {
   guint          head;                         /* next write slot            */
   guint          filled;                       /* frames ever written, ≤ n   */
   guint          since;                        /* frames since the last row  */
+  guint64        total;                        /* frames ever pushed         */
+  double         cur_hz;                       /* centre of the newest frame */
+  struct { guint64 at; double hz; } tr[16];    /* centre transitions: from
+                                                * frame `at` on, `hz`        */
+  guint          ntr;
   fftwf_complex *in, *out;
   fftwf_plan     plan;
   guint8        *row;
@@ -105,16 +111,51 @@ static void emit_row(SkimSpectrum *s) {
     v = v < 0.0f ? 0.0f : (v > 255.0f ? 255.0f : v);
     s->row[i] = (guint8)(v + 0.5f);
   }
-  if (s->cb) { s->cb(s->row, n, s->user); }
+  if (s->cb) {
+    /* the centre at the window's middle sample: newest transition ≤ it */
+    const guint64 mid = s->total - (guint64)(n / 2);
+    double hz = s->cur_hz;
+    for (guint i = s->ntr; i > 0; i--) {
+      if (s->tr[i - 1].at <= mid) { hz = s->tr[i - 1].hz; break; }
+      if (i == 1) { hz = s->tr[0].hz; }          /* older than every entry:
+                                                * the centre before them all
+                                                * is what tr[0] replaced —
+                                                * kept as tr[0] (see push)  */
+    }
+    s->cb(s->row, n, hz, s->user);
+  }
 }
 
-void skim_spectrum_push(SkimSpectrum *s, const float *iq, guint nframes) {
+void skim_spectrum_push(SkimSpectrum *s, const float *iq, guint nframes, double center_hz) {
+  if (nframes == 0) { return; }
+  if (s->ntr == 0 || center_hz != s->cur_hz) {
+    /* Record the transition at the index of the first frame that carries
+     * the new centre. tr[0] always holds the centre of the OLDEST frame the
+     * window can still contain, so a row is never labelled with nothing:
+     * entries older than a whole window (plus one) are dropped from the
+     * front, and the ring is one shorter than the worst case a window can
+     * straddle (a change per hop → 4 entries + 1 slack). */
+    if (s->ntr == G_N_ELEMENTS(s->tr)) {
+      memmove(&s->tr[0], &s->tr[1], (s->ntr - 1) * sizeof(s->tr[0]));
+      s->ntr--;
+    }
+    s->tr[s->ntr].at = s->total;
+    s->tr[s->ntr].hz = center_hz;
+    s->ntr++;
+    s->cur_hz = center_hz;
+  }
+  /* drop entries no row can need any more (all older than the window) */
+  while (s->ntr > 1 && s->tr[1].at + (guint64)s->n <= s->total) {
+    memmove(&s->tr[0], &s->tr[1], (s->ntr - 1) * sizeof(s->tr[0]));
+    s->ntr--;
+  }
   for (guint f = 0; f < nframes; f++) {
     s->ring[2 * s->head]     = iq[2 * f];
     s->ring[2 * s->head + 1] = iq[2 * f + 1];
     s->head = (s->head + 1) % s->n;
     if (s->filled < s->n) { s->filled++; }
     s->since++;
+    s->total++;
     if (s->filled == s->n && s->since >= s->hop) {
       s->since = 0;
       emit_row(s);

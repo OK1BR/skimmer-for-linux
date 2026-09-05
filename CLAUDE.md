@@ -823,9 +823,22 @@ blind (passband roll-off + DC spur correlate at zero shift; fixed by
 detrend + masks + positive excursions only); then his knob sweeps voted
 L=2: 557 / L=1: 305 / L=3: 103 rows and four discrete TCI steps flipped
 the data 3, 2, 3, 2 rows after the label → **`SKIM_WF_LABEL_LAG` = 2**
-(his instance: `SKIM_WF_LAG_ROWS=2`, log live15). Open: his look at a sweep
-(slope, no tear, never a pause). Not built by design: a polling-server
-settle fallback (a click + stillness looks the same).
+(his instance: `SKIM_WF_LAG_ROWS=2`, log live15). **His look: "a bit
+better, smooth, but the teeth are still there"** — spikes = whole rows one
+tuning STEP off both ways (~10 % of sweep rows ≥ 4 bins, tail to 357),
+because the `dds` label attaches to whichever IQ block is arriving: ±1
+block of jitter no constant lag removes. **Fix built + gated the same
+evening, live look pending: IQ centre STAMPS.** sdr-for-linux: `iq_stamp:1;`
+(opt-in, echoed) fills h[8] = centre of the block's first frame, h[9] =
+frame offset of a retune inside the block, h[10] = the new centre — the
+DDC-ring sample index at the change + `SDRFL_DDC_LAT_MS` (2.5) through the
+resampler ratio; unstamped clients byte-identical (gate sdrfl-tci-test
+43 → 50). Skimmer: client asks, takes h[8] over the label, splits the block
+at h[9] (tci gate 17 → 20); `spectrum.c` takes the centre per push and
+labels each row with the centre at its window MIDDLE (gate 76 → 92); the
+app delay line defaults to 0 (`SKIM_WF_LAG_ROWS` kept for experiments).
+Acceptance: sweep rows ≥ 4 bins off 9.7 % → ≈ 0. Not built by design: a
+polling-server settle fallback (a click + stillness looks the same).
 
 ## Layout
 

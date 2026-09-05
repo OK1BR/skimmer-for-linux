@@ -889,8 +889,53 @@ where relevant, a live check against a running `sdr-for-linux`.
   his instance runs it via `SKIM_WF_LAG_ROWS=2` (log live15). Probe rows
   in the steady state after a step no longer vote (every candidate lag
   implies the same shift there — the tie fell on L=0 and swamped the
-  histogram). His look at a knob sweep — slope, no tear, never a pause —
-  is the open verdict. Not built, on purpose: a polling-server fallback (settle
+  histogram). **His look (19:58, with a screen recording): "it behaves a
+  bit better — the teeth are still there, but it is smooth."** The pause
+  is gone; the teeth are a different animal, pinned by the recording + the
+  probe log of the same minute: sharp single-column spikes up AND down on
+  strong traces, i.e. whole rows landing one tuning step off, both
+  directions. 84 % of voting sweep rows sit exactly, ~10 % are ≥ 4 bins
+  off with a heavy tail (100 rows ≥ 40 bins, max 357): the misplacement
+  is the STEP of that row (a wheel notch = 20–40 bins, a click = hundreds),
+  because the `dds` label and the IQ ride the same WebSocket but the label
+  gets attached to whichever block is ARRIVING when it lands — ±1 block of
+  jitter that no constant lag can remove (the votes alternated L 1 2 1 2 2
+  3 in that very second). **Fix built the same evening, both halves gated
+  (live look pending): the SDR STAMPS every IQ block with its centre.**
+  sdr-for-linux (`tci_server.c`): a client that sends `iq_stamp:1;`
+  (echoed) gets, in the otherwise-zero reserved words of the IQ Stream
+  header, h[8] = DDC centre of the block's first frame, h[9] = frame
+  offset at which the centre changed inside the block (0 = none), h[10] =
+  the centre from there on. The boundary is the DDC-ring sample index at
+  the moment of the change (the HP kick has just left) + the radio's
+  DDC→P2 latency (`SDRFL_DDC_LAT_MS`, default 2.5 ms), mapped through the
+  client's resampler ratio; two changes in one block report the first
+  offset with the final centre. Off for every client that never asks —
+  SDC / CW Skimmer keep byte-identical blocks (whether they tolerate
+  non-zero reserved words is unverified, hence opt-in; the advisor's
+  call). Gate `sdrfl-tci-test` 43 → 50 (unstamped = zeros, opt-in echo,
+  h[8] = centre, a mid-stream `vfo:` retune lands as a boundary inside a
+  block with h[10] = the new centre and every later block on it, opt-out
+  = zeros). Skimmer: `tci_client` sends `iq_stamp:1;` after `iq_start`,
+  takes h[8] over the label and SPLITS a block at h[9] into two `iq_cb`
+  calls (gate `skimmer-tci-test` 17 → 20 with a stamped mock); the
+  spectrum tap (`spectrum.c`) now takes the centre per push, keeps the
+  last centre transitions by sample index and labels every row with the
+  centre at its window MIDDLE (total − N/2 — the boundary between the
+  2nd and 3rd hop; a centre starting exactly there wins the tie, so with
+  a change per hop a row reads the centre of the hop before the newest);
+  `pipeline.c` passes the row's own centre on. Gate spectrum 76 → 92 (the
+  first row's own centre; the flip two hops after a change at every
+  rate; a change inside a push lands on its sample; a change per hop for
+  40 hops, ring pruning). The app delay line's default is 0 now — the row
+  arrives on its true centre — `SKIM_WF_LAG_ROWS` stays for experiments.
+  Servers without stamps degrade to today's behaviour (label at block
+  arrival, window-middle placement = the L≈2 offset built in, the ±1
+  jitter inherent). Acceptance metric for the live look: the share of
+  voting sweep rows with |best − cfg| ≥ 4 bins, 9.7 % before → expected
+  ≈ 0; a discrete click will still show the 4-hop window's 2-column
+  smear on strong carriers — physically true, a separate decision if he
+  dislikes it. Not built, on purpose: a polling-server fallback (settle
   when labels arrive in ≥ 400 ms steps) — one click followed by stillness is
   indistinguishable from a polling label, so any cadence detector would bring
   the pause back on his most common gesture; no such server is measured.

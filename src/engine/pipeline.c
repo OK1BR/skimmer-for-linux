@@ -190,7 +190,6 @@ struct _SkimPipeline {
    * the picture keeps flowing while decoders freeze, own splatter and all. */
   SkimSpectrum         *spec;
   double                spec_rate;
-  double                spec_center;
   volatile gint         spec_on;
   SkimPipelineSpectrumCb spec_cb;
   gpointer              spec_user;
@@ -595,11 +594,10 @@ static void hold_resume(SkimPipeline *p) {
   }
 }
 
-static void spec_row_cb(const guint8 *row, guint nbins, gpointer user) {
+static void spec_row_cb(const guint8 *row, guint nbins, double center_hz, gpointer user) {
   SkimPipeline *p = user;
   if (p->spec_cb) {
-    p->spec_cb(row, nbins, p->spec_center, skim_spectrum_bin_hz(p->spec),
-               p->spec_user);
+    p->spec_cb(row, nbins, center_hz, skim_spectrum_bin_hz(p->spec), p->spec_user);
   }
 }
 
@@ -614,8 +612,7 @@ static void spec_feed(SkimPipeline *p, const IqBlock *b) {
     p->spec_rate = b->rate;
     skim_spectrum_set_row_cb(p->spec, spec_row_cb, p);
   }
-  p->spec_center = b->center_hz;
-  skim_spectrum_push(p->spec, b->iq, b->nframes);
+  skim_spectrum_push(p->spec, b->iq, b->nframes, b->center_hz);
 }
 
 static void process_block(SkimPipeline *p, IqBlock *b) {

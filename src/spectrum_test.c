@@ -62,10 +62,12 @@ typedef struct {
   guint   nbins;
   guint8 *last;                                /* copy of the last row       */
   double  center_hz, bin_hz;                   /* pipeline path only         */
+  double  row_hz;                              /* tap path: the row's centre */
 } Cap;
 
-static void cap_row(const guint8 *row, guint nbins, gpointer user) {
+static void cap_row(const guint8 *row, guint nbins, double center_hz, gpointer user) {
   Cap *c = user;
+  c->row_hz = center_hz;
   c->rows++;
   if (c->nbins != nbins) {
     g_free(c->last);
@@ -80,7 +82,7 @@ static void cap_pipe_row(const guint8 *row, guint nbins, double center_hz,
   Cap *c = user;
   c->center_hz = center_hz;
   c->bin_hz    = bin_hz;
-  cap_row(row, nbins, user);
+  cap_row(row, nbins, center_hz, user);
 }
 
 static guint argmax(const guint8 *row, guint n) {
@@ -125,7 +127,7 @@ static void rate_section(double rate) {
   Tone t[2] = { { 12000.0, 0.5, 0 }, { below, 0.25, 0 } };
   const guint nframes = (guint)rate;                  /* one second           */
   float *iq = synth(rate, nframes, t, 2, 1e-3);
-  skim_spectrum_push(s, iq, nframes);
+  skim_spectrum_push(s, iq, nframes, 14020000.0);
   g_free(iq);
 
   const guint hop = skim_spectrum_hop(s);
@@ -163,11 +165,53 @@ static void rate_section(double rate) {
   cap.rows = 0;
   skim_spectrum_reset(s);
   float *quiet = g_new0(float, 2 * (n - 1));
-  skim_spectrum_push(s, quiet, n - 1);
+  skim_spectrum_push(s, quiet, n - 1, 14020000.0);
   check("reset: n−1 frames after reset produce no row", cap.rows == 0);
-  skim_spectrum_push(s, quiet, 1);
+  skim_spectrum_push(s, quiet, 1, 14020000.0);
   check("reset: the n-th frame produces exactly one row", cap.rows == 1);
   g_free(quiet);
+
+  /* Window-centre labelling: a centre change at frame index T labels a row
+   * with the NEW centre exactly when the middle of its window (total − n/2)
+   * reaches T — two hops after the change at hop = n/4, whatever the rate.
+   * Feed one whole window at A, then hop-sized pieces at B. */
+  skim_spectrum_reset(s);
+  float *z = g_new0(float, 2 * n);
+  skim_spectrum_push(s, z, n, 1000.0);                 /* row 1: window [0,n) */
+  check("label: the first row carries its own centre", cap.row_hz == 1000.0);
+  double got[5] = { 0 };
+  for (guint k = 1; k <= 4; k++) {
+    skim_spectrum_push(s, z, hop, 2000.0);             /* change at frame n   */
+    got[k] = cap.row_hz;
+  }
+  g_snprintf(what, sizeof(what), "label: after a change the rows read %.0f %.0f %.0f %.0f — B from the row whose middle passes it",
+             got[1], got[2], got[3], got[4]);
+  check(what, got[1] == 1000.0 && got[2] == 2000.0 && got[3] == 2000.0 && got[4] == 2000.0);
+  /* a change INSIDE a push (sub-block): pushing hop/2 at B then hop/2 at C
+   * places the C transition at the right sample, not at the push start */
+  const guint half = hop / 2;
+  skim_spectrum_push(s, z, half, 2000.0);
+  skim_spectrum_push(s, z, hop - half, 3000.0);        /* change at n+4·hop+half */
+  /* total = n+5·hop → mid = n/2+5·hop = n+3·hop < change (n+4.5·hop) → B */
+  double g5 = cap.row_hz;
+  skim_spectrum_push(s, z, hop, 3000.0); double g6 = cap.row_hz;   /* mid n+4·hop   → B */
+  skim_spectrum_push(s, z, hop, 3000.0); double g7 = cap.row_hz;   /* mid n+5·hop   → C */
+  skim_spectrum_push(s, z, hop, 3000.0); double g8 = cap.row_hz;   /* mid n+6·hop   → C */
+  skim_spectrum_push(s, z, hop, 3000.0); double g9 = cap.row_hz;   /* mid n+7·hop   → C */
+  g_snprintf(what, sizeof(what), "label: a change inside a push lands on its sample (%.0f %.0f %.0f %.0f %.0f)", g5, g6, g7, g8, g9);
+  check(what, g5 == 2000.0 && g6 == 2000.0 && g7 == 3000.0 && g8 == 3000.0 && g9 == 3000.0);
+  /* a change every hop for longer than the ring: no stale label, no crash.
+   * The window middle (total − n/2) is the boundary between its 2nd and
+   * 3rd hop; the centre of the 3rd hop starts exactly there and wins the
+   * tie (≤), so a row reads the centre pushed ONE hop before it. */
+  gboolean mono = TRUE;
+  for (guint k = 0; k < 40; k++) {
+    skim_spectrum_push(s, z, hop, 10000.0 + 100.0 * k);
+    const double want = k >= 1 ? 10000.0 + 100.0 * (k - 1) : 3000.0;
+    if (cap.row_hz != want) { mono = FALSE; }
+  }
+  check("label: a change per hop for 40 hops — every row on the centre from 1 hop back (the window middle)", mono);
+  g_free(z);
 
   g_free(cap.last);
   skim_spectrum_free(s);

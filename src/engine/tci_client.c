@@ -196,9 +196,19 @@ static void drain_binary(SkimTciClient *c) {
          * 2026-07-15, spots landed out of band). */
         if (c->iq_cb) {
           g_mutex_lock(&c->lock);
-          const double center = c->center_hz;
+          double center = c->center_hz;
           g_mutex_unlock(&c->lock);
-          c->iq_cb(iq, nframes, (double)h[1], center, c->iq_cb_data);
+          /* centre stamps (iq_stamp:1, see start()): the block's own centre
+           * beats the label; a retune inside the block splits it at the
+           * stamped frame so both halves carry the centre of their samples */
+          const guint32 st_hz0 = h[8], st_off = h[9], st_hz1 = h[10];
+          if (st_hz0 != 0) { center = (double)st_hz0; }
+          if (st_hz0 != 0 && st_hz1 != 0 && st_off != 0 && st_off < nframes) {
+            c->iq_cb(iq, st_off, (double)h[1], center, c->iq_cb_data);
+            c->iq_cb(iq + 2 * st_off, nframes - st_off, (double)h[1], (double)st_hz1, c->iq_cb_data);
+          } else {
+            c->iq_cb(iq, nframes, (double)h[1], center, c->iq_cb_data);
+          }
         }
       }
     }
@@ -401,10 +411,15 @@ gboolean skim_tci_client_start(SkimTciClient *c, guint iq_samplerate, GError **e
 
   /* iq_samplerate is device-global radio state — request ours (the SDC lesson:
    * say it explicitly or inherit whatever the device last used), then start. */
+  /* iq_stamp:1 = sdr-for-linux's family extension: every IQ block carries
+   * the DDC centre of its first frame (h[8]) and, when the radio retuned
+   * inside the block, the frame offset (h[9]) + the new centre (h[10]).
+   * Other servers ignore the command and leave the words zero — then the
+   * dds label at block arrival is used, as before (±1 block of jitter). */
   if (iq_samplerate) {
-    cli_queue(c, g_strdup_printf("iq_samplerate:%u;iq_start:0;", iq_samplerate));
+    cli_queue(c, g_strdup_printf("iq_samplerate:%u;iq_start:0;iq_stamp:1;", iq_samplerate));
   } else {
-    cli_queue(c, g_strdup("iq_start:0;"));
+    cli_queue(c, g_strdup("iq_start:0;iq_stamp:1;"));
   }
   c->started = TRUE;
   return TRUE;

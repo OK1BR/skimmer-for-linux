@@ -41,7 +41,14 @@
 typedef struct _SkimSpectrum SkimSpectrum;
 
 /* One finished row: nbins bytes, fftshifted (index 0 = lowest frequency). */
-typedef void (*SkimSpectrumRowCb)(const guint8 *row, guint nbins, gpointer user);
+/* center_hz = the stream centre in effect at the sample in the MIDDLE of the
+ * row's window (the label the row belongs on; a retune inside the window
+ * smears the row — physically true — and the middle is the honest label).
+ * The middle is the boundary between the window's 2nd and 3rd hop; a centre
+ * that starts exactly there wins (newer), so with a change per hop a row
+ * reads the centre of the hop before the newest one. */
+typedef void (*SkimSpectrumRowCb)(const guint8 *row, guint nbins, double center_hz,
+                                  gpointer user);
 
 SkimSpectrum *skim_spectrum_new(double rate);
 void          skim_spectrum_free(SkimSpectrum *s);
@@ -53,7 +60,11 @@ guint  skim_spectrum_hop(const SkimSpectrum *s);       /* frames per row     */
 void skim_spectrum_set_row_cb(SkimSpectrum *s, SkimSpectrumRowCb cb, gpointer user);
 
 /* Feed interleaved I/Q frames; the row callback fires from inside. */
-void skim_spectrum_push(SkimSpectrum *s, const float *iq, guint nframes);
+/* Feed frames captured at stream centre center_hz (per block, or per
+ * sub-block when the server stamps a retune inside a block). The tap keeps
+ * the last few centre transitions by sample index and labels every row with
+ * the centre at its window middle. */
+void   skim_spectrum_push(SkimSpectrum *s, const float *iq, guint nframes, double center_hz);
 
 /* Forget buffered samples (re-enable after a pause: no stale half-row). */
 void skim_spectrum_reset(SkimSpectrum *s);
