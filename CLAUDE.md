@@ -673,6 +673,22 @@ only writes it on its own clean exit path; capture carries LA1TV +
 SV1JD(Z) + IZ0FVD + the 14121.5 garbage source + the FT8 band).
 Threshold work happens OFFLINE against this fixture (SKIM_MODE=rtty
 replay), the established house method.
+**SKM-1 fixed (2026-09-05) — the first pass over `docs/BACKLOG.md`, the
+single work queue since 2026-08-25.** The YO DX HF teardown criticals
+(two in one millisecond at close) are a coincidence, not a constant:
+`gtk_window_close` destroys the tree synchronously inside the close-request
+dispatch and `g_application_run` finishes the SAME iteration's dispatch
+list before it sees the released window, so a tick due together with the
+close event runs on finalized widgets. Reproduced deterministically under
+gdb (headless Broadway, isolated config on a `.invalid` host — the live
+sdr-for-linux binds 0.0.0.0:40001, never use loopback for a test client),
+fixed with `app_teardown()` on `close-request` + `shutdown` backstop
+(source ids cleared, pipeline stopped = engine thread joined, feed freed)
+and ONE sentinel `app->closing` for every late callback; a
+`GTK_IS_LABEL()` probe on the freed label would be UB, not a guard.
+Same reproduction after: zero criticals, close→exit 4 ms. Connected close
+unverified live (no radio to spare). **11 gates green — the "12" in the M7
+entry above was a miscount; meson lists 11.**
 
 ## Layout
 

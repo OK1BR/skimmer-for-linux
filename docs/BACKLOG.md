@@ -34,7 +34,7 @@ that leaves the machine wrong; `medium` = gets in the operator's way;
 ## Open — bugs
 
 ### SKM-1 — Periodic timers keep firing after the window is destroyed
-- **Type:** bug · **Severity:** medium (latent) · **Status:** open
+- **Type:** bug · **Severity:** medium (latent) · **Status:** done — reproduced, fixed, gate-green (2026-09-05)
 - **Source:** stderr of the YO DX HF run, 2026-08-22 (not an operator report)
 - **Detail:** `docs/CONTEST-NOTES-2026-08-22.md` §N1
 
@@ -58,6 +58,43 @@ at the top of the callback (`win.c:433`). Same pattern applies here — keep the
 running when these notes were written, with stderr going to
 `/var/tmp/contest-2026-08-23-logy/skimmer.log` — closing it says whether the
 criticals appear again before any code is touched.
+
+**Resolution (2026-09-05, `docs/CONTEST-NOTES-2026-08-22.md` "Rozbor 5. 9."):**
+the day-2 log, instance closed, has zero criticals — the bug is a coincidence,
+not a constant. Mechanism read in the GTK 4.22 / GLib 2.88 sources and then
+reproduced deterministically under gdb (headless Broadway, isolated config
+whose TCI host is `skimmer-test.invalid` — the live `sdr-for-linux` binds
+`0.0.0.0:40001` and a test client would have streamed IQ and spotted onto the
+operator's panadapter): `gtk_window_close` destroys the widget tree
+synchronously inside the close-request dispatch, and `g_application_run`
+finishes the SAME iteration's dispatch list before it notices the application
+released its last window — so every tick that was due together with the close
+event ran on finalized widgets. Stop the process 4 s inside `status_tick` (all
+seconds timers become due), close the window from the next `age_tick`, and
+`scan_tick` in the same list prints the exact day-1
+`adw_window_title_set_subtitle` critical; after the close
+`g_type_check_instance_is_a()` reads 0 for both `app->status` and
+`app->title`, so the `GTK_IS_LABEL (app->status)` guard proposed above would
+have read freed memory — UB, not a guard. (The first attempts reproduced
+nothing because the gdb script itself leaked a window reference through
+`g_list_model_get_item()` and the widgets survived — a trap worth recording.)
+
+Fix in `src/app/main.c`: the four source ids are kept and
+`g_clear_handle_id()`-ed in `app_teardown()`, hooked on the window's
+`close-request` (widgets still intact) and on the application's `shutdown`
+as the idempotent backstop; `app->closing` is the ONE sentinel checked by the
+ticks, the event drain, the port probe and the pipeline-start completion; the
+running pipeline is stopped there (engine thread joined) and the telnet feed
+freed after it, so nothing is minted past the close. Verified: the same gdb
+reproduction → zero criticals, one `app: window closed — engine stopped,
+timers cleared` line (both hooks fired, one teardown), close→exit 4 ms in the
+disconnected state; 11 gates green. **Unverified:** the CONNECTED close — no
+radio could be used (see above) and the mock TCI server lives inside a gate.
+What holds by reading: `skim_pipeline_stop` joins the engine thread before its
+own state callback, so no engine-thread event can race the teardown, and
+stop-from-the-main-thread is the path `apply_state` and the mode change
+already exercise. The next live close is the check: the message line, no
+critical.
 
 ### SKM-2 — GtkImage baseline warnings flood stderr, non-deterministically
 - **Type:** bug · **Severity:** low · **Status:** open (diagnose first)

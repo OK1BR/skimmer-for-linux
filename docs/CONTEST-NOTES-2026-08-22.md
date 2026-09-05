@@ -133,3 +133,46 @@ z 1. dne se tedy zatím objevit nemohly. Její stderr míří do
 je v tom souboru zdarma reprodukční test N1**: buď tam ty dvě hlášky
 (`gtk_label_set_text` / `adw_window_title_set_subtitle`) budou, nebo ne.
 Stojí za to log po zavření zkontrolovat, než se sáhne na kód.
+
+---
+
+# Rozbor 5. 9. 2026
+
+### N1 — reprodukováno, opraveno
+- **Log 2. dne** (`/var/tmp/contest-2026-08-23-logy/skimmer.log`, instance
+  už zavřená): 108 provozních řádků TX hold, **0 CRITICAL**. Nedeterminismus
+  se potvrdil — je to souhra okolností, ne konstanta.
+- **Mechanismus** (zdroje GTK 4.22 `gtkwindow.c`, GLib 2.88 `gapplication.c`):
+  `gtk_window_close` → `gtk_window_destroy` proběhne synchronně uvnitř
+  dispatch close-requestu; `g_application_run` dokončí dispatch list
+  **téhož** průchodu smyčky a teprve pak zjistí, že aplikace pustila poslední
+  okno. Každý tick, který byl due spolu s událostí zavření, tedy běžel nad
+  finalizovanými widgety. Odtud „dvě CRITICAL v jedné milisekundě" — a odtud
+  i nula hlášek 2. dne: den 1 se zavření trefilo do sekundové hranice
+  časovačů, den 2 ne.
+- **Deterministická reprodukce** (headless Broadway `:7`, izolovaná
+  `XDG_CONFIG_HOME` s hostem `skimmer-test.invalid` — na živé sdr-for-linux,
+  které naslouchá na `0.0.0.0:40001`, se sáhnout nesmělo; skripty v
+  `/var/tmp/skimmer-skm12/`): gdb zastaví proces v `status_tick` na 4 s
+  (všechny sekundové časovače se stanou due), v následujícím `age_tick`
+  zavolá `gtk_window_close`; `scan_tick` ve stejném dispatch listu vypíše
+  **přesně tu `adw_window_title_set_subtitle` CRITICAL z 1. dne**. Po
+  zavření `g_type_check_instance_is_a` nad `app->status` i `app->title`
+  vrací 0 — objekty jsou finalizované, takže původně navržená pojistka
+  `GTK_IS_LABEL (app->status)` by četla uvolněnou paměť (UB), ne hlídala.
+  Metodická past: první pokusy nic nereprodukovaly, protože skript sám držel
+  referenci na okno (únik z `g_list_model_get_item`) a widgety přežily.
+- **Oprava** (`src/app/main.c`): `app_teardown()` — ID čtyř zdrojů +
+  `g_clear_handle_id`, stop pipeline (join engine vlákna), pak uvolnění
+  telnet feedu — zavěšená na `close-request` okna (widgety ještě celé) a jako
+  idempotentní pojistka na `shutdown` aplikace; jediný sentinel
+  `app->closing` kontrolují ticky, drain fronty událostí, port probe i
+  dokončení startu pipeline.
+- **Ověřeno:** tatáž reprodukce → 0 CRITICAL, jedna zpráva `app: window
+  closed — engine stopped, timers cleared` (oba hooky, jeden teardown),
+  zavření → exit 4 ms (odpojený stav); 11 gate zelených.
+  **Neověřeno:** zavření s BĚŽÍCÍ pipeline (rádio nešlo použít, mock TCI
+  server je uvnitř gate). Ze čtení: `skim_pipeline_stop` joinuje engine
+  vlákno před vlastním state callbackem, takže engine nemůže teardown
+  předběhnout, a stop z hlavního vlákna už jede v `apply_state` a při změně
+  módu. **Příští živé zavření = kontrola: zpráva ano, CRITICAL ne.**

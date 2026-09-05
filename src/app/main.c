@@ -90,6 +90,12 @@ typedef struct {
   int             decode_font;   /* decode pane font size, pt (persisted)     */
   GtkCssProvider *css;           /* carries the decode pane font rule         */
   gboolean        probing;       /* port probe / handshake in flight          */
+  gboolean        closing;       /* close-request seen — the ONE sentinel every
+                                  * late main-loop callback checks (SKM-1). The
+                                  * widget tree is finalized right after it, so
+                                  * a GTK_IS_LABEL() probe on app->status would
+                                  * read freed memory, not guard anything.     */
+  guint           status_tick_id, age_tick_id, lag_tick_id, scan_tick_id;
   double          vfo_hz;        /* the radio's tuned frequency (vfo:0,0)     */
   char            tuned_call[16]; /* the station the pane is FIXED on — set
                                   * on retune, held while it lives; header
@@ -633,6 +639,10 @@ static gboolean evq_drain(gpointer data) {
   app->evq = g_ptr_array_new_with_free_func(ev_free);
   app->evq_scheduled = FALSE;
   g_mutex_unlock(&app->evq_lock);
+  if (app->closing) {                          /* widgets are gone — drop   */
+    g_ptr_array_unref(batch);
+    return G_SOURCE_REMOVE;
+  }
 
   /* Only the LAST report per station builds a row — earlier ones in the
    * same batch would be replaced within this very dispatch. (Keyed i+1:
@@ -751,6 +761,7 @@ static void pipe_gone_cb(const SkimStation *st, gpointer user) {
  * busy with (engine events, pane appends, tag churn, pane reloads). */
 static gboolean lag_tick(gpointer data) {
   App *app = data;
+  if (app->closing) { return G_SOURCE_REMOVE; }
   const gint64 now = g_get_monotonic_time();
   if (app->lag_prev && now - app->lag_prev > 750 * 1000) {
     g_message("lag: main loop stalled %.0f ms",
@@ -770,6 +781,7 @@ static gboolean lag_tick(gpointer data) {
 
 static gboolean age_tick(gpointer data) {
   App *app = data;
+  if (app->closing) { return G_SOURCE_REMOVE; }
   guint n = g_list_model_get_n_items(G_LIST_MODEL(app->stations));
   if (n) { g_list_model_items_changed(G_LIST_MODEL(app->stations), 0, n, n); }
   /* Re-tint the recent pane tail with fresh logbook verdicts — a call
@@ -781,6 +793,7 @@ static gboolean age_tick(gpointer data) {
 
 static gboolean status_tick(gpointer data) {
   App *app = data;
+  if (app->closing) { return G_SOURCE_REMOVE; }
   char rbn[64] = "";
   if (app->rbn) {
     g_snprintf(rbn, sizeof(rbn), " · feed :%u (%u)",
@@ -1020,6 +1033,14 @@ static void start_pipeline_done(GObject *src, GAsyncResult *res, gpointer user) 
   GError *err = NULL;
   gboolean ok = g_task_propagate_boolean(G_TASK(res), &err);
   app->probing = FALSE;
+  if (app->closing) {
+    /* The window went away during the handshake. The start ran on its
+     * worker thread, so teardown could not touch it — reap it here (a
+     * failed start has no engine thread; free is stop + release). */
+    g_clear_error(&err);
+    g_clear_pointer(&app->starting, skim_pipeline_free);
+    return;
+  }
   if (!ok) {
     g_clear_error(&err);                       /* scanner keeps trying       */
     g_clear_pointer(&app->starting, skim_pipeline_free);
@@ -1038,6 +1059,15 @@ static void probe_done(GObject *src, GAsyncResult *res, gpointer user) {
   GError *err = NULL;
   GSocketConnection *conn =
       g_socket_client_connect_to_host_finish(G_SOCKET_CLIENT(src), res, &err);
+  if (app->closing) {                          /* window went mid-probe      */
+    if (conn) {
+      g_io_stream_close(G_IO_STREAM(conn), NULL, NULL);
+      g_object_unref(conn);
+    }
+    g_clear_error(&err);
+    app->probing = FALSE;
+    return;
+  }
   if (!conn) {
     g_clear_error(&err);
     app->probing = FALSE;
@@ -1087,6 +1117,7 @@ static void probe_done(GObject *src, GAsyncResult *res, gpointer user) {
 
 static gboolean scan_tick(gpointer data) {
   App *app = data;
+  if (app->closing) { return G_SOURCE_REMOVE; }
   if (app->pipeline || app->probing) { return G_SOURCE_CONTINUE; }
   app->probing = TRUE;
   char s[160];
@@ -1567,6 +1598,52 @@ static void on_pane_motion(GtkEventControllerMotion *m, double x, double y,
   }
 }
 
+/* --- teardown (SKM-1) ------------------------------------------------------------------------
+ * Closing the window used to leave the four periodic sources attached. GTK
+ * destroys the widget tree synchronously inside the close-request dispatch,
+ * and GLib finishes the SAME iteration's dispatch list before the run loop
+ * notices the application released its last window — so any tick that was
+ * due together with the close event ran against finalized widgets (YO DX HF
+ * 2026-08-22: gtk_label_set_text + adw_window_title_set_subtitle criticals in
+ * one millisecond, 17 min after the last event; reproduced deterministically
+ * under gdb 2026-09-05 — close from age_tick with scan_tick due). Everything
+ * that can reach the main loop late checks ONE sentinel, app->closing, and
+ * the pipeline is stopped here — its engine thread is joined, so no event is
+ * minted after this point. Idempotent: close-request runs it with the widgets
+ * intact; the application's shutdown signal is the backstop for any other
+ * exit path (it touches no widget). */
+static void app_teardown(App *app) {
+  if (app->closing) { return; }
+  app->closing = TRUE;                         /* before stop: its state_cb
+                                                * posts an event the drain
+                                                * must now drop             */
+  g_clear_handle_id(&app->status_tick_id, g_source_remove);
+  g_clear_handle_id(&app->age_tick_id, g_source_remove);
+  g_clear_handle_id(&app->lag_tick_id, g_source_remove);
+  g_clear_handle_id(&app->scan_tick_id, g_source_remove);
+  if (app->pipeline) {
+    skim_pipeline_stop(app->pipeline);
+    g_clear_pointer(&app->pipeline, skim_pipeline_free);
+  }
+  /* app->starting is mid-handshake on a worker thread and cannot be freed
+   * from here — start_pipeline_done reaps it (or process exit does, once
+   * the loop is gone). The telnet feed goes AFTER the pipeline: the
+   * pipeline's feed spot_out was built on it. */
+  g_clear_pointer(&app->rbn, skim_rbn_feed_free);
+  g_message("app: window closed — engine stopped, timers cleared");
+}
+
+static gboolean on_close_request(GtkWindow *win, gpointer user) {
+  (void)win;
+  app_teardown(user);
+  return FALSE;                                /* proceed with the close     */
+}
+
+static void on_shutdown(GApplication *a, gpointer user) {
+  (void)a;
+  app_teardown(user);
+}
+
 /* --- activate ----------------------------------------------------------------------------- */
 
 static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
@@ -1579,6 +1656,8 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   gtk_window_set_title(GTK_WINDOW(window), "Skimmer for Linux");
   gtk_window_set_default_size(GTK_WINDOW(window), 900, 640);
   app->window       = GTK_WINDOW(window);
+  g_signal_connect(window, "close-request", G_CALLBACK(on_close_request), app);
+  g_signal_connect(gtk_app, "shutdown", G_CALLBACK(on_shutdown), app);
   app->host         = settings_load_host();
   app->dec_mode     = settings_load_mode();
   app->cq_only      = settings_load_cq_only();
@@ -1715,9 +1794,11 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   gtk_widget_set_margin_start(GTK_WIDGET(app->status), 12);
   gtk_widget_set_margin_top(GTK_WIDGET(app->status), 4);
   gtk_widget_set_margin_bottom(GTK_WIDGET(app->status), 4);
-  g_timeout_add_seconds(1, status_tick, app);
-  g_timeout_add_seconds(2, age_tick, app);
-  if (g_getenv("SKIM_LAG_DEBUG")) { g_timeout_add(250, lag_tick, app); }
+  app->status_tick_id = g_timeout_add_seconds(1, status_tick, app);
+  app->age_tick_id    = g_timeout_add_seconds(2, age_tick, app);
+  if (g_getenv("SKIM_LAG_DEBUG")) {
+    app->lag_tick_id = g_timeout_add(250, lag_tick, app);
+  }
 
   GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_box_append(GTK_BOX(box), header);
@@ -1737,7 +1818,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
 
   /* Find the server: probe now, then keep scanning while disconnected. */
   scan_tick(app);
-  g_timeout_add_seconds(3, scan_tick, app);
+  app->scan_tick_id = g_timeout_add_seconds(3, scan_tick, app);
 }
 
 /* --version prints and exits in the LOCAL instance, before GApplication
