@@ -709,6 +709,26 @@ where relevant, a live check against a running `sdr-for-linux`.
   by his look. Live today: the ±3-row guard + settle 0.7 s build is what he
   ran; palettes and drag-pan verified by him; the SKM-2 GtkImage warnings
   recurred on the desktop at every launch (BACKLOG update).
+  **MEASURED at the very end (probe log `/var/tmp/skimmer-app-20260905-m8-live8.log`,
+  rows 769–802, one ~350 ms tuning sweep down at ~12–25 kHz/s):** the LABELS
+  move every row (−2 … −48 bins per 4 rows), the DATA moves in JUMPS of +44,
+  +70, +56 bins every ~9–10 rows (≈ 100 ms), each jump equal to the label
+  movement accumulated since the previous jump (sign: a fixed station rises
+  in bin index when the band tunes down — consistent). Root cause read in
+  sdr-for-linux `src/engine/protocol2.c`: `p2_set_frequency()` only STORES the
+  frequency; the keepalive timer thread pushes it in the next High-Priority
+  packet "≤ 100 ms, rapid tuning coalesces into ~10 retunes/s", whereas the
+  TCI label now leaves on every GUI step (ee7d08b). So the residual mismatch
+  is not transport latency but the radio getting the frequency 100 ms late
+  and in quanta. **First step next session, SDR side:** make
+  `p2_set_frequency` KICK the keepalive timer exactly as `p2_set_tx_state`
+  does (`kick_cond` — piHPSDR parity, schedule_high_priority on every freq
+  change), so the DDC follows each step within a millisecond or two; then
+  re-measure with the probe (expect data to follow the label within 1–2
+  rows), and only then size the skimmer guard / label delay line (likely
+  ±1–2 rows, no settle) so the waterfall flows through tuning with the
+  picture filling in at the edges. If some latency remains, the label delay
+  line absorbs it. The P1 path (`p1_set_frequency`) needs the same look.
   **App:** rows travel the ONE event queue (EV_SPECTRUM, blob + centre + bin;
   at most `SPEC_PENDING_MAX` 48 pending — the oldest row is dropped, a
   stalled UI must not hoard 1.5 MB/s), one `queue_draw` per drain; the top
