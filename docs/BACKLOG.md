@@ -154,7 +154,7 @@ again — check the font cache (`fc-cache -rv`, `~/.cache/fontconfig`), not the
 code.
 
 ### SKM-6 — A second launch opens a second window inside the primary instance
-- **Type:** bug · **Severity:** low · **Status:** open (read in the code, not run)
+- **Type:** bug · **Severity:** low · **Status:** open (reproduced headless 2026-09-05)
 - **Source:** noticed while fixing SKM-1, 2026-09-05
 - **Detail:** `src/app/main.c`, `on_activate`
 
@@ -162,8 +162,11 @@ With `G_APPLICATION_DEFAULT_FLAGS` a second `skimmer-for-linux` launch forwards
 `activate` to the running primary, and `on_activate` runs again
 unconditionally: a second window, a second `App`, a second set of timers and
 a second `rbn_apply` against the port the first one already holds. Nobody has
-reported it — during a contest only one instance is ever started — and it
-was NOT reproduced, only read. The fix shape is the standard one: present
+reported it — during a contest only one instance is ever started.
+Reproduced headless (Broadway, isolated config, feed on a spare port): the
+second launch returns at once with exit 0 and the PRIMARY's stderr gains
+`RBN feed on port 7399: … Adresa je užívána` — its second `on_activate`
+trying to bind the port its first one holds. The fix shape is the standard one: present
 `gtk_application_get_active_window()` when it exists and return. Left open
 so SKM-1's one-teardown-per-window design is not silently stretched to two.
 
