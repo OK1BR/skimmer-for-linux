@@ -682,6 +682,33 @@ where relevant, a live check against a running `sdr-for-linux`.
   change → 34 committed in order, 13 dropped, 3 waiting; a knob turning
   (centre changes every 6 rows) commits nothing mid-turn; a steady centre
   drops nothing (61 checks).
+  **STATE AT THE END OF 2026-09-05 (next session continues here).** Richard's
+  fourth remark: the settle pause itself is wrong — "while retuning the
+  spectrum sort of stops"; he wants the waterfall to FLOW through a retune,
+  the picture only filling in at the edges. That needs the true centre per
+  row, i.e. the label-to-data latency, which is now measurable: the
+  sdr-for-linux build with the immediate dds/vfo broadcast (ee7d08b) is
+  RUNNING live since 15:0x (restarted from `build/sdr-for-linux` at
+  Richard's "ano, zkus to"; the skimmer reconnected by itself), and the
+  skimmer carries an env-gated probe, `SKIM_WF_DEBUG=1`: for every row it
+  logs the band move the LABELS imply over the last four rows against the
+  move the DATA shows (cross-correlation with the row four back — disjoint
+  windows; consecutive rows share 75 % of their samples and their noise
+  correlates at lag 0, which blinded the first probe) and the difference.
+  A first live pass (panadapter drag: 241 label changes of 4–170 Hz within
+  4 s) was recorded by the blind probe; the fixed probe has so far seen only
+  ±1-bin noise — **the measurement with a few DISCRETE ≥ 1 kHz steps (click
+  on a station on the panadapter, pause, next) is still owed**. Plan once
+  the lag L (rows between label change and data shift) is known: replace the
+  settle DROP with a **label delay line** — stamp each row with the centre
+  that was current L rows earlier — so no row is dropped at all and the
+  waterfall keeps flowing while the knob turns; keep a small guard (±1–2
+  rows) for jitter; the 0.7 s settle stays only as a fallback for servers
+  that report by polling (detectable: labels arriving in ≥ 400 ms steps).
+  Then the callsign column + click-to-tune (still empty), then bin/hop/span
+  by his look. Live today: the ±3-row guard + settle 0.7 s build is what he
+  ran; palettes and drag-pan verified by him; the SKM-2 GtkImage warnings
+  recurred on the desktop at every launch (BACKLOG update).
   **App:** rows travel the ONE event queue (EV_SPECTRUM, blob + centre + bin;
   at most `SPEC_PENDING_MAX` 48 pending — the oldest row is dropped, a
   stalled UI must not hoard 1.5 MB/s), one `queue_draw` per drain; the top

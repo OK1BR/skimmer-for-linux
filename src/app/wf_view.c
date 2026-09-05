@@ -107,8 +107,55 @@ static void view_commit_row(const guint8 *row, guint nbins, double center_hz,
   v->tex_stale = TRUE;
 }
 
+/* SKIM_WF_DEBUG: measure the label-vs-data latency of a retune. Consecutive
+ * rows share 75 % of their samples (hop = N/4), so their noise correlates at
+ * lag 0 and hides any shift; the ruler is the row FOUR back (disjoint
+ * windows). For every row the log gets: the band move the LABELS imply over
+ * those four rows, the move the DATA shows (cross-correlation, ±128 bins),
+ * and the difference — printed only while labels are moving or the data
+ * still disagrees, so a discrete 1 kHz step shows exactly how many rows
+ * later the data follows the label. */
+#define DBG_BACK 4
+static void debug_shift(const guint8 *row, guint nbins, double center_hz, double bin_hz) {
+  static guint8 *ring[DBG_BACK + 1]; static double cent[DBG_BACK + 1];
+  static guint pn; static guint64 seq; static int quiet_left;
+  if (pn != nbins) {
+    for (int i = 0; i <= DBG_BACK; i++) { g_free(ring[i]); ring[i] = g_malloc(nbins); cent[i] = 0; }
+    pn = nbins; seq = 0;
+  }
+  const int cur = (int)(seq % (DBG_BACK + 1)), old = (int)((seq + 1) % (DBG_BACK + 1));
+  memcpy(ring[cur], row, nbins);
+  cent[cur] = center_hz;
+  seq++;
+  if (seq <= DBG_BACK || cent[old] <= 0) { return; }
+  const double label_hz = center_hz - cent[old];             /* over 4 rows  */
+  const int label_bins  = (int)lrint(label_hz / bin_hz);
+  const guint8 *prev = ring[old];
+  double mean_r = 0, mean_p = 0;
+  for (guint i = 0; i < nbins; i++) { mean_r += row[i]; mean_p += prev[i]; }
+  mean_r /= nbins; mean_p /= nbins;
+  double best = -1e300; int best_lag = 0;
+  for (int lag = -128; lag <= 128; lag++) {
+    double acc = 0;
+    for (int i = 128; i < (int)nbins - 128; i++) {
+      acc += ((double)row[i] - mean_r) * ((double)prev[i + lag] - mean_p);
+    }
+    if (acc > best) { best = acc; best_lag = lag; }
+  }
+  const int data_bins = -best_lag;   /* station fixed → appears Δ bins lower  */
+  if (label_bins != 0 || data_bins != 0) { quiet_left = 6; }
+  if (quiet_left > 0) {
+    quiet_left--;
+    g_message("wf: row %" G_GUINT64_FORMAT " label %+d bins, data %+d bins, diff %+d (last 4 rows)",
+              seq, label_bins, data_bins, data_bins - label_bins);
+  }
+}
+
 void skim_wf_view_push(SkimWfView *v, const guint8 *row, guint nbins,
                        double center_hz, double bin_hz) {
+  static int dbg = -1;
+  if (dbg < 0) { dbg = g_getenv("SKIM_WF_DEBUG") != NULL; }
+  if (dbg) { debug_shift(row, nbins, center_hz, bin_hz); }
   skim_wf_guard_push(v->guard, row, nbins, center_hz, bin_hz);
 }
 

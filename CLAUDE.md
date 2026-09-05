@@ -732,7 +732,11 @@ while tuning" → the SDR reported GUI tuning only every 500 ms — fixed there
 (`tci_server_freq_changed`) + a retune guard here: 3-row delay, and after a
 centre change EVERY row is dropped until the centre has stood still ~0.7 s —
 the picture pauses while the knob turns instead of growing teeth, no matter
-how slowly a server reports). Rows ride the ONE
+how slowly a server reports — and his FOURTH remark: that pause is wrong
+too, the waterfall must FLOW through a retune; so the sdr build with the
+immediate broadcast is now LIVE and `SKIM_WF_DEBUG=1` logs label-vs-data
+moves per row to measure the lag; NEXT SESSION: discrete-step measurement →
+label delay line instead of dropping rows). Rows ride the ONE
 event queue as EV_SPECTRUM (cap 48 pending, oldest dropped), one queue_draw
 per drain; header toggles list | waterfall over a GtkStack, `[ui] view`
 persisted (old `station_list` migrates); spectrum computed only while shown.

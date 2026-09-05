@@ -248,7 +248,7 @@ the upstream Python example over recorded contest audio and compare its output
 against the DSP backend on the same recording.
 
 ### SKM-4 — In-app waterfall with decodes placed by frequency, click to set TX
-- **Type:** idea · **Severity:** — · **Status:** doing — half 1 (waterfall + callsign column, click tunes RX) since 2026-09-05; half 2 (click sets TX) deferred to sdr-for-linux `SDR-12`
+- **Type:** idea · **Severity:** — · **Status:** doing — half 1 since 2026-09-05: engine tap + view + palettes + drag-pan + absolute-frequency history + retune guard are IN (M8 in SCOPE); NEXT: measure the label-to-data lag with discrete steps (`SKIM_WF_DEBUG=1`, sdr build ee7d08b live), turn the settle-drop into a label delay line so the waterfall flows while tuning, then the callsign column + click; half 2 (click sets TX) deferred to sdr-for-linux `SDR-12`
 - **Source:** e-mail from Roy Andre Løntjern, LB0EI, 2026-08-29; answered 2026-08-30
   with a request for a step-by-step description of his workflow, which he sent the
   same day
