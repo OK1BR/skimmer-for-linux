@@ -97,7 +97,7 @@ already exercise. The next live close is the check: the message line, no
 critical.
 
 ### SKM-2 — GtkImage baseline warnings flood stderr, non-deterministically
-- **Type:** bug · **Severity:** low · **Status:** open (diagnose first)
+- **Type:** bug · **Severity:** low · **Status:** done — diagnosed, upstream GTK/Pango, no code change (2026-09-05)
 - **Source:** stderr of the YO DX HF runs, 2026-08-22 / 23
 - **Detail:** `docs/CONTEST-NOTES-2026-08-22.md` §N2 and its day-2 update
 
@@ -115,6 +115,56 @@ and cannot be chased by widget address.
 `G_DEBUG=fatal-warnings` and catch the first occurrence — that says whether the
 cause is ours at all or a GTK 4.22 regression. Only then decide where a fix
 belongs.
+
+**Resolution (2026-09-05, `docs/CONTEST-NOTES-2026-08-22.md` "Rozbor 5. 9."):**
+the numbers above were off — grep over the day-1 log gives **16** warnings
+(8 `GtkImage` addresses × 2), baseline `-2147483648` (INT_MIN, not −1), size
+always 16/16, in TWO bursts: 14:08:46 (window open — the log's first line) and
+14:26:06 (four NEW images; a guess, not pinned: the primary menu's two
+`GtkModelButton`s carry two `GtkImage`s each). Same signature as
+`sdr-for-linux`'s `SDR-3` (64 = 32 × 2 in one 70 ms burst), whose write-up
+reads the chain in GTK 4.22.4: `gtk_image_get_baseline_align()` divides
+ascent by ascent + descent from Pango metrics, zero metrics give NaN, the int
+cast gives INT_MIN, `gtksizerequest.c` catches it, prints this text and clamps
+the baseline to −1 — cosmetic by construction. Confirmed on THIS binary
+(headless Broadway, isolated config, scratch font caches — the user's
+untouched): with an empty fontset (`FONTCONFIG_FILE` without a single
+`<dir>`) `builddir/skimmer-for-linux` prints the byte-identical warning for 5
+images at window open (count differs by backend, signature does not),
+`G_DEBUG=fatal-warnings` under gdb traps it inside a
+`gtk_layout_manager_measure` pass, and the first `pango_context_get_metrics`
+call returns ascent 0 / descent 0 where normal fonts return 14550 / 3623 (the
+same figures as on the sdr side); the control run with normal fonts, same
+steps: 0 lines. We create no `GtkImage` (`grep gtk_image_ src/` = 0; the only
+icon touches are `gtk_menu_button_set_icon_name` and
+`gtk_button_set_icon_name`) and our CSS sets only the decode-pane font size in
+pt. Upstream: GNOME/gtk#5926 reports the same text and numbers from a stale
+fontconfig cache; the code is unchanged in GTK main. What upset the metrics at
+14:08 on 22.8. cannot be recovered from the log; what is known is that it is
+not ours. **No code change.** Reopen recipe, catches the first occurrence with
+a backtrace:
+
+```sh
+G_DEBUG=fatal-warnings gdb -batch -ex run -ex bt --args builddir/skimmer-for-linux
+```
+
+A trace through `gtk_layout_manager_measure` with zero Pango metrics is this
+again — check the font cache (`fc-cache -rv`, `~/.cache/fontconfig`), not the
+code.
+
+### SKM-6 — A second launch opens a second window inside the primary instance
+- **Type:** bug · **Severity:** low · **Status:** open (read in the code, not run)
+- **Source:** noticed while fixing SKM-1, 2026-09-05
+- **Detail:** `src/app/main.c`, `on_activate`
+
+With `G_APPLICATION_DEFAULT_FLAGS` a second `skimmer-for-linux` launch forwards
+`activate` to the running primary, and `on_activate` runs again
+unconditionally: a second window, a second `App`, a second set of timers and
+a second `rbn_apply` against the port the first one already holds. Nobody has
+reported it — during a contest only one instance is ever started — and it
+was NOT reproduced, only read. The fix shape is the standard one: present
+`gtk_application_get_active_window()` when it exists and return. Left open
+so SKM-1's one-teardown-per-window design is not silently stretched to two.
 
 ## Open — ideas
 
@@ -227,5 +277,6 @@ before anything is promised, starting with what `ic7610ftdi` actually delivers
 ## Roadmap
 
 Milestones and their order live in `docs/SCOPE.md`. Nothing in this backlog
-blocks them: both open items are hygiene, and neither was noticed by the
+blocks them: the two contest-log items are closed (SKM-1 fixed, SKM-2
+explained), the one open bug is hygiene, and none of them was noticed by the
 operator during 5 hours of contest operation across two days.

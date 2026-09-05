@@ -176,3 +176,54 @@ Stojí za to log po zavření zkontrolovat, než se sáhne na kód.
   vlákno před vlastním state callbackem, takže engine nemůže teardown
   předběhnout, a stop z hlavního vlákna už jede v `apply_state` a při změně
   módu. **Příští živé zavření = kontrola: zpráva ano, CRITICAL ne.**
+
+### N2 — čísla opravena, uzavřeno jako chování GTK/Pango
+Sesterský rozbor v sdr-for-linux (`docs/CONTEST-NOTES-2026-08-22.md`,
+„N1 — rozbor 23. 8. 2026") už tehdy poznamenal, že tenhle zápis nese stará
+čísla. Znovu grepem nad `/var/tmp/contest-2026-08-22-logy/skimmer.log`:
+
+| tvrzení nahoře | skutečnost |
+|---|---|
+| 18 hlášek | **16** = 8 adres `GtkImage` × 2 |
+| „baselines of minimum −1" | **−2147483648** (INT_MIN); velikost vždy 16/16 |
+| „pokaždé jiná adresa" | dvě dávky: **14:08:46** (4 obrázky × 2 — první řádek logu, tj. start) a **14:26:06** (4 NOVÉ obrázky × 2) |
+
+Druhá dávka: domněnka, nepřiřazeno — primární menu má dva `GtkModelButton`
+po dvou `GtkImage` (ikona + indikátor), což na čtyři sedí; z logu se to
+neprokáže.
+
+**Řetěz příčiny** je rozebraný na sdr straně a platí beze změny: nulové
+Pango metriky → `ascent / (ascent + descent)` = NaN v
+`gtk_image_get_baseline_align()` → přetypování na `int` = INT_MIN →
+`gtksizerequest.c` to chytí, vypíše přesně tenhle text a baseline srazí na
+−1. Kosmetika z konstrukce.
+
+**Potvrzeno na NAŠÍ binárce 5. 9. 2026** (headless Broadway, izolovaná
+konfigurace, scratch font cache — Richardovy `~/.cache/fontconfig` se
+nesáhlo):
+- prázdný fontset (`FONTCONFIG_FILE` na konfiguraci bez jediného `<dir>`) →
+  `builddir/skimmer-for-linux` vypíše **bajt po bajtu tutéž hlášku** pro
+  5 obrázků při otevření okna (počet se liší backendem — Broadway 5×1 vs.
+  Wayland 4×2 — podpis INT_MIN / 16 / 16 ne);
+- `G_DEBUG=fatal-warnings` pod gdb ji chytí uvnitř
+  `gtk_layout_manager_measure` (libgtk je stripnutá, vnitřní rámce bez jmen);
+- první volání `pango_context_get_metrics` vrací **ascent 0 / descent 0**,
+  s normálními fonty **14550 / 3623** — stejná čísla jako na sdr straně;
+- kontrolní běh s normálními fonty, tytéž kroky: **0 řádků**.
+
+Vlastní `GtkImage` netvoříme (`grep gtk_image_ src/` = 0; jediné doteky ikon
+jsou `gtk_menu_button_set_icon_name` a `gtk_button_set_icon_name`), CSS
+nastavuje jen velikost písma dekódovacího panelu v pt. Upstream GNOME/gtk
+#5926 hlásí tentýž text i čísla ze zastaralé fontconfig cache; kód v GTK main
+je beze změny. Co 22. 8. ve 14:08 metriky rozhodilo, z logu nejde zjistit —
+jisté je, že to není naše. **Žádná změna kódu.**
+
+Recept na znovuotevření (chytí první výskyt i s backtracem):
+
+```sh
+G_DEBUG=fatal-warnings gdb -batch -ex run -ex bt --args builddir/skimmer-for-linux
+```
+
+Když trace vede přes `gtk_layout_manager_measure` a Pango metriky jsou
+nulové, je to zase tohle — první věc ke kontrole je fontcache
+(`fc-cache -rv`, `~/.cache/fontconfig`), ne náš kód.

@@ -688,7 +688,14 @@ and ONE sentinel `app->closing` for every late callback; a
 `GTK_IS_LABEL()` probe on the freed label would be UB, not a guard.
 Same reproduction after: zero criticals, close→exit 4 ms. Connected close
 unverified live (no radio to spare). **11 gates green — the "12" in the M7
-entry above was a miscount; meson lists 11.**
+entry above was a miscount; meson lists 11.** **SKM-2 closed the same day
+as upstream GTK/Pango, no code change:** the day-1 numbers were 16
+warnings (8 images × 2, INT_MIN baseline, 16/16), reproduced byte-identical
+on our binary under an empty fontset (first `pango_context_get_metrics`
+returns 0/0 where fonts give 14550/3623; control run 0 lines); the source
+reading lives in sdr-for-linux's SDR-3 write-up. **SKM-6 noted, not
+fixed:** a second launch re-runs `on_activate` in the primary instance
+(second window, second App, second feed bind) — read in the code, not run.
 
 ## Layout
 
