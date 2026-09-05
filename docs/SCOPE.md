@@ -1044,6 +1044,43 @@ where relevant, a live check against a running `sdr-for-linux`.
   only after the NCO phase measurement; (5) DDC latency; (6) bin/hop/span,
   crowded fan-out, column drain cost.
 
+  **The column carries the station list's columns (offline-proven 2026-09-05
+  night — Richard's "zkus to předělat podle toho, jak navrhuješ"; his live
+  look pending).** Open item (2), step one. The label reads
+  "CQ DL1ABC 23 dB" — the strength after the call, CW Skimmer style, drawn
+  in the label's colour at 0.6 alpha and never bold so the call stays the
+  word (the hover backdrop spans both) — and the label's tooltip carries
+  the rest: "DL1ABC · 14025.30 kHz" over "25 WPM · 23 dB · heard 12× ·
+  age 8s" ("Bd" in RTTY). The formats ARE the list's cell formats (kHz to
+  10 Hz, whole speed and dB, "%u×", "%ds" / "%dm%02ds"), pinned in
+  GLib-only `wf_compose.c` (`skim_wf_label_text`, `skim_wf_label_snr_text`,
+  `skim_wf_age_text` on a caller-supplied clock, `skim_wf_tooltip_text`)
+  so the gate reads them and the two views cannot drift; `SkimWfStation`
+  grew mode / speed / reports / last_heard. `query-tooltip` on the widget
+  resolves the label under the pointer through the click's own hit test
+  and sets the tip area to the label's seat band, so the tooltip stands
+  still while the pointer travels within one label (without it GTK
+  re-queries per pixel). Widths measured with Pango, not eyeballed:
+  "CQ OK1BR/P −12 dB" bold = 118 px against the column's 154 px of text
+  room — `COLUMN_W` stays 180. Gate `skimmer-spectrum-test` 108 → 117
+  (label with/without CQ, rounding, negative dB, the suffix alone, age
+  under/over a minute and a future stamp, CW and RTTY tooltips). Headless
+  (Broadway :9, private D-Bus, RTTY fixture, CDP hover): the column shows
+  "CQ SV1JDZ 24 dB" and the tooltip appears on hover — Broadway does render
+  the popup — reading "SV1JDZ · 14086,96 kHz / 45 Bd · 24 dB · heard 33× ·
+  age 831m56s". Two things seen there that are NOT this change: the
+  decimal comma is the process locale (the list's kHz cell shows
+  "14086,96" the same way — shared formatters; the gate runs in the C
+  locale), and the 831-minute age is the replay clock (the offline
+  pipeline stamps last_heard on stream time, the display clock is
+  monotonic — the list's Age column read 831m35s beside it; live, both are
+  monotonic). Not built, on purpose: smoothing of the dB after the call —
+  the table's SNR is the stronger report's value and the snapshot rebuilds
+  on every drain that touched the table, so the suffix may flicker under
+  load; an EMA is an unmeasured lever and his live look decides whether it
+  is needed at all. Step two (delete the list, its toggle, sorter and
+  formatters) waits for that look.
+
 ## Safety / etiquette
 
 Read-only against the radio, with one deliberate exception: the skimmer

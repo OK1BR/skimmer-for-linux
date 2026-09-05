@@ -149,4 +149,31 @@ guint skim_wf_layout_labels(SkimWfLabel *lab, guint n, double pitch, double hgt)
 /* The shown label whose band [y − pitch/2, y + pitch/2) contains py, or −1. */
 int skim_wf_label_at(const SkimWfLabel *lab, guint n, double pitch, double py);
 
+/* -------- callsign column text ------------------------------------------------ */
+
+/* The column carries the station list's columns (Richard, 2026-09-05: the
+ * strength after the call, CW Skimmer style, the rest in a tooltip — so the
+ * list can go). The formats ARE the list's cell formats, pinned here where
+ * the gate can read them. */
+
+/* " 23 dB" — the strength suffix the widget draws dimmer after the call. */
+void skim_wf_label_snr_text(char *out, gsize n, double snr_db);
+
+/* The whole label: "CQ DL1ABC 23 dB" (no "CQ " for an S&P station). */
+void skim_wf_label_text(char *out, gsize n, const char *call, gboolean cq,
+                        double snr_db);
+
+/* "8s" under a minute, "1m05s" above, never negative. now_us is the CALLER's
+ * clock (monotonic live, stream time in a replay) so the age is testable. */
+void skim_wf_age_text(char *out, gsize n, gint64 last_heard_us, gint64 now_us);
+
+/* The tooltip, two lines:
+ *   DL1ABC · 14025.30 kHz
+ *   25 WPM · 23 dB · heard 12× · age 8s
+ * "Bd" for RTTY, "WPM" otherwise; kHz to 10 Hz — the estimate's real
+ * accuracy, as the list's frequency cell. */
+void skim_wf_tooltip_text(char *out, gsize n, const char *call, double hz,
+                          const char *mode, double speed, double snr_db,
+                          guint reports, gint64 last_heard_us, gint64 now_us);
+
 #endif /* SKIM_WF_COMPOSE_H */

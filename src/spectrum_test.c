@@ -701,6 +701,38 @@ static void labels_section(void) {
   check("hit: a hidden label is never hit", o[0].y < 0 && skim_wf_label_at(o, 40, P, 5.0) != 0);
 }
 
+/* --- callsign column text: the station list's cell formats, pinned ------------- */
+
+static void text_section(void) {
+  printf("[text] callsign column label + tooltip\n");
+  char t[160];
+  skim_wf_label_text(t, sizeof(t), "DL1ABC", TRUE, 23.4);
+  check("label: caller = \"CQ DL1ABC 23 dB\"", strcmp(t, "CQ DL1ABC 23 dB") == 0);
+  skim_wf_label_text(t, sizeof(t), "OK1BR/P", FALSE, 7.6);
+  check("label: S&P station has no CQ prefix, dB rounds", strcmp(t, "OK1BR/P 8 dB") == 0);
+  skim_wf_label_text(t, sizeof(t), "F5UTN", TRUE, -3.2);
+  check("label: a negative strength keeps its sign", strcmp(t, "CQ F5UTN -3 dB") == 0);
+  skim_wf_label_snr_text(t, sizeof(t), 23.4);
+  check("label: the suffix alone is what the label ends with", strcmp(t, " 23 dB") == 0);
+
+  const gint64 now = 1000 * G_USEC_PER_SEC;
+  skim_wf_age_text(t, sizeof(t), now - 8 * G_USEC_PER_SEC - 400000, now);
+  check("age: under a minute = whole seconds", strcmp(t, "8s") == 0);
+  skim_wf_age_text(t, sizeof(t), now - 65 * G_USEC_PER_SEC, now);
+  check("age: over a minute = m + zero-padded s", strcmp(t, "1m05s") == 0);
+  skim_wf_age_text(t, sizeof(t), now + 3 * G_USEC_PER_SEC, now);
+  check("age: a future stamp clamps to 0s", strcmp(t, "0s") == 0);
+
+  skim_wf_tooltip_text(t, sizeof(t), "DL1ABC", 14025304.0, "CW", 25.4, 23.4, 12,
+                       now - 8 * G_USEC_PER_SEC, now);
+  check("tooltip: CW — kHz to 10 Hz, WPM, dB, heard, age",
+        strcmp(t, "DL1ABC · 14025.30 kHz\n25 WPM · 23 dB · heard 12× · age 8s") == 0);
+  skim_wf_tooltip_text(t, sizeof(t), "SV1JDZ", 14086964.0, "RTTY", 45.45, 20.0, 3,
+                       now - 125 * G_USEC_PER_SEC, now);
+  check("tooltip: RTTY — baud, not WPM",
+        strcmp(t, "SV1JDZ · 14086.96 kHz\n45 Bd · 20 dB · heard 3× · age 2m05s") == 0);
+}
+
 int main(void) {
   printf("=== skimmer-spectrum-test — M8 spectrum tap ===\n");
   const double rates[] = { 48000.0, 96000.0, 192000.0, 384000.0 };
@@ -708,6 +740,7 @@ int main(void) {
   pipeline_section();
   compose_section();
   labels_section();
+  text_section();
   printf("=== %d checks, %d failed ===\n", checks, fails);
   return fails ? 1 : 0;
 }

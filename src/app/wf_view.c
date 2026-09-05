@@ -566,10 +566,12 @@ static void draw_marker(SkimWfView *v, cairo_t *cr, int wf_w, int h) {
 
 /* The callsign column (CW Skimmer's): a rail down the column's left edge, a
  * dot on it at every station's frequency, the callsign beside it — "CQ "
- * prefixed for callers — and, where the seat had to move off the frequency,
- * a connector from the dot to the text. Label colours are the spot colours
- * (bright = call it, gray = the logbook says no), the fixed station bold,
- * the label under the pointer on a faint backdrop. */
+ * prefixed for callers, the strength after it ("CQ DL1ABC 23 dB", drawn
+ * dimmer so the call stays the word) — and, where the seat had to move off
+ * the frequency, a connector from the dot to the text. Label colours are the
+ * spot colours (bright = call it, gray = the logbook says no), the fixed
+ * station bold, the label under the pointer on a faint backdrop. Speed,
+ * heard count and age live in the label's tooltip (on_query_tooltip). */
 static void draw_labels(SkimWfView *v, cairo_t *cr, int x0, int H, const GdkRGBA *fg) {
   layout_labels(v, H);
   const double rail = x0 + COL_RAIL_X + 0.5;
@@ -581,7 +583,9 @@ static void draw_labels(SkimWfView *v, cairo_t *cr, int x0, int H, const GdkRGBA
   if (v->nst == 0) { return; }
 
   PangoLayout *lay = gtk_widget_create_pango_layout(GTK_WIDGET(v), NULL);
+  PangoLayout *sfx = gtk_widget_create_pango_layout(GTK_WIDGET(v), NULL);
   PangoFontDescription *fd_reg = label_font(FALSE), *fd_bold = label_font(TRUE);
+  pango_layout_set_font_description(sfx, fd_reg);   /* the dB never bold  */
   const guint32 argb_ok = SKIM_SPOT_ARGB, argb_gray = SKIM_SPOT_ARGB_DUP;
   for (guint i = 0; i < v->nst; i++) {
     const SkimWfStation *s = &v->st[i];
@@ -600,15 +604,18 @@ static void draw_labels(SkimWfView *v, cairo_t *cr, int x0, int H, const GdkRGBA
     const double r = ((argb >> 16) & 255) / 255.0, g = ((argb >> 8) & 255) / 255.0,
                  b = (argb & 255) / 255.0;
     pango_layout_set_font_description(lay, s->tuned ? fd_bold : fd_reg);
-    char txt[24];
+    char txt[24], db[24];
     g_snprintf(txt, sizeof(txt), "%s%s", s->cq ? "CQ " : "", s->call);
+    skim_wf_label_snr_text(db, sizeof(db), s->snr_db);
     pango_layout_set_text(lay, txt, -1);
-    int tw, th;
+    pango_layout_set_text(sfx, db, -1);
+    int tw, th, sw, sh;
     pango_layout_get_pixel_size(lay, &tw, &th);
+    pango_layout_get_pixel_size(sfx, &sw, &sh);
     const double tx = x0 + COL_TEXT_X, ty = l->y - th / 2.0;
     if ((int)i == v->hover) {
       cairo_set_source_rgba(cr, fg->red, fg->green, fg->blue, 0.12);
-      cairo_rectangle(cr, tx - 3, floor(ty) - 1, tw + 6, th + 2);
+      cairo_rectangle(cr, tx - 3, floor(ty) - 1, tw + sw + 6, th + 2);
       cairo_fill(cr);
     }
     /* Connector dot → text: flat on the frequency, slanted when seated
@@ -620,10 +627,42 @@ static void draw_labels(SkimWfView *v, cairo_t *cr, int x0, int H, const GdkRGBA
     cairo_set_source_rgb(cr, r, g, b);
     cairo_move_to(cr, tx, ty);
     pango_cairo_show_layout(cr, lay);
+    /* The strength, dimmer, on the same baseline. */
+    cairo_set_source_rgba(cr, r, g, b, 0.6);
+    cairo_move_to(cr, tx + tw, l->y - sh / 2.0);
+    pango_cairo_show_layout(cr, sfx);
   }
   pango_font_description_free(fd_reg);
   pango_font_description_free(fd_bold);
+  g_object_unref(sfx);
   g_object_unref(lay);
+}
+
+/* The label's tooltip: the station list's remaining columns (frequency,
+ * speed, strength, heard count, age). The tip area is the label's seat
+ * band, so the tooltip stands still while the pointer travels within one
+ * label instead of re-querying per pixel. */
+static gboolean on_query_tooltip(GtkWidget *w, int x, int y, gboolean keyboard,
+                                 GtkTooltip *tip, gpointer user) {
+  (void)user;
+  SkimWfView *v = SKIM_WF_VIEW(w);
+  if (keyboard) { return FALSE; }
+  const int hit = label_hit(v, (double)x, (double)y);
+  if (hit < 0) { return FALSE; }
+  const SkimWfStation *s = &v->st[hit];
+  char txt[160];
+  skim_wf_tooltip_text(txt, sizeof(txt), s->call, s->hz, s->mode, s->speed,
+                       s->snr_db, s->reports, s->last_heard,
+                       g_get_monotonic_time());
+  gtk_tooltip_set_text(tip, txt);
+  const GdkRectangle area = {
+    .x      = wf_width(v) + SCALE_W + COL_TEXT_X - 3,
+    .y      = (int)floor(v->lab[hit].y - v->lab_pitch / 2.0),
+    .width  = COLUMN_W - COL_TEXT_X,
+    .height = (int)ceil(v->lab_pitch),
+  };
+  gtk_tooltip_set_tip_area(tip, &area);
+  return TRUE;
 }
 
 static void skim_wf_view_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
@@ -713,6 +752,8 @@ static void skim_wf_view_init(SkimWfView *v) {
   v->tex_stale   = TRUE;
   v->hover       = -1;
   v->labels_stale = TRUE;
+  gtk_widget_set_has_tooltip(GTK_WIDGET(v), TRUE);
+  g_signal_connect(v, "query-tooltip", G_CALLBACK(on_query_tooltip), NULL);
   gtk_widget_set_hexpand(GTK_WIDGET(v), TRUE);
   gtk_widget_set_vexpand(GTK_WIDGET(v), TRUE);
   gtk_widget_set_size_request(GTK_WIDGET(v), SCALE_W + COLUMN_W + 200, 160);

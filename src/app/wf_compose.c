@@ -403,3 +403,37 @@ int skim_wf_label_at(const SkimWfLabel *lab, guint n, double pitch, double py) {
   }
   return -1;
 }
+
+/* -------- callsign column text ------------------------------------------------ */
+
+void skim_wf_label_snr_text(char *out, gsize n, double snr_db) {
+  g_snprintf(out, n, " %.0f dB", snr_db);
+}
+
+void skim_wf_label_text(char *out, gsize n, const char *call, gboolean cq,
+                        double snr_db) {
+  char sfx[24];
+  skim_wf_label_snr_text(sfx, sizeof(sfx), snr_db);
+  g_snprintf(out, n, "%s%s%s", cq ? "CQ " : "", call, sfx);
+}
+
+void skim_wf_age_text(char *out, gsize n, gint64 last_heard_us, gint64 now_us) {
+  gint64 s = (now_us - last_heard_us) / G_USEC_PER_SEC;
+  if (s < 0) { s = 0; }
+  if (s < 60) {
+    g_snprintf(out, n, "%" G_GINT64_FORMAT "s", s);
+  } else {
+    g_snprintf(out, n, "%" G_GINT64_FORMAT "m%02" G_GINT64_FORMAT "s",
+               s / 60, s % 60);
+  }
+}
+
+void skim_wf_tooltip_text(char *out, gsize n, const char *call, double hz,
+                          const char *mode, double speed, double snr_db,
+                          guint reports, gint64 last_heard_us, gint64 now_us) {
+  char age[24];
+  skim_wf_age_text(age, sizeof(age), last_heard_us, now_us);
+  g_snprintf(out, n, "%s · %.2f kHz\n%.0f %s · %.0f dB · heard %u× · age %s",
+             call, hz / 1000.0, speed,
+             g_strcmp0(mode, "RTTY") == 0 ? "Bd" : "WPM", snr_db, reports, age);
+}

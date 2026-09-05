@@ -883,6 +883,23 @@ test. Open, in order: column takes over the list's columns → list deleted
 → SDR-13 → coherent re-centring after a phase measurement → DDC latency →
 bin/hop/span + fan-out + drain cost.
 
+**Column takes over the list's columns (offline-proven 2026-09-05 night;
+Richard's live look pending) — open item (2), step one.** The waterfall
+label reads "CQ DL1ABC 23 dB" (dB dimmer, never bold) and its tooltip
+carries the rest, "DL1ABC · 14025.30 kHz" / "25 WPM · 23 dB · heard 12× ·
+age 8s" ("Bd" in RTTY) — the list's cell formats, pinned in GLib-only
+`wf_compose.c` formatters so the gate reads them and the two views cannot
+drift; `SkimWfStation` grew mode/speed/reports/last_heard; `query-tooltip`
+uses the click's hit test and sets the tip area to the label's seat band.
+Widths Pango-measured (118 of 154 px worst case, `COLUMN_W` unchanged).
+Gate spectrum 108 → 117; 12 gates green. Headless (Broadway, RTTY
+fixture, CDP hover): label and tooltip render; the decimal comma is the
+locale (the list shows the same) and the 831-minute age is the replay
+clock (the list's Age column too; live both clocks are monotonic). Not
+built: dB smoothing — the suffix may flicker under load, his look
+decides. Step two (delete the list, its toggle, sorter, fmt_*) waits for
+that look.
+
 ## Layout
 
 ```
