@@ -725,7 +725,9 @@ sdr's waterfall.c) and `wf_view.c` (GdkMemoryTexture NEAREST, incremental
 columns 17 µs, full band recompose 5.4 ms, kHz scale, VFO marker, wheel =
 pan, Ctrl+wheel = zoom, drag the scale strip = pan; **a retune moves only
 the marker, never the window** — Richard's first live-look rule; off-window
-VFO = arrow on the scale). Rows ride the ONE
+VFO = arrow on the scale; history in ABSOLUTE frequency with a per-row bin
+shift, because the SDR has no CTUN and every retune moves the IQ centre —
+his second live-look catch, "you reset my waterfall"). Rows ride the ONE
 event queue as EV_SPECTRUM (cap 48 pending, oldest dropped), one queue_draw
 per drain; header toggles list | waterfall over a GtkStack, `[ui] view`
 persisted (old `station_list` migrates); spectrum computed only while shown.

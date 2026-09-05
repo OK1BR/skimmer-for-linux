@@ -256,21 +256,43 @@ static guint bright_rows(const guint32 *pix, int w, int hgt, int x, int *y0, int
   return n;
 }
 
+/* Same, restricted to rows within ±radius of yc (a second tone elsewhere in
+ * the column must not confuse a check about THIS one). */
+static guint bright_near(const guint32 *pix, int w, int hgt, int x, int yc, int radius,
+                         int *y0, int *y1) {
+  const guint32 top = skim_wf_palette_argb(255);
+  guint n = 0;
+  *y0 = -1; *y1 = -1;
+  for (int y = MAX(yc - radius, 0); y <= MIN(yc + radius, hgt - 1); y++) {
+    if (pix[(gsize)y * w + x] == top) {
+      n++;
+      if (*y0 < 0) { *y0 = y; }
+      *y1 = y;
+    }
+  }
+  return n;
+}
+
 static void compose_section(void) {
   printf("-- composer\n");
   const guint  nbins  = 2048;                        /* the 48 k geometry    */
   const double center = 14020000.0, bin = SKIM_SPECTRUM_BIN_HZ;
   const double tone_hz = center + 12000.0;
   const guint  tone_bin = (guint)lrint((tone_hz - center) / bin + nbins / 2.0);
-  SkimWfHistory *h = skim_wf_history_new(64);
+  SkimWfHistory *h = skim_wf_history_new(128);
   guint8 *row = g_new(guint8, nbins);
   /* 40 rows of floor (byte 90 = −110 dBFS), then 20 rows with the tone
-   * (byte 185 = −15 dBFS: 95 dB over the floor → palette top). */
+   * (byte 185 = −15 dBFS: 95 dB over the floor → palette top). A second
+   * tone sits 13 bins above the band's LOWER edge throughout — the retune
+   * check below pushes it out of the band. */
+  const guint edge_bin = 13;
   for (int r = 0; r < 60; r++) {
     memset(row, 90, nbins);
     if (r >= 40) { row[tone_bin] = 185; }
+    row[edge_bin] = 185;
     skim_wf_history_push(h, row, nbins, center, bin);
   }
+  const double edge_tone_hz = skim_wf_history_lo_hz(h) + ((double)edge_bin) * bin;
   char what[200];
   check("history stores every pushed row", skim_wf_history_rows(h) == 60);
   g_snprintf(what, sizeof(what), "tracked floor %.1f dBFS (rows are −110)",
@@ -314,13 +336,17 @@ static void compose_section(void) {
   guint32 *pix2 = g_new(guint32, (gsize)w * hgt2);
   skim_wf_compose(h, &wide, pix2, w, hgt2, w);
   const int y_exp2 = (int)floor(skim_wf_y_of_hz(&wide, hgt2, tone_hz));
-  n = bright_rows(pix2, w, hgt2, w - 1, &y0, &y1);
+  n = bright_near(pix2, w, hgt2, w - 1, y_exp2, 4, &y0, &y1);
   g_snprintf(what, sizeof(what), "zoomed out: tone kept by max-pooling at y %d (bright %d..%d; a bin on a row edge may show in both)",
              y_exp2, y0, y1);
   check(what, n >= 1 && n <= 2 && y0 <= y_exp2 && y1 >= y_exp2);
   check("zoomed out + rows_per_px 2: column w−10 (rows 18..19) still bright, w−11 dark",
-        bright_rows(pix2, w, hgt2, w - 10, &y0, &y1) >= 1 &&
-        bright_rows(pix2, w, hgt2, w - 11, &y0, &y1) == 0);
+        bright_near(pix2, w, hgt2, w - 10, y_exp2, 4, &y0, &y1) >= 1 &&
+        bright_near(pix2, w, hgt2, w - 11, y_exp2, 4, &y0, &y1) == 0);
+  /* The edge tone rides every row: visible at its own y in the wide view. */
+  const int y_edge2 = (int)floor(skim_wf_y_of_hz(&wide, hgt2, edge_tone_hz));
+  check("zoomed out: the second (edge) tone shows at its own y",
+        bright_near(pix2, w, hgt2, w - 1, y_edge2, 4, &y0, &y1) >= 1);
 
   /* A window reaching past the band edge paints floor there. */
   SkimWfWindow over = { .f_top_hz = skim_wf_history_hi_hz(h) + 5000.0,
@@ -328,9 +354,37 @@ static void compose_section(void) {
   skim_wf_compose(h, &over, pix, w, hgt, w);
   check("outside the band: floor colour", pix[0] == skim_wf_palette_argb(0));
 
-  /* The band moves (retune): the history restarts. */
-  skim_wf_history_push(h, row, nbins, center + 1000.0, bin);
-  check("a new stream centre clears the history (1 row left)", skim_wf_history_rows(h) == 1);
+  /* A retune (sdr-for-linux has no CTUN: the IQ centre moves with the VFO)
+   * must NOT touch the history: old rows stay on their absolute frequencies,
+   * new rows land shifted. Move the band up by 40 bins (937.5 Hz) and keep
+   * the tone on the SAME absolute frequency. */
+  const double c2 = center + 40.0 * bin;
+  const guint tone_bin2 = (guint)lrint((tone_hz - c2) / bin + nbins / 2.0);
+  for (int r = 0; r < 10; r++) {
+    memset(row, 90, nbins);
+    row[tone_bin2] = 185;
+    skim_wf_history_push(h, row, nbins, c2, bin);
+  }
+  check("a retune keeps the history (70 rows)", skim_wf_history_rows(h) == 70);
+  g_snprintf(what, sizeof(what), "current band follows the newest row: centre %.1f", skim_wf_history_center_hz(h));
+  check(what, fabs(skim_wf_history_center_hz(h) - c2) < 1e-6);
+  skim_wf_compose(h, &win, pix, w, hgt, w);
+  int ya0, ya1, yb0, yb1;
+  const guint na = bright_rows(pix, w, hgt, w - 1, &ya0, &ya1);   /* after  */
+  const guint nb = bright_rows(pix, w, hgt, w - 15, &yb0, &yb1);  /* before */
+  g_snprintf(what, sizeof(what), "same absolute tone before (%d..%d) and after (%d..%d) the retune", yb0, yb1, ya0, ya1);
+  check(what, na >= 2 && nb >= 2 && ya0 == yb0 && ya1 == yb1);
+  /* The edge tone (13 bins above the OLD lower edge) is now 27 bins BELOW
+   * the new band: the newest column cannot show it (floor), a column from
+   * before the retune still does, on the same absolute frequency. */
+  SkimWfWindow edge = { .f_top_hz = edge_tone_hz + 600.0,
+                        .f_bot_hz = edge_tone_hz - 600.0, .rows_per_px = 1 };
+  skim_wf_compose(h, &edge, pix, w, hgt, w);
+  const int ye = (int)floor(skim_wf_y_of_hz(&edge, hgt, edge_tone_hz));
+  check("a tone the retune pushed out of the band: newest column shows floor",
+        bright_rows(pix, w, hgt, w - 1, &ya0, &ya1) == 0);
+  g_snprintf(what, sizeof(what), "…and a pre-retune column still shows it at y %d", ye);
+  check(what, bright_rows(pix, w, hgt, w - 15, &yb0, &yb1) >= 1 && yb0 <= ye && yb1 >= ye);
 
   /* Cost of the worst case (informative, not a check): the whole 192 k band
    * on a 700×600 picture (≈ 14 bins per pixel row), full recompose vs the

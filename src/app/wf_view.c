@@ -49,10 +49,13 @@ G_DEFINE_FINAL_TYPE(SkimWfView, skim_wf_view, GTK_TYPE_WIDGET)
 
 static void clamp_window(SkimWfView *v) {
   if (skim_wf_history_rows(v->hist) == 0) { return; }
-  const double lo = skim_wf_history_lo_hz(v->hist);
+  const double lo = skim_wf_history_lo_hz(v->hist);   /* the CURRENT band   */
   const double hi = skim_wf_history_hi_hz(v->hist);
   v->span_hz = CLAMP(v->span_hz, MIN_SPAN_HZ, hi - lo);
-  v->centre_hz = CLAMP(v->centre_hz, lo + v->span_hz / 2.0, hi - v->span_hz / 2.0);
+  /* Only the window's CENTRE must stay inside the band: a retune that
+   * drags the band edge past a standing window must not drag the window
+   * along with it (the half outside the band simply shows floor). */
+  v->centre_hz = CLAMP(v->centre_hz, lo, hi);
 }
 
 static void window_of(const SkimWfView *v, SkimWfWindow *win) {
@@ -70,19 +73,32 @@ static int wf_width(const SkimWfView *v) {
 
 void skim_wf_view_push(SkimWfView *v, const guint8 *row, guint nbins,
                        double center_hz, double bin_hz) {
-  const gboolean moved = skim_wf_history_rows(v->hist) == 0 ||
-                         fabs(center_hz - skim_wf_history_center_hz(v->hist)) > 0.5 ||
+  const gboolean fresh = skim_wf_history_rows(v->hist) == 0 ||
                          nbins != skim_wf_history_bins(v->hist);
+  const double old_c = skim_wf_history_center_hz(v->hist);
   skim_wf_history_push(v->hist, row, nbins, center_hz, bin_hz);
-  if (moved) {
-    /* First row, or the whole band moved (the radio's DDS centre changed):
-     * the old window means nothing now — start on the VFO if we know it,
-     * else on the band centre, and repaint from scratch. This is the ONLY
-     * time the window moves by itself. */
+  const double lo = skim_wf_history_lo_hz(v->hist);
+  const double hi = skim_wf_history_hi_hz(v->hist);
+  if (fresh || !v->have_centre) {
+    /* First row (or a rate change emptied the history): start on the VFO
+     * if we know it, else on the band centre. */
     v->centre_hz   = v->vfo_hz > 0 ? v->vfo_hz : center_hz;
     v->have_centre = TRUE;
     clamp_window(v);
     v->need_full = TRUE;
+  } else if (fabs(center_hz - old_c) > 0.5) {
+    /* The band moved under a standing window (sdr-for-linux has no CTUN —
+     * every retune moves the IQ centre). The window STAYS in absolute
+     * frequency; old rows keep their place, new ones land shifted. Only a
+     * band change that leaves the window with no overlap at all recentres
+     * it on the VFO — there is nothing left to look at otherwise. */
+    const double top = v->centre_hz + v->span_hz / 2.0;
+    const double bot = v->centre_hz - v->span_hz / 2.0;
+    if (bot > hi || top < lo) {
+      v->centre_hz = v->vfo_hz > 0 ? v->vfo_hz : center_hz;
+      clamp_window(v);
+    }
+    v->need_full = TRUE;                       /* old columns: in-band mask   */
   }
   v->pending_rows++;
   v->tex_stale = TRUE;

@@ -651,8 +651,17 @@ where relevant, a live check against a running `sdr-for-linux`.
   the pointer travels with it). **A retune moves ONLY the green marker**
   (Richard at the first live look: the window must never jump under his
   eyes); when the VFO leaves the window an arrow at the top or bottom of the
-  scale says which way. The window moves by itself only when the whole band
-  moves (a DDS retune clears the history and recentres on the VFO).
+  scale says which way. **The history lives in ABSOLUTE frequency** (second
+  live-look fix, same day: "you reset my waterfall"): sdr-for-linux has no
+  CTUN, so every retune moves the IQ centre — the first cut cleared the
+  history and recentred on every tune. Now each row carries its own bin
+  shift against the grid anchor (the first centre seen), the composer
+  subtracts it per row, old rows stay exactly where they were, new rows land
+  shifted, and the window stands; a tone the retune pushed out of the band
+  shows in the old columns and floor in the new ones (gated, 56 checks). The
+  window recentres on the VFO only when the new band no longer overlaps it
+  at all (a band change), and only a rate change (new bin width) clears the
+  history.
   **App:** rows travel the ONE event queue (EV_SPECTRUM, blob + centre + bin;
   at most `SPEC_PENDING_MAX` 48 pending — the oldest row is dropped, a
   stalled UI must not hoard 1.5 MB/s), one `queue_draw` per drain; the top

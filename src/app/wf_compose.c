@@ -106,10 +106,13 @@ guint32 skim_wf_palette_argb(guint8 idx) {
 
 struct _SkimWfHistory {
   guint8  *data;                               /* max_rows × nbins           */
+  gint32  *shift;                              /* per slot: bins the row's
+                                                * centre sits above anchor  */
   guint    max_rows, nbins;
   guint    head;                               /* next slot to write         */
   guint    count;                              /* rows stored (≤ max_rows)   */
-  double   center_hz, bin_hz;
+  double   anchor_hz;                          /* grid origin (first centre) */
+  double   center_hz, bin_hz;                  /* newest row's centre        */
   double   floor_db;                           /* tracked noise floor        */
   gboolean floor_init;
 };
@@ -123,6 +126,7 @@ SkimWfHistory *skim_wf_history_new(guint max_rows) {
 void skim_wf_history_free(SkimWfHistory *h) {
   if (!h) { return; }
   g_free(h->data);
+  g_free(h->shift);
   g_free(h);
 }
 
@@ -132,28 +136,33 @@ void skim_wf_history_clear(SkimWfHistory *h) {
 }
 
 /* Slot of row r, r = 0 newest. */
+static inline guint slot_of(const SkimWfHistory *h, guint r) {
+  return (h->head + h->max_rows - 1 - r) % h->max_rows;
+}
 static inline const guint8 *row_ptr(const SkimWfHistory *h, guint r) {
-  const guint slot = (h->head + h->max_rows - 1 - r) % h->max_rows;
-  return h->data + (gsize)slot * h->nbins;
+  return h->data + (gsize)slot_of(h, r) * h->nbins;
 }
 
 void skim_wf_history_push(SkimWfHistory *h, const guint8 *row, guint nbins,
                           double center_hz, double bin_hz) {
   if (nbins == 0) { return; }
-  if (nbins != h->nbins || fabs(bin_hz - h->bin_hz) > 1e-9 ||
-      fabs(center_hz - h->center_hz) > 0.5) {
-    /* The band moved (retune, rate change): old rows sit on other
-     * frequencies — drop them rather than draw them in the wrong place. */
+  if (nbins != h->nbins || fabs(bin_hz - h->bin_hz) > 1e-9 || h->count == 0) {
+    /* A rate change (or the first row): a new grid — old rows have another
+     * bin width and cannot be placed. A mere retune is NOT this case. */
     skim_wf_history_clear(h);
     if (nbins != h->nbins) {
       g_free(h->data);
+      g_free(h->shift);
       h->data  = g_malloc((gsize)h->max_rows * nbins);
+      h->shift = g_new0(gint32, h->max_rows);
       h->nbins = nbins;
     }
-    h->center_hz = center_hz;
+    h->anchor_hz = center_hz;
     h->bin_hz    = bin_hz;
   }
+  h->center_hz = center_hz;
   memcpy(h->data + (gsize)h->head * nbins, row, nbins);
+  h->shift[h->head] = (gint32)lrint((center_hz - h->anchor_hz) / bin_hz);
   h->head = (h->head + 1) % h->max_rows;
   if (h->count < h->max_rows) { h->count++; }
 
@@ -218,27 +227,27 @@ void skim_wf_compose(const SkimWfHistory *h, const SkimWfWindow *win,
     return;
   }
 
-  /* Per pixel row: the bin range [b0, b1) it covers. Zoomed in past the
-   * bin width the range collapses to the ONE nearest bin; zoomed out it
-   * spans several and the pixel takes their maximum. Bin k is CENTRED on
-   * offset (k − nbins/2) · bin_hz and extends half a bin either side — hence
-   * the + 0.5 — otherwise every line lands half a bin high (gate-caught). */
+  /* Per pixel row: the bin range [b0, b1) it covers ON THE ANCHOR GRID —
+   * each history row then subtracts its own shift (a retune moved the band
+   * under a standing window). Zoomed in past the bin width the range
+   * collapses to the ONE nearest bin; zoomed out it spans several and the
+   * pixel takes their maximum. Bin k is CENTRED on offset (k − nbins/2) ·
+   * bin_hz and extends half a bin either side — hence the + 0.5 — otherwise
+   * every line lands half a bin high (gate-caught). */
   int *b0 = g_new(int, hgt), *b1 = g_new(int, hgt);
   const double half = (double)h->nbins / 2.0 + 0.5;
   for (int y = 0; y < hgt; y++) {
     const double hz_hi = skim_wf_hz_of_y(win, hgt, (double)y);
     const double hz_lo = skim_wf_hz_of_y(win, hgt, (double)y + 1.0);
-    const double fb_lo = (hz_lo - h->center_hz) / h->bin_hz + half;
-    const double fb_hi = (hz_hi - h->center_hz) / h->bin_hz + half;
+    const double fb_lo = (hz_lo - h->anchor_hz) / h->bin_hz + half;
+    const double fb_hi = (hz_hi - h->anchor_hz) / h->bin_hz + half;
     int lo = (int)floor(fb_lo), hi = (int)ceil(fb_hi);
     if (hi <= lo + 1) {                          /* < 1 bin per pixel        */
       lo = (int)floor((fb_lo + fb_hi) * 0.5);
       hi = lo + 1;
     }
-    lo = MAX(lo, 0);
-    hi = MIN(hi, (int)h->nbins);
-    if (hi <= lo) { b0[y] = -1; b1[y] = -1; }    /* outside the band         */
-    else          { b0[y] = lo; b1[y] = hi; }
+    b0[y] = lo;                                  /* unclamped: per-row shift */
+    b1[y] = hi;
   }
 
   const double low   = skim_wf_history_floor_db(h);
@@ -254,13 +263,14 @@ void skim_wf_compose(const SkimWfHistory *h, const SkimWfWindow *win,
     }
     const guint r1 = MIN(r0 + rpp, h->count);
     for (int y = 0; y < hgt; y++) {
-      if (b0[y] < 0) { pix[(gsize)y * w + x] = floor_argb; continue; }
-      guint8 v = 0;
+      guint8 v = 0;                              /* nothing in band → floor  */
       for (guint r = r0; r < r1; r++) {
         const guint8 *row = row_ptr(h, r);
-        for (int b = b0[y]; b < b1[y]; b++) { if (row[b] > v) { v = row[b]; } }
+        const gint32 sh = h->shift[slot_of(h, r)];
+        const int lo = MAX(b0[y] - sh, 0), hi = MIN(b1[y] - sh, (int)h->nbins);
+        for (int b = lo; b < hi; b++) { if (row[b] > v) { v = row[b]; } }
       }
-      int idx = (int)(((double)v - SKIM_WF_DB_OFFSET - low) * scale);
+      int idx = v ? (int)(((double)v - SKIM_WF_DB_OFFSET - low) * scale) : 0;
       idx = CLAMP(idx, 0, 255);
       pix[(gsize)y * w + x] = g_lut[idx];
     }

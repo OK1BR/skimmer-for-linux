@@ -36,18 +36,22 @@ typedef struct _SkimWfHistory SkimWfHistory;
 SkimWfHistory *skim_wf_history_new(guint max_rows);
 void           skim_wf_history_free(SkimWfHistory *h);
 
-/* Append one spectrum row (nbins bytes). A change of nbins, bin width or
- * stream centre means the band moved: the history is cleared first. */
+/* Append one spectrum row (nbins bytes) taken at stream centre center_hz.
+ * The history lives in ABSOLUTE frequency: every row carries its own bin
+ * shift against the grid anchor (the first centre seen), so a retune of the
+ * radio — which moves the whole IQ band, sdr-for-linux has no CTUN — leaves
+ * every old row exactly where it was and only writes the new rows shifted.
+ * Only a change of nbins or bin width (a rate change) clears the history. */
 void skim_wf_history_push(SkimWfHistory *h, const guint8 *row, guint nbins,
                           double center_hz, double bin_hz);
 void skim_wf_history_clear(SkimWfHistory *h);
 
 guint  skim_wf_history_rows(const SkimWfHistory *h);       /* stored rows      */
 guint  skim_wf_history_bins(const SkimWfHistory *h);
-double skim_wf_history_center_hz(const SkimWfHistory *h);
+double skim_wf_history_center_hz(const SkimWfHistory *h);  /* NEWEST row's     */
 double skim_wf_history_bin_hz(const SkimWfHistory *h);
-double skim_wf_history_lo_hz(const SkimWfHistory *h);      /* band edges       */
-double skim_wf_history_hi_hz(const SkimWfHistory *h);
+double skim_wf_history_lo_hz(const SkimWfHistory *h);      /* current band     */
+double skim_wf_history_hi_hz(const SkimWfHistory *h);      /* (newest row)     */
 double skim_wf_history_floor_db(const SkimWfHistory *h);   /* tracked, dBFS    */
 
 /* The visible window: frequency at the TOP pixel edge (y = 0) and at the
