@@ -798,6 +798,10 @@ where relevant, a live check against a running `sdr-for-linux`.
   Same look, same minute: a hairline separator between the header bar and
   the top view, matching the one above the decode pane — visible only while
   the waterfall is the top view (his second remark), hidden otherwise.
+  Preferences split into four tabs the same session (Richard: "there is
+  getting to be a lot in there"): Radio · Decoding · Spots (panadapter
+  policy + telnet feed) · Display — `AdwPreferencesPage`s with the family's
+  title + symbolic icon; nothing behind the rows changed.
 
 ## Safety / etiquette
 

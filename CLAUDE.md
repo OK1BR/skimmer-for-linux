@@ -786,6 +786,12 @@ header bar, the faint line the decode pane already had above it — the
 waterfall used to meet the header with no edge; shown ONLY while the
 waterfall is the top view (Richard's second remark), hidden for the list
 and the pane-only layout.
+**Preferences in tabs (Richard, same session: "there is getting to be a
+lot in there").** Four `AdwPreferencesPage`s in the family look (title +
+symbolic icon, as sdr-for-linux's Radio/CW/TCI/Audio): Radio (TCI
+server), Decoding (mode), Spots (panadapter policy + telnet feed),
+Display (pane font, waterfall palette). Rows, data keys and
+`prefs_closed` untouched — only the grouping changed.
 
 ## Layout
 

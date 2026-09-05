@@ -1488,12 +1488,29 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   }
 }
 
+/* One tab of the Preferences dialog — the family look (sdr-for-linux's
+ * Radio / CW / TCI / Audio pages): a title and a symbolic icon; libadwaita
+ * shows the switcher as soon as the dialog has more than one page. */
+static AdwPreferencesPage *prefs_page(AdwDialog *dlg, const char *title,
+                                      const char *icon) {
+  AdwPreferencesPage *p = ADW_PREFERENCES_PAGE(g_object_new(
+      ADW_TYPE_PREFERENCES_PAGE, "title", title, "icon-name", icon, NULL));
+  adw_preferences_dialog_add(ADW_PREFERENCES_DIALOG(dlg), p);
+  return p;
+}
+
 static void prefs_open(GtkButton *btn, gpointer user) {
   (void)btn;
   App *app = user;
   AdwDialog *dlg = adw_preferences_dialog_new();
   adw_dialog_set_title(dlg, "Preferences");
-  GtkWidget *page = adw_preferences_page_new();
+  /* Four tabs (Richard, 2026-09-05 — "there is getting to be a lot in
+   * there"): Radio = the TCI link, Decoding = the engine, Spots = every
+   * spot output (panadapter policy + telnet feed), Display = the look. */
+  AdwPreferencesPage *p_radio = prefs_page(dlg, "Radio", "network-transmit-receive-symbolic");
+  AdwPreferencesPage *p_dec   = prefs_page(dlg, "Decoding", "input-keyboard-symbolic");
+  AdwPreferencesPage *p_spots = prefs_page(dlg, "Spots", "mark-location-symbolic");
+  AdwPreferencesPage *p_disp  = prefs_page(dlg, "Display", "video-display-symbolic");
   GtkWidget *grp  = adw_preferences_group_new();
   adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(grp), "TCI server");
   adw_preferences_group_set_description(ADW_PREFERENCES_GROUP(grp),
@@ -1502,8 +1519,7 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), "Host");
   gtk_editable_set_text(GTK_EDITABLE(row), app->host);
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(grp), row);
-  adw_preferences_page_add(ADW_PREFERENCES_PAGE(page),
-                           ADW_PREFERENCES_GROUP(grp));
+  adw_preferences_page_add(p_radio, ADW_PREFERENCES_GROUP(grp));
 
   GtkWidget *dgrp = adw_preferences_group_new();
   adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(dgrp), "Decoding");
@@ -1517,8 +1533,7 @@ static void prefs_open(GtkButton *btn, gpointer user) {
                           G_LIST_MODEL(gtk_string_list_new(MODES)));
   adw_combo_row_set_selected(ADW_COMBO_ROW(mrow), app->dec_mode);
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(dgrp), mrow);
-  adw_preferences_page_add(ADW_PREFERENCES_PAGE(page),
-                           ADW_PREFERENCES_GROUP(dgrp));
+  adw_preferences_page_add(p_dec, ADW_PREFERENCES_GROUP(dgrp));
 
   GtkWidget *sgrp = adw_preferences_group_new();
   adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(sgrp), "Spots");
@@ -1545,8 +1560,7 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   }
   adw_combo_row_set_selected(ADW_COMBO_ROW(qrow), sel);
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(sgrp), qrow);
-  adw_preferences_page_add(ADW_PREFERENCES_PAGE(page),
-                           ADW_PREFERENCES_GROUP(sgrp));
+  adw_preferences_page_add(p_spots, ADW_PREFERENCES_GROUP(sgrp));
 
   GtkWidget *rgrp = adw_preferences_group_new();
   adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(rgrp),
@@ -1569,8 +1583,7 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   adw_preferences_row_set_title(ADW_PREFERENCES_ROW(rport), "Telnet port");
   adw_spin_row_set_value(ADW_SPIN_ROW(rport), app->rbn_port);
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(rgrp), rport);
-  adw_preferences_page_add(ADW_PREFERENCES_PAGE(page),
-                           ADW_PREFERENCES_GROUP(rgrp));
+  adw_preferences_page_add(p_spots, ADW_PREFERENCES_GROUP(rgrp));
 
   GtkWidget *ugrp = adw_preferences_group_new();
   adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(ugrp), "Display");
@@ -1595,11 +1608,8 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   adw_combo_row_set_selected(ADW_COMBO_ROW(prow), (guint)app->palette);
   g_signal_connect(prow, "notify::selected", G_CALLBACK(on_pref_palette), app);
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(ugrp), prow);
-  adw_preferences_page_add(ADW_PREFERENCES_PAGE(page),
-                           ADW_PREFERENCES_GROUP(ugrp));
+  adw_preferences_page_add(p_disp, ADW_PREFERENCES_GROUP(ugrp));
 
-  adw_preferences_dialog_add(ADW_PREFERENCES_DIALOG(dlg),
-                             ADW_PREFERENCES_PAGE(page));
   g_object_set_data(G_OBJECT(dlg), "host-row", row);
   g_object_set_data(G_OBJECT(dlg), "mode-row", mrow);
   g_object_set_data(G_OBJECT(dlg), "cq-row", sw);
