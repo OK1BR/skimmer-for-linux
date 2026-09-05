@@ -933,9 +933,36 @@ where relevant, a live check against a running `sdr-for-linux`.
   arrival, window-middle placement = the L≈2 offset built in, the ±1
   jitter inherent). Acceptance metric for the live look: the share of
   voting sweep rows with |best − cfg| ≥ 4 bins, 9.7 % before → expected
-  ≈ 0; a discrete click will still show the 4-hop window's 2-column
-  smear on strong carriers — physically true, a separate decision if he
-  dislikes it. Not built, on purpose: a polling-server fallback (settle
+  ≈ 0. **Live 20:42 (both apps restarted on the stamp builds; the skimmer
+  relink went wrong twice by running `ninja -C builddir` from the SDR's
+  cwd — use the absolute path):** stamps confirmed on the wire (a passive
+  `iq_stamp:1` subscriber saw h[8] follow the centre in every block), and
+  the probe put every sweep row on its own label (best lag 0 row after
+  row through a −5 → −116 bin sweep; worst deviation 11 bins vs 132
+  before). ⚠ 20:44: a peek script imported the TCI client whose main()
+  ran at import with foreign argv and sent `vfo:0,0,4;` — Richard's radio
+  sat at 4 Hz for ~25 s until `vfo:0,0,3520497;` restored it; the client
+  now has a main guard. Lesson: never import a script with radio side
+  effects. **His second recording (20:48): the spikes are gone, what is
+  left are vertical BARS at every retune, symmetric about a strong line
+  (the ADC/DC line at S9+20 made them glaring): the 4-hop window
+  straddle — a row whose window contains the step carries the line at
+  BOTH baseband positions and is drawn on one label, a bar the height of
+  the step.** Fixed in the tap the same evening (offline-proven): `emit_row`
+  computes a row whose window holds a centre boundary from its LARGEST
+  single-centre segment only — a fresh Hann over that segment (a chopped
+  edge of the full window leaked at −25 dB, gate-caught), the rest
+  zeroed, the floor renormalised by Σw²_full/Σw²_kept (noise reads the
+  same, a carrier a few dB lower for those rows) — and labels the row with
+  that segment's centre (ties → newest). A discrete step now shows a
+  2-column WIDENING of a line instead of a bar; a knob sweep shows lines
+  ~4× wider while it turns, correctly placed and continuous — the
+  resolution a sweeping receiver honestly has. Gate spectrum 92 → 100
+  (a tone at a fixed absolute frequency across a +5 kHz centre step: every
+  row, straddling ones included, puts it on its absolute frequency
+  through its own label, and the strongest byte > 16 bins away is 66 dB
+  down — the chopped-edge version read 28). Skimmer relaunched 20:54 on
+  it (log live18); the SDR needs nothing. Not built, on purpose: a polling-server fallback (settle
   when labels arrive in ≥ 400 ms steps) — one click followed by stillness is
   indistinguishable from a polling label, so any cadence detector would bring
   the pause back on his most common gesture; no such server is measured.

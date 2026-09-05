@@ -204,14 +204,49 @@ static void rate_section(double rate) {
    * The window middle (total − n/2) is the boundary between its 2nd and
    * 3rd hop; the centre of the 3rd hop starts exactly there and wins the
    * tie (≤), so a row reads the centre pushed ONE hop before it. */
+  /* the first two rows still hold a larger C segment (3 and 2 hops); from
+   * the third on all four segments are equal and the newest wins */
   gboolean mono = TRUE;
   for (guint k = 0; k < 40; k++) {
     skim_spectrum_push(s, z, hop, 10000.0 + 100.0 * k);
-    const double want = k >= 1 ? 10000.0 + 100.0 * (k - 1) : 3000.0;
+    const double want = k >= 2 ? 10000.0 + 100.0 * k : 3000.0;
     if (cap.row_hz != want) { mono = FALSE; }
   }
-  check("label: a change per hop for 40 hops — every row on the centre from 1 hop back (the window middle)", mono);
+  check("label: a change per hop for 40 hops — C while it is the largest segment, then the NEWEST of four equals", mono);
   g_free(z);
+
+  /* Straddle cut: a tone at a fixed ABSOLUTE frequency, the centre stepping
+   * +5 kHz mid-stream (the tone's baseband drops by 5 kHz at the same
+   * sample). Every row — including the ones whose window straddles the step
+   * — must show ONE peak, at the tone's absolute frequency through the
+   * row's own label, and no ghost at the other position (≥ 30 dB down). */
+  {
+    skim_spectrum_reset(s);
+    const double cA = 14020000.0, cB = 14025000.0, f_abs = cA + 12000.0;
+    Tone ta = { f_abs - cA, 0.5, 0 }, tb = { f_abs - cB, 0.5, 0 };
+    float *pa = synth(rate, n, &ta, 1, 1e-4);
+    float *pb = synth(rate, 8 * hop, &tb, 1, 1e-4);
+    skim_spectrum_push(s, pa, n, cA);
+    gboolean placed = TRUE, no_ghost = TRUE; double worst = 0;
+    for (guint k = 0; k < 8; k++) {
+      skim_spectrum_push(s, pb + 2 * k * hop, hop, cB);
+      const guint pk = argmax(cap.last, n);
+      const double abs_hz = cap.row_hz + idx_hz(pk, n, bin);
+      if (fabs(abs_hz - f_abs) > 2.5 * bin) { placed = FALSE; }
+      /* ghost: the strongest byte more than 16 bins from the peak */
+      guint8 ghost = 0;
+      for (guint i = 0; i < n; i++) {
+        if ((i > pk ? i - pk : pk - i) > 16 && cap.last[i] > ghost) { ghost = cap.last[i]; }
+      }
+      const double down = (double)cap.last[pk] - (double)ghost;
+      if (down < worst || k == 0) { worst = down; }
+      if (down < 30.0) { no_ghost = FALSE; }
+    }
+    check("straddle cut: every row across a +5 kHz step puts the tone on its absolute frequency", placed);
+    g_snprintf(what, sizeof(what), "straddle cut: no ghost at the other position (worst %.0f dB down ≥ 30)", worst);
+    check(what, no_ghost);
+    g_free(pa); g_free(pb);
+  }
 
   g_free(cap.last);
   skim_spectrum_free(s);

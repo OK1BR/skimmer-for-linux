@@ -41,12 +41,14 @@
 typedef struct _SkimSpectrum SkimSpectrum;
 
 /* One finished row: nbins bytes, fftshifted (index 0 = lowest frequency). */
-/* center_hz = the stream centre in effect at the sample in the MIDDLE of the
- * row's window (the label the row belongs on; a retune inside the window
- * smears the row — physically true — and the middle is the honest label).
- * The middle is the boundary between the window's 2nd and 3rd hop; a centre
- * that starts exactly there wins (newer), so with a change per hop a row
- * reads the centre of the hop before the newest one. */
+/* center_hz = the centre of the frames the row was computed from. A retune
+ * inside the window would put a line at two baseband positions in one row
+ * (a spike the height of the step on the waterfall), so the row is computed
+ * from its LARGEST single-centre segment only — the rest of the window is
+ * zeroed, the noise floor renormalised — and labelled with that segment's
+ * centre; ties go to the newest segment. A single boundary therefore flips
+ * the label when the middle of the window passes it; a change per hop
+ * labels every row with the newest centre, at ~4× wider lines. */
 typedef void (*SkimSpectrumRowCb)(const guint8 *row, guint nbins, double center_hz,
                                   gpointer user);
 

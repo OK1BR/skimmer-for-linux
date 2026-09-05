@@ -837,8 +837,19 @@ resampler ratio; unstamped clients byte-identical (gate sdrfl-tci-test
 at h[9] (tci gate 17 → 20); `spectrum.c` takes the centre per push and
 labels each row with the centre at its window MIDDLE (gate 76 → 92); the
 app delay line defaults to 0 (`SKIM_WF_LAG_ROWS` kept for experiments).
-Acceptance: sweep rows ≥ 4 bins off 9.7 % → ≈ 0. Not built by design: a
-polling-server settle fallback (a click + stillness looks the same).
+Acceptance: sweep rows ≥ 4 bins off 9.7 % → ≈ 0. **Live 20:42–20:54:** stamps
+confirmed on the wire, every sweep row on its own label (worst 11 bins vs
+132). His second recording: spikes gone, vertical BARS at retunes remain =
+the 4-hop window straddle (a row holding the step carries a line at both
+positions). Fixed in `spectrum.c`: a straddling row is computed from its
+largest single-centre segment only (fresh Hann, floor renormalised),
+labelled with that segment's centre — a step shows a 2-column widening, a
+sweep ~4× wider lines while turning; gate spectrum 92 → 100 (tone stays on
+its absolute frequency across a +5 kHz step, ghost 66 dB down). Skimmer
+relaunched on it (live18) — his look pending. ⚠ 20:44 a peek script
+imported the TCI client (main ran at import) and tuned his radio to 4 Hz for
+~25 s; restored, main-guarded. Not built by design: a polling-server settle
+fallback (a click + stillness looks the same).
 
 ## Layout
 
