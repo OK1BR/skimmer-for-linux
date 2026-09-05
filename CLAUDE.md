@@ -792,6 +792,15 @@ symbolic icon, as sdr-for-linux's Radio/CW/TCI/Audio): Radio (TCI
 server), Decoding (mode), Spots (panadapter policy + telnet feed),
 Display (pane font, waterfall palette). Rows, data keys and
 `prefs_closed` untouched — only the grouping changed.
+**End of 2026-09-05:** live = sdr-for-linux `build/` ee7d08b + skimmer
+`builddir` 8c5d458 (`SKIM_WF_DEBUG=1`, log live12). Open, in order: (1)
+the callsign click LIVE (tune + logbook prefill) — unreported; (2) the
+column takes over SNR/WPM/heard/age, THEN the station list is deleted
+(Richard's two-step call, step one done); (3) waterfall flows through a
+retune — SDR `p2_set_frequency` kick → re-measure → label delay line;
+(4) bin/hop/span, crowded fan-out and column drain cost by his look /
+`SKIM_LAG_DEBUG`. Full list: SCOPE M8 "STATE AT THE END OF 2026-09-05,
+EVENING".
 
 ## Layout
 

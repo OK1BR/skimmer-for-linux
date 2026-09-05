@@ -802,6 +802,41 @@ where relevant, a live check against a running `sdr-for-linux`.
   getting to be a lot in there"): Radio · Decoding · Spots (panadapter
   policy + telnet feed) · Display — `AdwPreferencesPage`s with the family's
   title + symbolic icon; nothing behind the rows changed.
+  **STATE AT THE END OF 2026-09-05, EVENING (next session continues
+  HERE — this supersedes the morning block above).** Live on Richard's
+  desk: sdr-for-linux from `build/` (ee7d08b, immediate dds/vfo broadcast)
+  and the skimmer from `builddir` at 8c5d458 (column + default waterfall +
+  waterfall-only hairline + tabbed Preferences), launched with
+  `SKIM_WF_DEBUG=1`, log `/var/tmp/skimmer-app-20260905-m8-live12.log`.
+  Richard's verdict on the column: the waterfall view is "much clearer" —
+  it is the working view now. **Open, in order:**
+  (1) **The click on a callsign LIVE** — tune + `clicked_on_spot` → logbook
+  prefill — is still unreported: the offline replay proved the app-side
+  path only (`wf click: … tune + clicked_on_spot` in the log, pane fixed);
+  ask him first thing.
+  (2) **The column takes over what only the list shows** — SNR, WPM/Bd,
+  heard, age (tooltip on the label, or dB after the call as CW Skimmer
+  prints it); **then the station list goes entirely** — widget, sorter,
+  `fmt_*` columns, `freq_cmp`, its toggle and `[ui] view=list` (map to the
+  waterfall on load). Richard's two-step decision; step one is done
+  (waterfall default, list kept).
+  (3) **The waterfall must FLOW through a retune** (his fourth remark this
+  morning): SDR side first — `p2_set_frequency` kicks the keepalive timer
+  like `p2_set_tx_state` (`kick_cond`; same look at `p1_set_frequency`),
+  re-measure with `SKIM_WF_DEBUG=1` on discrete ≥ 1 kHz steps, then replace
+  the 0.7 s settle DROP with a label delay line sized by the measured lag.
+  (4) bin/hop/span by his look; the crowded fan-out (slanted connectors,
+  hidden low-priority labels) has never been seen live — the RTTY fixture
+  showed one station; drain cost with the column shown under contest load
+  is unmeasured (`SKIM_LAG_DEBUG`).
+  Housekeeping: the SKM-2 GtkImage baseline warnings now also fire when
+  Preferences opens (the four switcher icons — same upstream class, no code
+  change); scratch `/var/tmp/skimmer-wf-calls` holds the separate build
+  dir, the headless screenshots and `cdp.mjs` (30-line CDP driver over
+  node's WebSocket: click + screenshot on a Broadway page) — offered for
+  the bin; the `dbus-run-session` trick is what lets a headless test
+  instance coexist with Richard's live one (GApplication uniqueness is per
+  session bus).
 
 ## Safety / etiquette
 
