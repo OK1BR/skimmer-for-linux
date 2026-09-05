@@ -695,9 +695,15 @@ as upstream GTK/Pango, no code change:** the day-1 numbers were 16
 warnings (8 images × 2, INT_MIN baseline, 16/16), reproduced byte-identical
 on our binary under an empty fontset (first `pango_context_get_metrics`
 returns 0/0 where fonts give 14550/3623; control run 0 lines); the source
-reading lives in sdr-for-linux's SDR-3 write-up. **SKM-6 noted, not
-fixed:** a second launch re-runs `on_activate` in the primary instance
-(second window, second App, second feed bind) — read in the code, not run.
+reading lives in sdr-for-linux's SDR-3 write-up. **SKM-6 fixed the same
+day (Richard's "ano"):** a second launch used to re-run `on_activate` in the
+primary instance (second window, second App, second feed bind — reproduced
+headless: the primary's stderr showed its own feed failing to bind);
+`on_activate` now presents `gtk_application_get_active_window()` and
+returns when it exists. Harness after: second and third launch each exit 0
+at once, the primary logs `app: second launch — presenting the existing
+window` twice, the feed binds once, zero warnings. The backlog's bug
+section is empty.
 
 ## Layout
 

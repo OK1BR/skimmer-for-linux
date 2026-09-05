@@ -1648,6 +1648,16 @@ static void on_shutdown(GApplication *a, gpointer user) {
 
 static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   (void)user_data;
+  /* The application is unique per session: a second launch forwards its
+   * activate HERE, and this function used to build a second window, App,
+   * timer set and pipeline, and a feed that could not bind its port
+   * (SKM-6, reproduced 2026-09-05). Present the window we have instead. */
+  GtkWindow *existing = gtk_application_get_active_window(gtk_app);
+  if (existing) {
+    g_message("app: second launch — presenting the existing window");
+    gtk_window_present(existing);
+    return;
+  }
   App *app = g_new0(App, 1);
   g_mutex_init(&app->evq_lock);
   app->evq = g_ptr_array_new_with_free_func(ev_free);

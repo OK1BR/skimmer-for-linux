@@ -154,7 +154,7 @@ again — check the font cache (`fc-cache -rv`, `~/.cache/fontconfig`), not the
 code.
 
 ### SKM-6 — A second launch opens a second window inside the primary instance
-- **Type:** bug · **Severity:** low · **Status:** open (reproduced headless 2026-09-05)
+- **Type:** bug · **Severity:** low · **Status:** done — reproduced, fixed, harness-verified (2026-09-05)
 - **Source:** noticed while fixing SKM-1, 2026-09-05
 - **Detail:** `src/app/main.c`, `on_activate`
 
@@ -166,9 +166,17 @@ reported it — during a contest only one instance is ever started.
 Reproduced headless (Broadway, isolated config, feed on a spare port): the
 second launch returns at once with exit 0 and the PRIMARY's stderr gains
 `RBN feed on port 7399: … Adresa je užívána` — its second `on_activate`
-trying to bind the port its first one holds. The fix shape is the standard one: present
-`gtk_application_get_active_window()` when it exists and return. Left open
-so SKM-1's one-teardown-per-window design is not silently stretched to two.
+trying to bind the port its first one holds.
+
+**Resolution (2026-09-05, Richard's "ano"):** `on_activate` now starts with
+the standard GNOME idiom — if `gtk_application_get_active_window()` already
+exists, present it and return; nothing else is built. One `g_message`
+(`app: second launch — presenting the existing window`) marks the event so a
+log can show it happened. Verified on the same headless harness: second AND
+third launch each return exit 0 at once, the primary logs the message twice,
+the feed port is bound exactly once, zero warnings; 11 gates green. SKM-1's
+one-teardown-per-window design now holds by construction — one process, one
+`App`, one window.
 
 ## Open — ideas
 
@@ -281,6 +289,6 @@ before anything is promised, starting with what `ic7610ftdi` actually delivers
 ## Roadmap
 
 Milestones and their order live in `docs/SCOPE.md`. Nothing in this backlog
-blocks them: the two contest-log items are closed (SKM-1 fixed, SKM-2
-explained), the one open bug is hygiene, and none of them was noticed by the
-operator during 5 hours of contest operation across two days.
+blocks them: all three bugs are closed (SKM-1 fixed, SKM-2 explained, SKM-6
+fixed), and none of them was noticed by the operator during 5 hours of
+contest operation across two days.
