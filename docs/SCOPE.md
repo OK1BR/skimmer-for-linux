@@ -837,6 +837,54 @@ where relevant, a live check against a running `sdr-for-linux`.
   the bin; the `dbus-run-session` trick is what lets a headless test
   instance coexist with Richard's live one (GApplication uniqueness is per
   session bus).
+  **The waterfall FLOWS through a retune — both halves built and gated
+  (offline-proven 2026-09-05 evening; live measurement + Richard's look
+  pending).** Open item (3) above. **SDR side** (sdr-for-linux):
+  `p2_set_frequency` now KICKS the keepalive timer for ONE High-Priority
+  packet when the frequency CHANGES — piHPSDR parity read from dl1ycf master
+  the same evening (`rx_frequency_changed` → `schedule_high_priority` and
+  nothing else) — and the kick does NOT advance the cadence: the timer keeps
+  waiting for the same 100 ms tick, so a knob at 250 steps/s sends 250 HP
+  packets and nothing more (RX/TX-specific keep their 200 ms rhythm); an
+  unchanged frequency does not kick. Gate `sdrfl-txiq-ring-test` section [7]
+  (46 → 50 checks): ten retunes 15 ms apart each on the wire within 30 ms
+  (measured 0.0 ms worst; the OLD code goes red at 4 of 10, 31 ms worst),
+  RX/TX-specific ≤ cadence, the same frequency ×10 → 3 HP in 300 ms. The
+  live probe had measured, before the fix, the IQ arriving 3–11 rows
+  (32–117 ms) behind the dds label on eight discrete 4–18 kHz steps — the
+  100 ms quantum over a ~3-row floor (log live12, rows 2390…63420).
+  **Skimmer side:** the retune guard (3-row delay + 0.7 s settle DROP — the
+  pause Richard saw) is GONE; `wf_compose.c` carries a **label delay line**
+  instead: every row is placed on the centre label that was current
+  `SKIM_WF_LABEL_LAG` (3) rows EARLIER — nothing delayed, nothing dropped;
+  `SKIM_WF_LAG_ROWS=<n>` overrides it for a measurement session; a rate
+  change restarts the line on the new label. The view no longer forces a
+  full recompose on a mere centre change (only when the window had to
+  recentre): stored rows keep their own shift and the window stands still,
+  so nothing drawn changes — and without the settle that recompose would have
+  run per row while the knob turns (94 × 5 ms a second on the main thread).
+  The `SKIM_WF_DEBUG=1` probe was rebuilt for any step size (the old
+  ±128-bin cross-correlation clipped on every real step: 192…785 bins): a
+  retune episode keeps the last pre-change row as the reference and for every
+  later row reports the best lag L in 0..16 — correlation at the shift each
+  candidate label implies — plus the plain flip (the first row that matches
+  the reference better at the full step than at zero: the data's arrival),
+  and one summary line per episode ("data flipped N rows after the first
+  label change"). Gate `skimmer-spectrum-test` 75 → 76 (delay line: discrete
+  step, turning knob row-exact, steady, lag 0, rate restart, cap). Headless
+  replay of the RTTY fixture: draws as before, drain ≤ 0.3 ms. **NEXT:
+  restart both apps on the new builds (Richard's word), a few DISCRETE
+  ≥ 1 kHz steps with `SKIM_WF_DEBUG=1`, read the episode summaries, set
+  `SKIM_WF_LABEL_LAG` to that N (expect ~3 ± 1 — the floor), then his look
+  at a knob sweep: the traces should SLOPE, not tear, and the picture must
+  never pause.** Not built, on purpose: a polling-server fallback (settle
+  when labels arrive in ≥ 400 ms steps) — one click followed by stillness is
+  indistinguishable from a polling label, so any cadence detector would bring
+  the pause back on his most common gesture; no such server is measured.
+  Also not moved: the delay line stays in the waterfall; a time-stamped
+  version in `tci_client` would also fix the pipeline's centre mid-retune,
+  but the pipeline flushes its decoders on a centre change anyway — go there
+  only if spot frequencies during tuning ever matter.
 
 ## Safety / etiquette
 

@@ -801,6 +801,26 @@ retune — SDR `p2_set_frequency` kick → re-measure → label delay line;
 (4) bin/hop/span, crowded fan-out and column drain cost by his look /
 `SKIM_LAG_DEBUG`. Full list: SCOPE M8 "STATE AT THE END OF 2026-09-05,
 EVENING".
+**The waterfall flows through a retune (offline-proven 2026-09-05 evening;
+live measurement pending).** Open item (3) built on both sides. sdr-for-linux:
+`p2_set_frequency` kicks the keepalive timer for ONE High-Priority packet on
+a frequency CHANGE (piHPSDR parity: `rx_frequency_changed` →
+`schedule_high_priority` only, read from dl1ycf master), without advancing
+the cadence; gate `sdrfl-txiq-ring-test` [7] 46 → 50 checks (ten retunes on
+the wire within 30 ms — 0.0 ms measured, old code red at 4/10; RX/TX-specific
+≤ cadence; unchanged frequency does not kick). Before it the live probe
+measured IQ 3–11 rows (32–117 ms) behind the dds label — the 100 ms quantum
+over a ~3-row floor. Skimmer: the retune guard (3-row delay + 0.7 s settle
+DROP = the pause) is gone; `wf_compose.c` has a **label delay line** — each
+row placed on the label current `SKIM_WF_LABEL_LAG` (3) rows earlier, nothing
+delayed or dropped, `SKIM_WF_LAG_ROWS=<n>` overrides for measurement; the
+view no longer full-recomposes on a mere centre change (would be per row
+during a sweep). `SKIM_WF_DEBUG=1` probe rebuilt for any step size (best lag
+L 0..16 per row + flip row + per-episode summary). Gate spectrum 75 → 76;
+headless replay draws as before. **NEXT: restart both apps on the new builds,
+discrete ≥ 1 kHz steps with the probe, set the lag to the measured N, then
+Richard's look at a sweep (slope, no tear, never a pause).** Not built by
+design: a polling-server settle fallback (a click + stillness looks the same).
 
 ## Layout
 

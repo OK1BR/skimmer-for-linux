@@ -30,14 +30,17 @@
 #define SKIM_WF_FLOOR_PCT     20     /* percentile used as the floor estimate     */
 #define SKIM_WF_FLOOR_SMOOTH  0.01   /* EMA per row (τ ≈ 1 s at 94 rows/s)        */
 #define SKIM_WF_DB_OFFSET     200.0  /* spectrum.h byte encoding                  */
-#define SKIM_WF_RETUNE_GUARD  3      /* rows dropped BEFORE a centre change
-                                      * (≈ 32 ms at 94 rows/s — the delay)        */
-#define SKIM_WF_RETUNE_SETTLE 66     /* rows dropped AFTER a centre change until
-                                      * the centre has stayed put this long
-                                      * (≈ 0.7 s: longer than any TCI server's
-                                      * polling cadence, sdr-for-linux's was
-                                      * 500 ms — while the knob turns the picture
-                                      * PAUSES instead of growing teeth)          */
+#define SKIM_WF_LABEL_LAG     3      /* rows the centre LABEL leads the DATA by:
+                                      * the label leaves the server the moment
+                                      * the knob moves, the IQ captured at that
+                                      * centre lands here after the DDC apply,
+                                      * the IQ transport and half an FFT window
+                                      * (≈ 32 ms at 94 rows/s: the FLOOR of the
+                                      * 3–11 row spread measured live 2026-09-05
+                                      * — the spread was sdr-for-linux's 100 ms
+                                      * keepalive quantum, fixed there the same
+                                      * day; re-measure with SKIM_WF_DEBUG=1)   */
+#define SKIM_WF_LABEL_LAG_MAX 63     /* ceiling for the SKIM_WF_LAG_ROWS override  */
 
 typedef struct _SkimWfHistory SkimWfHistory;
 
@@ -81,24 +84,26 @@ double skim_wf_hz_of_y(const SkimWfWindow *win, int hgt, double y);
 void skim_wf_compose(const SkimWfHistory *h, const SkimWfWindow *win,
                      guint32 *pix, int w, int hgt, int cols);
 
-/* Retune guard. The stream centre label rides the TCI control channel while
- * the IQ rides the data channel, so around a retune rows carry the wrong
- * centre — drawn in absolute frequency they tear the picture (teeth while the
- * knob turns). The guard delays every row by `guard_rows` and, at a centre
- * change, drops the rows already waiting AND every following row until the
- * centre has been stable for `settle_rows`; everything else is committed
- * unchanged, in order. A label that only updates every 500 ms can therefore
- * never place a row on a stale centre — the picture pauses while tuning. */
-typedef struct _SkimWfGuard SkimWfGuard;
-typedef void (*SkimWfGuardCommitCb)(const guint8 *row, guint nbins,
-                                    double center_hz, double bin_hz, gpointer user);
+/* Label delay line. The stream centre label rides the TCI control channel
+ * and leaves the server the moment the knob moves; the IQ captured at that
+ * centre arrives `lag` rows later (DDC apply + IQ transport + half an FFT
+ * window). Stamping every row with the label that was current `lag` rows
+ * EARLIER places it on the right absolute frequency — nothing is delayed and
+ * nothing is dropped, so the picture FLOWS through a retune; the traces slope
+ * while the knob turns because they really did sweep through the window.
+ * Rows are the clock (one per hop), so `lag` is time. Replaces the 0.7 s
+ * settle DROP of 2026-09-05 morning, which paused the picture on every
+ * retune (Richard: it must flow). */
+typedef struct _SkimWfDelay SkimWfDelay;
 
-SkimWfGuard *skim_wf_guard_new(guint guard_rows, guint settle_rows);
-void         skim_wf_guard_free(SkimWfGuard *g);
-void         skim_wf_guard_set_commit_cb(SkimWfGuard *g, SkimWfGuardCommitCb cb, gpointer user);
-void         skim_wf_guard_push(SkimWfGuard *g, const guint8 *row, guint nbins,
-                                double center_hz, double bin_hz);
-guint        skim_wf_guard_dropped(const SkimWfGuard *g);   /* rows dropped so far */
+SkimWfDelay *skim_wf_delay_new(guint lag_rows);
+void         skim_wf_delay_free(SkimWfDelay *d);
+void         skim_wf_delay_set_lag(SkimWfDelay *d, guint lag_rows);   /* ≤ LAG_MAX  */
+guint        skim_wf_delay_lag(const SkimWfDelay *d);
+/* Feed this row's label, get the label the row is placed on. While the line
+ * fills (a fresh stream) rows ride their own label, never a stale one; a
+ * bin-width change (rate change) restarts the line on the new label. */
+double       skim_wf_delay_push(SkimWfDelay *d, double center_hz, double bin_hz);
 
 /* Palette (sdr-for-linux waterfall.c table; index 0 = "Classic"). */
 int         skim_wf_palette_count(void);

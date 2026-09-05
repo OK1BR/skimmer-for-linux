@@ -13,6 +13,7 @@
 #include "wf_view.h"
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "spot_out.h"
@@ -31,7 +32,7 @@
 struct _SkimWfView {
   GtkWidget      parent_instance;
   SkimWfHistory *hist;
-  SkimWfGuard   *guard;                        /* rows around a retune → out */
+  SkimWfDelay   *delay;                        /* label lag → true centre    */
   double         centre_hz;                    /* visible window centre      */
   double         span_hz;
   gboolean       have_centre;
@@ -90,10 +91,9 @@ static int wf_width(const SkimWfView *v) {
 
 /* --- data in ---------------------------------------------------------------------- */
 
-/* A row the retune guard let through (a few rows late, never mislabelled). */
-static void view_commit_row(const guint8 *row, guint nbins, double center_hz,
-                            double bin_hz, gpointer user) {
-  SkimWfView *v = user;
+/* A row placed on its true centre (the label delay line's output). */
+static void view_commit_row(SkimWfView *v, const guint8 *row, guint nbins,
+                            double center_hz, double bin_hz) {
   const gboolean fresh = skim_wf_history_rows(v->hist) == 0 ||
                          nbins != skim_wf_history_bins(v->hist);
   const double old_c = skim_wf_history_center_hz(v->hist);
@@ -118,63 +118,105 @@ static void view_commit_row(const guint8 *row, guint nbins, double center_hz,
     if (bot > hi || top < lo) {
       v->centre_hz = v->vfo_hz > 0 ? v->vfo_hz : center_hz;
       clamp_window(v);
+      v->need_full = TRUE;                     /* the window moved            */
     }
-    v->need_full = TRUE;                       /* old columns: in-band mask   */
+    /* Otherwise NOTHING already drawn changes: every stored row keeps its
+     * own shift and the window stands still, so the new rows simply land
+     * shifted. (A full recompose here used to ride the settle drop — once
+     * per retune; without the drop it would run per row while the knob
+     * turns, 94 × 5 ms a second on the main thread.) */
   }
   v->pending_rows++;
   v->tex_stale = TRUE;
 }
 
-/* SKIM_WF_DEBUG: measure the label-vs-data latency of a retune. Consecutive
- * rows share 75 % of their samples (hop = N/4), so their noise correlates at
- * lag 0 and hides any shift; the ruler is the row FOUR back (disjoint
- * windows). For every row the log gets: the band move the LABELS imply over
- * those four rows, the move the DATA shows (cross-correlation, ±128 bins),
- * and the difference — printed only while labels are moving or the data
- * still disagrees, so a discrete 1 kHz step shows exactly how many rows
- * later the data follows the label. */
-#define DBG_BACK 4
-static void debug_shift(const guint8 *row, guint nbins, double center_hz, double bin_hz) {
-  static guint8 *ring[DBG_BACK + 1]; static double cent[DBG_BACK + 1];
-  static guint pn; static guint64 seq; static int quiet_left;
+/* SKIM_WF_DEBUG: measure how many rows the centre LABEL leads the DATA by.
+ * A retune episode opens on the first label change and keeps the last row
+ * BEFORE it as the reference. For every following row the probe correlates
+ * the row against the reference at the shift each candidate lag L implies
+ * (the label current L rows earlier minus the reference label, in bins) and
+ * reports the best L — the residual against the configured lag is what a
+ * tooth would be. It also tracks the plain flip: the first row that matches
+ * the reference better at the full label step than at zero shift, i.e. the
+ * row the data arrived on (the midpoint of the 4-row window transition). The
+ * episode closes once the label has stood still for LMAX + 4 rows or after
+ * 300 rows, with one summary line. Any step size works — the old ±128-bin
+ * cross-correlation clipped on every step that mattered (192…785 bins). A
+ * fixed station sits at bin (f − centre)/bin + N/2, so a centre step of +S
+ * bins moves it S bins DOWN: row[i] ≈ ref[i + S]. */
+#define DBG_LMAX  16
+#define DBG_RING  (DBG_LMAX + 1)
+static double dbg_corr(const guint8 *a, const guint8 *b, guint n, int lag) {
+  const int i0 = MAX(0, -lag), i1 = MIN((int)n, (int)n - lag);
+  if (i1 - i0 < 64) { return -2.0; }
+  double ma = 0, mb = 0;
+  for (int i = i0; i < i1; i++) { ma += a[i]; mb += b[i + lag]; }
+  const double cnt = (double)(i1 - i0);
+  ma /= cnt; mb /= cnt;
+  double sab = 0, saa = 0, sbb = 0;
+  for (int i = i0; i < i1; i++) {
+    const double da = (double)a[i] - ma, db = (double)b[i + lag] - mb;
+    sab += da * db; saa += da * da; sbb += db * db;
+  }
+  return (saa > 0 && sbb > 0) ? sab / sqrt(saa * sbb) : -2.0;
+}
+
+static void debug_lag(const guint8 *row, guint nbins, double center_hz, double bin_hz,
+                      guint cfg_lag) {
+  static guint8 *ref, *prev; static guint pn;
+  static double labels[DBG_RING]; static guint64 seq; static double prev_label;
+  static gboolean active; static guint64 ep_start, ep_last_change;
+  static double ref_label; static int flip;
   if (pn != nbins) {
-    for (int i = 0; i <= DBG_BACK; i++) { g_free(ring[i]); ring[i] = g_malloc(nbins); cent[i] = 0; }
-    pn = nbins; seq = 0;
+    g_free(ref); g_free(prev);
+    ref = g_malloc(nbins); prev = g_malloc(nbins);
+    pn = nbins; seq = 0; active = FALSE;
   }
-  const int cur = (int)(seq % (DBG_BACK + 1)), old = (int)((seq + 1) % (DBG_BACK + 1));
-  memcpy(ring[cur], row, nbins);
-  cent[cur] = center_hz;
-  seq++;
-  if (seq <= DBG_BACK || cent[old] <= 0) { return; }
-  const double label_hz = center_hz - cent[old];             /* over 4 rows  */
-  const int label_bins  = (int)lrint(label_hz / bin_hz);
-  const guint8 *prev = ring[old];
-  double mean_r = 0, mean_p = 0;
-  for (guint i = 0; i < nbins; i++) { mean_r += row[i]; mean_p += prev[i]; }
-  mean_r /= nbins; mean_p /= nbins;
-  double best = -1e300; int best_lag = 0;
-  for (int lag = -128; lag <= 128; lag++) {
-    double acc = 0;
-    for (int i = 128; i < (int)nbins - 128; i++) {
-      acc += ((double)row[i] - mean_r) * ((double)prev[i + lag] - mean_p);
+  labels[seq % DBG_RING] = center_hz;
+  const gboolean changed = seq > 0 && fabs(center_hz - prev_label) > 0.5;
+  if (!active && changed) {
+    active = TRUE; ep_start = ep_last_change = seq; ref_label = prev_label; flip = -1;
+    memcpy(ref, prev, nbins);
+  }
+  if (active) {
+    if (changed) { ep_last_change = seq; }
+    const int step = (int)lrint((center_hz - ref_label) / bin_hz);
+    int lags[DBG_LMAX + 1]; double corr[DBG_LMAX + 1];
+    int best = 0; double best_c = -3.0;
+    for (int L = 0; L <= DBG_LMAX; L++) {
+      const double lab = (seq >= ep_start + (guint64)L) ? labels[(seq - (guint64)L) % DBG_RING] : ref_label;
+      lags[L] = (int)lrint((lab - ref_label) / bin_hz);
+      corr[L] = -3.0;
+      for (int k = 0; k < L; k++) { if (lags[k] == lags[L]) { corr[L] = corr[k]; break; } }
+      if (corr[L] <= -3.0) { corr[L] = dbg_corr(row, ref, nbins, lags[L]); }
+      if (corr[L] > best_c) { best_c = corr[L]; best = L; }   /* ties → smallest L */
     }
-    if (acc > best) { best = acc; best_lag = lag; }
+    const double c0 = dbg_corr(row, ref, nbins, 0);
+    const double cS = step ? dbg_corr(row, ref, nbins, step) : c0;
+    if (flip < 0 && step != 0 && cS > c0) { flip = (int)(seq - ep_start); }
+    g_message("wf: row %" G_GUINT64_FORMAT " +%d: label step %+d bins, best lag L=%d (shift %+d, r %.2f), "
+              "cfg L=%u (shift %+d, r %.2f), r0 %.2f rS %.2f",
+              seq, (int)(seq - ep_start), step, best, lags[best], best_c,
+              cfg_lag, lags[MIN(cfg_lag, (guint)DBG_LMAX)], corr[MIN(cfg_lag, (guint)DBG_LMAX)], c0, cS);
+    if (seq - ep_last_change > DBG_LMAX + 4 || seq - ep_start > 300) {
+      g_message("wf: retune episode rows %" G_GUINT64_FORMAT "..%" G_GUINT64_FORMAT ": label step %+d bins, "
+                "data flipped %d rows after the first label change (cfg lag %u)",
+                ep_start, seq, step, flip, cfg_lag);
+      active = FALSE;
+    }
   }
-  const int data_bins = -best_lag;   /* station fixed → appears Δ bins lower  */
-  if (label_bins != 0 || data_bins != 0) { quiet_left = 6; }
-  if (quiet_left > 0) {
-    quiet_left--;
-    g_message("wf: row %" G_GUINT64_FORMAT " label %+d bins, data %+d bins, diff %+d (last 4 rows)",
-              seq, label_bins, data_bins, data_bins - label_bins);
-  }
+  prev_label = center_hz;
+  memcpy(prev, row, nbins);
+  seq++;
 }
 
 void skim_wf_view_push(SkimWfView *v, const guint8 *row, guint nbins,
                        double center_hz, double bin_hz) {
   static int dbg = -1;
   if (dbg < 0) { dbg = g_getenv("SKIM_WF_DEBUG") != NULL; }
-  if (dbg) { debug_shift(row, nbins, center_hz, bin_hz); }
-  skim_wf_guard_push(v->guard, row, nbins, center_hz, bin_hz);
+  if (dbg) { debug_lag(row, nbins, center_hz, bin_hz, skim_wf_delay_lag(v->delay)); }
+  const double placed = skim_wf_delay_push(v->delay, center_hz, bin_hz);
+  view_commit_row(v, row, nbins, placed, bin_hz);
 }
 
 void skim_wf_view_set_vfo(SkimWfView *v, double hz) {
@@ -597,7 +639,7 @@ static void skim_wf_view_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
 static void skim_wf_view_dispose(GObject *obj) {
   SkimWfView *v = SKIM_WF_VIEW(obj);
   g_clear_object(&v->tex);
-  g_clear_pointer(&v->guard, skim_wf_guard_free);
+  g_clear_pointer(&v->delay, skim_wf_delay_free);
   g_clear_pointer(&v->hist, skim_wf_history_free);
   g_clear_pointer(&v->pix, g_free);
   g_clear_pointer(&v->st, g_free);
@@ -612,10 +654,21 @@ static void skim_wf_view_class_init(SkimWfViewClass *klass) {
   gtk_widget_class_set_css_name(wc, "skimwaterfall");
 }
 
+/* SKIM_WF_LAG_ROWS=<n> overrides the label lag for a measurement session. */
+static guint label_lag_rows(void) {
+  const char *e = g_getenv("SKIM_WF_LAG_ROWS");
+  if (e && *e) {
+    char *end = NULL;
+    const long n = strtol(e, &end, 10);
+    if (end && *end == '\0' && n >= 0) { return MIN((guint)n, (guint)SKIM_WF_LABEL_LAG_MAX); }
+    g_warning("wf: SKIM_WF_LAG_ROWS=\"%s\" ignored (want 0..%d)", e, SKIM_WF_LABEL_LAG_MAX);
+  }
+  return SKIM_WF_LABEL_LAG;
+}
+
 static void skim_wf_view_init(SkimWfView *v) {
   v->hist        = skim_wf_history_new(SKIM_WF_HISTORY_ROWS);
-  v->guard       = skim_wf_guard_new(SKIM_WF_RETUNE_GUARD, SKIM_WF_RETUNE_SETTLE);
-  skim_wf_guard_set_commit_cb(v->guard, view_commit_row, v);
+  v->delay       = skim_wf_delay_new(label_lag_rows());
   v->span_hz     = DEF_SPAN_HZ;
   v->rows_per_px = SKIM_WF_ROWS_PER_PX;
   v->need_full   = TRUE;

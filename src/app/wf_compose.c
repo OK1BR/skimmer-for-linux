@@ -200,83 +200,41 @@ double skim_wf_history_floor_db(const SkimWfHistory *h) {
   return h->floor_init ? h->floor_db : -120.0;
 }
 
-/* -------- retune guard ------------------------------------------------------------ */
+/* -------- label delay line ------------------------------------------------------ */
 
-typedef struct {
-  guint8  *row;
-  guint    nbins;
-  double   center_hz, bin_hz;
-  gboolean suspect;
-} GuardSlot;
-
-struct _SkimWfGuard {
-  GuardSlot *fifo;                             /* oldest first               */
-  guint      depth, len, settle;
-  guint64    seq, suspect_until;               /* rows numbered from 1       */
-  double     last_center;
-  gboolean   have_center;
-  guint      dropped;
-  SkimWfGuardCommitCb cb;
-  gpointer            user;
+struct _SkimWfDelay {
+  double ring[SKIM_WF_LABEL_LAG_MAX + 1];      /* labels, newest at head     */
+  guint  lag, head, filled;
+  double bin_hz;
 };
 
-SkimWfGuard *skim_wf_guard_new(guint guard_rows, guint settle_rows) {
-  SkimWfGuard *g = g_new0(SkimWfGuard, 1);
-  g->depth  = MAX(guard_rows, 1u);
-  g->settle = MAX(settle_rows, g->depth);
-  g->fifo  = g_new0(GuardSlot, g->depth);
-  return g;
+SkimWfDelay *skim_wf_delay_new(guint lag_rows) {
+  SkimWfDelay *d = g_new0(SkimWfDelay, 1);
+  skim_wf_delay_set_lag(d, lag_rows);
+  return d;
 }
 
-void skim_wf_guard_free(SkimWfGuard *g) {
-  if (!g) { return; }
-  for (guint i = 0; i < g->depth; i++) { g_free(g->fifo[i].row); }
-  g_free(g->fifo);
-  g_free(g);
+void skim_wf_delay_free(SkimWfDelay *d) { g_free(d); }
+
+void skim_wf_delay_set_lag(SkimWfDelay *d, guint lag_rows) {
+  d->lag = MIN(lag_rows, (guint)SKIM_WF_LABEL_LAG_MAX);
 }
 
-void skim_wf_guard_set_commit_cb(SkimWfGuard *g, SkimWfGuardCommitCb cb, gpointer user) {
-  g->cb   = cb;
-  g->user = user;
-}
+guint skim_wf_delay_lag(const SkimWfDelay *d) { return d->lag; }
 
-guint skim_wf_guard_dropped(const SkimWfGuard *g) { return g->dropped; }
-
-void skim_wf_guard_push(SkimWfGuard *g, const guint8 *row, guint nbins,
-                        double center_hz, double bin_hz) {
-  g->seq++;
-  gboolean suspect = FALSE;
-  if (g->have_center && fabs(center_hz - g->last_center) > 0.5) {
-    /* Centre changed between the previous row and this one: the rows still
-     * waiting were taken while the label may already have been stale, and
-     * nothing that follows can be trusted until the label has stood still
-     * for `settle` rows — a polling server re-labels mid-turn. */
-    for (guint i = 0; i < g->len; i++) { g->fifo[i].suspect = TRUE; }
-    g->suspect_until = g->seq + g->settle - 1;
+double skim_wf_delay_push(SkimWfDelay *d, double center_hz, double bin_hz) {
+  const guint cap = G_N_ELEMENTS(d->ring);
+  if (d->filled == 0 || fabs(bin_hz - d->bin_hz) > 1e-9) {
+    d->head = d->filled = 0;                   /* new grid: restart here     */
+    d->bin_hz = bin_hz;
   }
-  g->have_center = TRUE;
-  g->last_center = center_hz;
-  if (g->seq <= g->suspect_until) { suspect = TRUE; }
-
-  if (g->len == g->depth) {                    /* commit or drop the oldest  */
-    GuardSlot *o = &g->fifo[0];
-    if (o->suspect) { g->dropped++; }
-    else if (g->cb)  { g->cb(o->row, o->nbins, o->center_hz, o->bin_hz, g->user); }
-    guint8 *spare = o->row;
-    memmove(&g->fifo[0], &g->fifo[1], (g->depth - 1) * sizeof(GuardSlot));
-    g->fifo[g->depth - 1].row = spare;
-    g->len--;
-  }
-  GuardSlot *s = &g->fifo[g->len++];
-  if (!s->row || s->nbins != nbins) {
-    g_free(s->row);
-    s->row = g_malloc(nbins);
-  }
-  memcpy(s->row, row, nbins);
-  s->nbins     = nbins;
-  s->center_hz = center_hz;
-  s->bin_hz    = bin_hz;
-  s->suspect   = suspect;
+  d->ring[d->head] = center_hz;
+  if (d->filled < cap) { d->filled++; }
+  /* The label `lag` rows back — or the oldest one held while the line fills. */
+  const guint  back = MIN(d->lag, d->filled - 1);
+  const double out  = d->ring[(d->head + cap - back) % cap];
+  d->head = (d->head + 1) % cap;
+  return out;
 }
 
 /* -------- mapping ---------------------------------------------------------------- */

@@ -273,15 +273,6 @@ static guint bright_near(const guint32 *pix, int w, int hgt, int x, int yc, int 
   return n;
 }
 
-/* Retune-guard capture: rows out, order (byte 0 = sequence), last centre. */
-typedef struct { guint n; double last_c; gboolean in_order; guint8 prev; } GuardGot;
-static void guard_commit(const guint8 *r, guint nb, double c, double b, gpointer u) {
-  (void)nb; (void)b;
-  GuardGot *gg = u;
-  if (gg->n && r[0] <= gg->prev) { gg->in_order = FALSE; }
-  gg->prev = r[0]; gg->n++; gg->last_c = c;
-}
-
 static void compose_section(void) {
   printf("-- composer\n");
   const guint  nbins  = 2048;                        /* the 48 k geometry    */
@@ -395,50 +386,57 @@ static void compose_section(void) {
   g_snprintf(what, sizeof(what), "…and a pre-retune column still shows it at y %d", ye);
   check(what, bright_rows(pix, w, hgt, w - 15, &yb0, &yb1) >= 1 && yb0 <= ye && yb1 >= ye);
 
-  /* Retune guard: the G rows waiting before a centre change and every row
-   * after it until the centre has stood still for SETTLE rows are dropped;
-   * the rest is committed in order with its own centre. */
+  /* Label delay line: every row goes out, none delayed, none dropped, each
+   * placed on the label that was current LAG rows earlier (the data lags
+   * the label by the DDC apply + IQ transport + half a window). The old
+   * retune guard dropped 16 of these 50 rows and paused the picture for
+   * 0.7 s after every retune — Richard: the waterfall must FLOW. */
   {
-    const guint G = 3, S = 10;
-    GuardGot got = { 0, 0, TRUE, 0 };
-    SkimWfGuard *gd = skim_wf_guard_new(G, S);
-    skim_wf_guard_set_commit_cb(gd, guard_commit, &got);
-    guint8 r1[4];
-    /* 20 rows at centre A, then 30 at centre B; row byte 0 = its sequence. */
+    const guint LAG = 3;
+    SkimWfDelay *d = skim_wf_delay_new(LAG);
+    /* 20 rows at centre A, then 30 at centre B: the placed label switches
+     * exactly LAG rows after the input label did, everything in order. */
+    guint nA = 0, nB = 0, first_b = 0; gboolean ordered = TRUE;
     for (guint i = 1; i <= 50; i++) {
-      r1[0] = (guint8)i; r1[1] = r1[2] = r1[3] = 0;
-      skim_wf_guard_push(gd, r1, 4, i <= 20 ? 1000.0 : 2000.0, 1.0);
+      const double out = skim_wf_delay_push(d, i <= 20 ? 1000.0 : 2000.0, 1.0);
+      if (out == 1000.0)      { nA++; if (nB) { ordered = FALSE; } }
+      else if (out == 2000.0) { nB++; if (!first_b) { first_b = i; } }
+      else                    { ordered = FALSE; }
     }
-    g_snprintf(what, sizeof(what), "guard: 50 rows in → %u committed, %u dropped (3 before + 10 settle), 3 waiting",
-               got.n, skim_wf_guard_dropped(gd));
-    check(what, got.n == 50 - G - S - G && skim_wf_guard_dropped(gd) == G + S);
-    check("guard: committed rows stay in order", got.in_order);
-    check("guard: the last committed row carries the NEW centre", got.last_c == 2000.0);
-    /* A label that keeps changing (polling server re-labels mid-turn) never
-     * settles: NOTHING from the turn gets out, the first rows after it do. */
-    GuardGot turn = { 0, 0, TRUE, 0 };
-    SkimWfGuard *gt = skim_wf_guard_new(G, S);
-    skim_wf_guard_set_commit_cb(gt, guard_commit, &turn);
+    g_snprintf(what, sizeof(what), "delay: a discrete step — 50 rows in, 50 out (%u on A, %u on B), B from row %u",
+               nA, nB, first_b);
+    check(what, nA == 20 + LAG && nB == 30 - LAG && first_b == 21 + LAG && ordered);
+    /* A turning knob (a new centre every 6 rows): row i is placed on the
+     * label of row i − LAG, exactly, and nothing is dropped. */
+    skim_wf_delay_free(d);
+    d = skim_wf_delay_new(LAG);
+    double in[81]; gboolean exact = TRUE; guint n = 0;
     for (guint i = 1; i <= 80; i++) {
-      r1[0] = (guint8)i;
-      /* rows 21..50: a new centre every 6 rows (< S) — the knob turning */
-      const double c = i <= 20 ? 1000.0 : i <= 50 ? 1000.0 + 100.0 * ((i - 21) / 6 + 1) : 1600.0;
-      skim_wf_guard_push(gt, r1, 4, c, 1.0);
+      in[i] = i <= 20 ? 1000.0 : i <= 50 ? 1000.0 + 100.0 * ((i - 21) / 6 + 1) : 1600.0;
+      const double out = skim_wf_delay_push(d, in[i], 1.0);
+      if (out != in[i > LAG ? i - LAG : 1]) { exact = FALSE; }
+      n++;
     }
-    /* out: rows 1..17 (3 dropped before the first change), then 61..77 */
-    g_snprintf(what, sizeof(what), "guard: a turning knob commits nothing mid-turn (%u out, %u dropped)",
-               turn.n, skim_wf_guard_dropped(gt));
-    check(what, turn.n == 17 + 17 && skim_wf_guard_dropped(gt) == 80 - 34 - G && turn.in_order &&
-          turn.last_c == 1600.0);
-    /* No retune → nothing dropped, everything (bar the waiting tail) out. */
-    GuardGot quiet = { 0, 0, TRUE, 0 };
-    SkimWfGuard *gq = skim_wf_guard_new(G, S);
-    skim_wf_guard_set_commit_cb(gq, guard_commit, &quiet);
-    for (guint i = 1; i <= 30; i++) { r1[0] = (guint8)i; skim_wf_guard_push(gq, r1, 4, 1000.0, 1.0); }
-    check("guard: steady centre drops nothing", quiet.n == 30 - G && skim_wf_guard_dropped(gq) == 0);
-    skim_wf_guard_free(gd);
-    skim_wf_guard_free(gt);
-    skim_wf_guard_free(gq);
+    check("delay: a turning knob — every row out, each on the label LAG rows back", exact && n == 80);
+    /* A steady centre is a passthrough; lag 0 is the identity. */
+    gboolean steady = TRUE;
+    for (guint i = 0; i < 30; i++) { if (skim_wf_delay_push(d, 1600.0, 1.0) != 1600.0) { steady = FALSE; } }
+    check("delay: a steady centre passes through unchanged", steady);
+    skim_wf_delay_set_lag(d, 0);
+    check("delay: lag 0 is the identity",
+          skim_wf_delay_push(d, 1700.0, 1.0) == 1700.0 && skim_wf_delay_push(d, 1800.0, 1.0) == 1800.0 &&
+          skim_wf_delay_lag(d) == 0);
+    /* A rate change (new bin width) restarts on the new label at once —
+     * no stale centre from the old grid — and a fresh line rides its own
+     * label while it fills. */
+    skim_wf_delay_set_lag(d, LAG);
+    check("delay: a rate change restarts on the new label",
+          skim_wf_delay_push(d, 5000.0, 2.0) == 5000.0 && skim_wf_delay_push(d, 5100.0, 2.0) == 5000.0 &&
+          skim_wf_delay_push(d, 5200.0, 2.0) == 5000.0 && skim_wf_delay_push(d, 5300.0, 2.0) == 5000.0 &&
+          skim_wf_delay_push(d, 5400.0, 2.0) == 5100.0);
+    check("delay: the lag is capped at SKIM_WF_LABEL_LAG_MAX",
+          (skim_wf_delay_set_lag(d, 1000), skim_wf_delay_lag(d) == SKIM_WF_LABEL_LAG_MAX));
+    skim_wf_delay_free(d);
   }
 
   /* Cost of the worst case (informative, not a check): the whole 192 k band
