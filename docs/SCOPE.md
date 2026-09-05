@@ -664,8 +664,14 @@ where relevant, a live check against a running `sdr-for-linux`.
   worst drain 0.2 ms, no stall. Gate `skimmer-spectrum-test` 39 → 51 checks
   (composer: orientation, round-trip, zoomed-in rows centred on the tone,
   zoomed-out max-pooling, time direction, beyond-history and out-of-band
-  floor, history reset on a centre change). **Next: the callsign column +
-  click-to-tune, then Richard's live look decides bin/hop/span/palette.**
+  floor, history reset on a centre change). **Palette picker (Richard,
+  2026-09-05, at his first live look):** Preferences → Display → Colour
+  scheme lists the same six schemes as sdr-for-linux (Classic, Mono white,
+  Mono green, Mono amber, Inferno, Turbo), applies live — the whole history
+  recolours at once — and persists as `[ui] palette` (an index, like the
+  SDR's `[display] palette`); default Classic, the SDR's default too.
+  **Next: the callsign column + click-to-tune; the live look decides
+  bin/hop/span.**
 
 ## Safety / etiquette
 

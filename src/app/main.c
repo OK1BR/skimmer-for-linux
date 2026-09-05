@@ -22,6 +22,7 @@
 #include "pane_log.h"
 #include "spot_out.h"
 #include "pipeline.h"
+#include "wf_compose.h"
 #include "wf_view.h"
 
 #ifndef SKIMMER_VERSION
@@ -135,6 +136,8 @@ typedef struct {
   GtkWidget      *top_stack;     /* "list" | "waterfall"                      */
   GtkWidget      *list_btn, *wf_btn;
   SkimWfView     *wf;            /* M8 waterfall view                         */
+  int             palette;       /* waterfall colour scheme (persisted [ui]) — the
+                                  * same table sdr-for-linux offers            */
   GThread        *replay_thread; /* SKIM_IQ_FILE: offline feeder (dev/demo)   */
   volatile gint   replay_run;
   char           *replay_path;
@@ -920,6 +923,19 @@ static int settings_load_decode_font(void) {
   return CLAMP(v, 8, 32);
 }
 
+static int settings_load_palette(void) {
+  char *path = settings_file();
+  GKeyFile *kf = g_key_file_new();
+  int v = 0;
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL) &&
+      g_key_file_has_key(kf, "ui", "palette", NULL)) {
+    v = g_key_file_get_integer(kf, "ui", "palette", NULL);
+  }
+  g_key_file_free(kf);
+  g_free(path);
+  return (v < 0 || v >= skim_wf_palette_count()) ? 0 : v;
+}
+
 static guint settings_load_view(void) {
   char *path = settings_file();
   GKeyFile *kf = g_key_file_new();
@@ -1004,6 +1020,7 @@ static void settings_save(const App *app) {
   g_key_file_set_string(kf, "rbn", "call", app->rbn_call);
   g_key_file_set_integer(kf, "rbn", "port", app->rbn_port);
   g_key_file_set_integer(kf, "ui", "decode_font_pt", app->decode_font);
+  g_key_file_set_integer(kf, "ui", "palette", app->palette);
   g_key_file_set_string(kf, "ui", "view",
                         app->view == VIEW_WF ? "waterfall"
                         : app->view == VIEW_LIST ? "list" : "none");
@@ -1330,6 +1347,16 @@ static void speed_col_retitle(App *app) {
   }
 }
 
+static void on_pref_palette(AdwComboRow *r, GParamSpec *ps, gpointer user) {
+  (void)ps;
+  App *app = user;
+  const int sel = (int)adw_combo_row_get_selected(r);
+  if (sel < 0 || sel >= skim_wf_palette_count() || sel == app->palette) { return; }
+  app->palette = sel;
+  skim_wf_view_set_palette(app->wf, sel);      /* live, whole history        */
+  settings_save(app);
+}
+
 static void prefs_closed(AdwDialog *dlg, gpointer user) {
   App *app = user;
   GtkWidget *row  = g_object_get_data(G_OBJECT(dlg), "host-row");
@@ -1508,6 +1535,22 @@ static void prefs_open(GtkButton *btn, gpointer user) {
                                 "Decode pane font size (pt)");
   adw_spin_row_set_value(ADW_SPIN_ROW(frow), app->decode_font);
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(ugrp), frow);
+  /* Colour scheme — the same palette table as sdr-for-linux's waterfall, so
+   * the two apps can be set alike; applies live, the whole history
+   * recolours at once (Richard, 2026-09-05). */
+  const int npal = skim_wf_palette_count();
+  const char **pnames = g_new0(const char *, npal + 1);
+  for (int i = 0; i < npal; i++) { pnames[i] = skim_wf_palette_name(i); }
+  GtkStringList *pl = gtk_string_list_new(pnames);
+  g_free(pnames);
+  GtkWidget *prow = adw_combo_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(prow), "Colour scheme");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(prow), "Waterfall palette");
+  adw_combo_row_set_model(ADW_COMBO_ROW(prow), G_LIST_MODEL(pl));
+  g_object_unref(pl);
+  adw_combo_row_set_selected(ADW_COMBO_ROW(prow), (guint)app->palette);
+  g_signal_connect(prow, "notify::selected", G_CALLBACK(on_pref_palette), app);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(ugrp), prow);
   adw_preferences_page_add(ADW_PREFERENCES_PAGE(page),
                            ADW_PREFERENCES_GROUP(ugrp));
 
@@ -1866,6 +1909,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   app->spot_round   = settings_load_spot_round();
   app->decode_font  = settings_load_decode_font();
   app->view         = settings_load_view();
+  app->palette      = settings_load_palette();
   settings_load_rbn(app);
   rbn_apply(app);                /* the telnet server is up before the radio */
 
@@ -2016,6 +2060,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   app->top_stack = gtk_stack_new();
   gtk_stack_add_named(GTK_STACK(app->top_stack), list_scroll, "list");
   app->wf = SKIM_WF_VIEW(skim_wf_view_new());
+  skim_wf_view_set_palette(app->wf, app->palette);
   gtk_stack_add_named(GTK_STACK(app->top_stack), GTK_WIDGET(app->wf), "waterfall");
   gtk_widget_set_vexpand(app->top_stack, TRUE);
   gtk_box_append(GTK_BOX(box), app->top_stack);

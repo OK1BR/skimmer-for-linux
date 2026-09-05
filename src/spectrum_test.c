@@ -13,6 +13,7 @@
 #include <glib.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "app/wf_compose.h"
@@ -360,6 +361,8 @@ static void compose_section(void) {
   /* Optional eyeball: SKIM_WF_PPM=<file> writes a synthetic scene. */
   const char *ppm = g_getenv("SKIM_WF_PPM");
   if (ppm) {
+    const char *pe = g_getenv("SKIM_WF_PPM_PALETTE");
+    if (pe) { skim_wf_set_palette(atoi(pe)); }
     SkimWfHistory *d = skim_wf_history_new(SKIM_WF_HISTORY_ROWS);
     const guint nb = 8192; const double c = 14030000.0;
     guint8 *r8 = g_new(guint8, nb);

@@ -29,6 +29,10 @@ void skim_wf_view_push(SkimWfView *v, const guint8 *row, guint nbins,
 /* The radio's tuned frequency (marker + follow). */
 void skim_wf_view_set_vfo(SkimWfView *v, double hz);
 
+/* Colour scheme: index into wf_compose's palette table (sdr-for-linux's
+ * set); recolours the whole picture at once. */
+void skim_wf_view_set_palette(SkimWfView *v, int idx);
+
 /* Visible window: centre and span in Hz (clamped to the band). */
 void   skim_wf_view_set_span(SkimWfView *v, double span_hz);
 double skim_wf_view_span(const SkimWfView *v);

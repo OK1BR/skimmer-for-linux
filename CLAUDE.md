@@ -730,7 +730,9 @@ persisted (old `station_list` migrates); spectrum computed only while shown.
 **`SKIM_IQ_FILE=<cf32>` replays a recording into the UI** (offline pipeline,
 real-time pace, looping) — the way to look at the waterfall without a
 radio. Lag telemetry under the replay: 94 rows/s, worst drain 0.2 ms.
-Gate 51 checks. Next: callsign column + click, then the live look.
+Gate 51 checks. **Palette picker** (Richard's first live-look request):
+Preferences → Display → Colour scheme, the SDR's six schemes, live apply,
+`[ui] palette`. Next: callsign column + click.
 
 ## Layout
 

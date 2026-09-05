@@ -111,6 +111,13 @@ void skim_wf_view_set_span(SkimWfView *v, double span_hz) {
 
 double skim_wf_view_span(const SkimWfView *v) { return v->span_hz; }
 
+void skim_wf_view_set_palette(SkimWfView *v, int idx) {
+  skim_wf_set_palette(idx);                    /* process-wide LUT           */
+  v->need_full = TRUE;                         /* recolour the whole history */
+  v->tex_stale = TRUE;
+  gtk_widget_queue_draw(GTK_WIDGET(v));
+}
+
 /* --- wheel: pan / zoom ------------------------------------------------------------ */
 
 static gboolean on_scroll(GtkEventControllerScroll *ctl, double dx, double dy,
