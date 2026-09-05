@@ -962,7 +962,23 @@ where relevant, a live check against a running `sdr-for-linux`.
   row, straddling ones included, puts it on its absolute frequency
   through its own label, and the strongest byte > 16 bins away is 66 dB
   down — the chopped-edge version read 28). Skimmer relaunched 20:54 on
-  it (log live18); the SDR needs nothing. Not built, on purpose: a polling-server fallback (settle
+  it (log live18). **Richard: "rozplyty jsou tam stále" (the bars remain).**
+  Measured, not guessed: the probe's flip metric — with exact stamps the
+  data should flip in the SAME row the label does — read 1–2 rows late on
+  36 of 48 retunes (mode 1): the stamp boundary sat 10–20 ms EARLY, with
+  a spread. Cause in sdr-for-linux: the TCI push runs on the listener
+  thread AFTER the panadapter FFT, so packets queue in the socket while it
+  works and "frames ringed so far" at the kick trails the capture clock by
+  a varying backlog — no constant can fix it. Fixed there (98c57de): a
+  CAPTURE CLOCK from the pushes (least-delayed push of the last two
+  seconds = no backlog) places the boundary by TIME; gate: block #0 at
+  offset ~1780, ±25 frames (0.5 ms) over three runs, streaming through the
+  retune from a paced pusher thread. Skimmer side: an explicit n/16 guard
+  band around the boundary was built, measured (a label n/32 frames late
+  paints no ghost even WITHOUT it — the fresh Hann tapers to zero at the
+  boundary, 58 dB down) and removed; the late-label check stays (gate
+  spectrum 100 → 108 with it). The running skimmer build behaves
+  identically; only the SDR needs a restart for the clock. Not built, on purpose: a polling-server fallback (settle
   when labels arrive in ≥ 400 ms steps) — one click followed by stillness is
   indistinguishable from a polling label, so any cadence detector would bring
   the pause back on his most common gesture; no such server is measured.

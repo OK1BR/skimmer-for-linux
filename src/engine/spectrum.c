@@ -124,6 +124,11 @@ static void emit_row(SkimSpectrum *s) {
       if (i < s->ntr) { lo = hi; hz = s->tr[i].hz; }
     }
   }
+  /* No guard band around the boundary: the stamp is exact to ~0.5 ms and
+   * the fresh Hann over the kept segment tapers to zero at the boundary, so
+   * frames mislabelled by a small stamp error carry next to no weight —
+   * a label n/32 frames late paints no ghost (58 dB down, gate-measured
+   * with an explicit n/16 guard removed; the guard only cost resolution). */
   const gboolean cut = seg_lo != 0 || seg_hi != n;
 
   /* Oldest frame first: the ring's head is the next write slot, i.e. the

@@ -846,7 +846,14 @@ largest single-centre segment only (fresh Hann, floor renormalised),
 labelled with that segment's centre — a step shows a 2-column widening, a
 sweep ~4× wider lines while turning; gate spectrum 92 → 100 (tone stays on
 its absolute frequency across a +5 kHz step, ghost 66 dB down). Skimmer
-relaunched on it (live18) — his look pending. ⚠ 20:44 a peek script
+relaunched on it (live18). His look: bars STILL there — measured cause: the
+stamp boundary sat 10–20 ms early with a spread (probe flips 1–2 rows late)
+because the SDR's TCI push trails the capture clock by the listener's
+socket backlog; fixed in sdr-for-linux 98c57de with a capture clock from the
+pushes (boundary by TIME; gate ±0.5 ms). An n/16 guard band in the skimmer
+cut was built, measured to add nothing (the segment Hann's taper already
+leaves a late label no weight: 58 dB down) and removed; gate 100 → 108.
+Only the SDR needs a restart. ⚠ 20:44 a peek script
 imported the TCI client (main ran at import) and tuned his radio to 4 Hz for
 ~25 s; restored, main-guarded. Not built by design: a polling-server settle
 fallback (a click + stillness looks the same).

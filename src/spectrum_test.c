@@ -245,7 +245,38 @@ static void rate_section(double rate) {
     check("straddle cut: every row across a +5 kHz step puts the tone on its absolute frequency", placed);
     g_snprintf(what, sizeof(what), "straddle cut: no ghost at the other position (worst %.0f dB down ≥ 30)", worst);
     check(what, no_ghost);
-    g_free(pa); g_free(pb);
+    /* the same step with the LABEL n/32 frames late against the data (the
+     * stamp's residual error): the fresh Hann's taper at the boundary
+     * leaves the mislabelled frames next to no weight — no ghost either
+     * (58 dB down; an explicit n/16 guard band was built, measured to add
+     * nothing here, and removed). */
+    skim_spectrum_reset(s);
+    const guint late = n / 32;
+    float *pa2 = synth(rate, n + late, &ta, 1, 1e-4);   /* data: old baseband */
+    float *pb2 = synth(rate, 8 * hop, &tb, 1, 1e-4);    /* data: new baseband */
+    skim_spectrum_push(s, pa2, n, cA);
+    /* data steps at frame n; the label says cA for `late` more frames */
+    skim_spectrum_push(s, pb2, late, cA);
+    gboolean placed2 = TRUE, no_ghost2 = TRUE; double worst2 = 0;
+    for (guint k = 0; k < 8; k++) {
+      const guint from = late + k * hop, to = MIN(from + hop, 8 * hop);
+      if (to <= from) { break; }
+      skim_spectrum_push(s, pb2 + 2 * from, to - from, cB);
+      const guint pk = argmax(cap.last, n);
+      const double abs_hz = cap.row_hz + idx_hz(pk, n, bin);
+      if (fabs(abs_hz - f_abs) > 2.5 * bin) { placed2 = FALSE; }
+      guint8 ghost = 0;
+      for (guint i = 0; i < n; i++) {
+        if ((i > pk ? i - pk : pk - i) > 16 && cap.last[i] > ghost) { ghost = cap.last[i]; }
+      }
+      const double down = (double)cap.last[pk] - (double)ghost;
+      if (down < worst2 || k == 0) { worst2 = down; }
+      if (down < 30.0) { no_ghost2 = FALSE; }
+    }
+    check("late label: a label n/32 frames late still puts the tone on its absolute frequency", placed2);
+    g_snprintf(what, sizeof(what), "late label: …and paints no ghost — the Hann taper (worst %.0f dB down ≥ 30)", worst2);
+    check(what, no_ghost2);
+    g_free(pa); g_free(pb); g_free(pa2); g_free(pb2);
   }
 
   g_free(cap.last);
