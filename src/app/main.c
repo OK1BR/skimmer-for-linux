@@ -16,11 +16,13 @@
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
 #include <adwaita.h>
+#include <string.h>
 
 #include "callsign.h"
 #include "pane_log.h"
 #include "spot_out.h"
 #include "pipeline.h"
+#include "wf_view.h"
 
 #ifndef SKIMMER_VERSION
 #define SKIMMER_VERSION "0.0.0"
@@ -72,6 +74,12 @@ static SkimRow *skim_row_new(const SkimStation *st) {
 
 /* --- app state -------------------------------------------------------------------- */
 
+enum { VIEW_NONE = 0, VIEW_LIST = 1, VIEW_WF = 2 };
+
+/* Spectrum rows are display-only: bound what a stalled UI can pile up (a
+ * 16 KB row 94× a second is 1.5 MB/s of pending memory otherwise). */
+#define SPEC_PENDING_MAX 48
+
 typedef struct {
   SkimPipeline   *pipeline;      /* running pipeline (owned by main thread)   */
   SkimPipeline   *starting;      /* pipeline mid-handshake on a worker thread */
@@ -120,8 +128,17 @@ typedef struct {
   GtkWidget      *tuned_scroll;  /* the decode pane's scroller                */
   GtkWidget      *list_scroll;   /* the station list's scroller               */
   GtkWidget      *list_sep;      /* separator between list and decode pane    */
-  gboolean        list_visible;  /* station list shown (persisted); the CW
-                                  * decode pane is ALWAYS visible             */
+  guint           view;          /* top area: VIEW_NONE / VIEW_LIST / VIEW_WF
+                                  * (persisted [ui] view); the decode pane is
+                                  * ALWAYS visible                            */
+  gboolean        view_syncing;  /* toggles set by code, not by the user      */
+  GtkWidget      *top_stack;     /* "list" | "waterfall"                      */
+  GtkWidget      *list_btn, *wf_btn;
+  SkimWfView     *wf;            /* M8 waterfall view                         */
+  GThread        *replay_thread; /* SKIM_IQ_FILE: offline feeder (dev/demo)   */
+  volatile gint   replay_run;
+  char           *replay_path;
+  double          replay_rate, replay_center;
   AdwWindowTitle *title;
   GtkLabel       *status;
   GtkWindow      *window;
@@ -143,6 +160,10 @@ typedef struct {
   guint           ctr_ev, ctr_append, ctr_retag, ctr_reload;
   gint64          ctr_drain_us;  /* worst event-drain this window             */
 } App;
+
+static SkimPipeline *pipeline_create(App *app);
+static void replay_stop(App *app);
+static void replay_start(App *app);
 
 /* The bottom pane's header: the station heard on the tuned frequency (the
  * frequency itself lives in the footer). */
@@ -403,7 +424,8 @@ static void tuned_pane_reload(App *app) {
  * collapses a batch to the LAST report per station, and lands a batch's
  * pane text in one append. */
 
-typedef enum { EV_STATION, EV_GONE, EV_TEXT, EV_OVER, EV_VFO, EV_STATE } EvKind;
+typedef enum { EV_STATION, EV_GONE, EV_TEXT, EV_OVER, EV_VFO, EV_STATE,
+               EV_SPECTRUM } EvKind;
 
 typedef struct {
   EvKind      kind;
@@ -414,11 +436,15 @@ typedef struct {
   guint       op_kind;           /* EV_OVER: SkimPaneOpKind                   */
   guint       op_erase;          /* EV_OVER: OPEN's draft take-back           */
   guint       op_final;          /* EV_OVER: reader-final prefix bytes        */
+  guint8     *blob;              /* EV_SPECTRUM: nbins bytes; hz = centre     */
+  guint       nbins;
+  double      bin;               /* EV_SPECTRUM: bin width Hz                 */
 } Ev;
 
 static void ev_free(gpointer data) {
   Ev *ev = data;
   g_free(ev->str);
+  g_free(ev->blob);
   g_free(ev);
 }
 
@@ -572,6 +598,7 @@ static void apply_over(App *app, double freq_hz, SkimPaneOpKind kind,
 static void apply_vfo(App *app, double vfo_hz) {
   if (vfo_hz != app->vfo_hz) {
     app->vfo_hz = vfo_hz;
+    if (app->wf) { skim_wf_view_set_vfo(app->wf, vfo_hz); }
     /* The sticky resolver keeps the fixed station across small retunes
      * (our own click-tune rounds on the radio's step). But when the new
      * frequency clearly points at a DIFFERENT known station — a spot
@@ -655,10 +682,17 @@ static gboolean evq_drain(gpointer data) {
     }
   }
   GString *pane = g_string_new(NULL);
+  gboolean wf_dirty = FALSE;
   for (guint i = 0; i < batch->len; i++) {
     Ev *ev = g_ptr_array_index(batch, i);
-    if (ev->kind != EV_TEXT) { pane_flush(app, pane); }
+    if (ev->kind != EV_TEXT && ev->kind != EV_SPECTRUM) { pane_flush(app, pane); }
     switch (ev->kind) {
+    case EV_SPECTRUM:
+      if (app->wf) {
+        skim_wf_view_push(app->wf, ev->blob, ev->nbins, ev->hz, ev->bin);
+        wf_dirty = TRUE;                       /* ONE queue_draw per drain   */
+      }
+      break;
     case EV_STATION:
       if (GPOINTER_TO_UINT(g_hash_table_lookup(last, ev->st.call)) == i + 1) {
         apply_station(app, &ev->st);
@@ -685,6 +719,7 @@ static gboolean evq_drain(gpointer data) {
   pane_flush(app, pane);
   g_string_free(pane, TRUE);
   g_hash_table_unref(last);
+  if (wf_dirty) { gtk_widget_queue_draw(GTK_WIDGET(app->wf)); }
   if (app->resolve_pending) {
     /* One resolver pass over the FINAL table state covers every station/gone
      * event of the batch — running it per event walked the table once per
@@ -702,6 +737,14 @@ static gboolean evq_drain(gpointer data) {
 /* Engine-thread side: append + schedule the drain unless one is pending. */
 static void ev_post(App *app, Ev *ev) {
   g_mutex_lock(&app->evq_lock);
+  if (ev->kind == EV_SPECTRUM) {
+    guint n = 0, first = G_MAXUINT;
+    for (guint i = 0; i < app->evq->len; i++) {
+      const Ev *e = g_ptr_array_index(app->evq, i);
+      if (e->kind == EV_SPECTRUM) { n++; if (first == G_MAXUINT) { first = i; } }
+    }
+    if (n >= SPEC_PENDING_MAX) { g_ptr_array_remove_index(app->evq, first); }
+  }
   g_ptr_array_add(app->evq, ev);
   const gboolean need = !app->evq_scheduled;
   app->evq_scheduled = TRUE;
@@ -744,6 +787,16 @@ static void pipe_vfo_cb(double vfo_hz, gpointer user) {
   Ev *ev = g_new0(Ev, 1);
   ev->kind = EV_VFO;
   ev->hz   = vfo_hz;
+  ev_post(user, ev);
+}
+static void pipe_spectrum_cb(const guint8 *row, guint nbins, double center_hz,
+                             double bin_hz, gpointer user) {
+  Ev *ev = g_new0(Ev, 1);
+  ev->kind  = EV_SPECTRUM;
+  ev->blob  = g_memdup2(row, nbins);
+  ev->nbins = nbins;
+  ev->hz    = center_hz;
+  ev->bin   = bin_hz;
   ev_post(user, ev);
 }
 static void pipe_gone_cb(const SkimStation *st, gpointer user) {
@@ -867,13 +920,21 @@ static int settings_load_decode_font(void) {
   return CLAMP(v, 8, 32);
 }
 
-static gboolean settings_load_list_visible(void) {
+static guint settings_load_view(void) {
   char *path = settings_file();
   GKeyFile *kf = g_key_file_new();
-  gboolean v = TRUE;
-  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL) &&
-      g_key_file_has_key(kf, "ui", "station_list", NULL)) {
-    v = g_key_file_get_boolean(kf, "ui", "station_list", NULL);
+  guint v = VIEW_LIST;
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
+    char *s = g_key_file_get_string(kf, "ui", "view", NULL);
+    if (s) {
+      v = g_strcmp0(s, "waterfall") == 0 ? VIEW_WF
+        : g_strcmp0(s, "none") == 0      ? VIEW_NONE : VIEW_LIST;
+      g_free(s);
+    } else if (g_key_file_has_key(kf, "ui", "station_list", NULL)) {
+      /* pre-M8 settings: the list toggle alone */
+      v = g_key_file_get_boolean(kf, "ui", "station_list", NULL) ? VIEW_LIST
+                                                                  : VIEW_NONE;
+    }
   }
   g_key_file_free(kf);
   g_free(path);
@@ -943,7 +1004,10 @@ static void settings_save(const App *app) {
   g_key_file_set_string(kf, "rbn", "call", app->rbn_call);
   g_key_file_set_integer(kf, "rbn", "port", app->rbn_port);
   g_key_file_set_integer(kf, "ui", "decode_font_pt", app->decode_font);
-  g_key_file_set_boolean(kf, "ui", "station_list", app->list_visible);
+  g_key_file_set_string(kf, "ui", "view",
+                        app->view == VIEW_WF ? "waterfall"
+                        : app->view == VIEW_LIST ? "list" : "none");
+  g_key_file_remove_key(kf, "ui", "station_list", NULL);   /* pre-M8 key   */
   g_key_file_remove_group(kf, "reader", NULL);   /* the neural reader is gone
                                                   * (Richard, 2026-07-19)    */
   GError *err = NULL;
@@ -976,16 +1040,37 @@ static void rbn_apply(App *app) {
 /* Station list show/hide (the header-bar toggle next to the primary menu).
  * The CW decode pane stays put and takes over the space when the list
  * hides. */
-static void on_list_toggled(GtkToggleButton *btn, gpointer user) {
+/* The top area shows the station list, the waterfall, or nothing (pane
+ * only). The engine computes spectrum rows ONLY while the waterfall shows. */
+static void view_apply(App *app) {
+  const gboolean top = app->view != VIEW_NONE;
+  gtk_widget_set_visible(app->top_stack, top);
+  gtk_widget_set_visible(app->list_sep, top);
+  gtk_widget_set_vexpand(app->tuned_scroll, !top);
+  if (top) {
+    gtk_stack_set_visible_child_name(GTK_STACK(app->top_stack),
+                                     app->view == VIEW_WF ? "waterfall" : "list");
+  }
+  if (app->pipeline) {
+    skim_pipeline_set_spectrum_enabled(app->pipeline, app->view == VIEW_WF);
+  }
+  app->view_syncing = TRUE;
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->list_btn), app->view == VIEW_LIST);
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->wf_btn), app->view == VIEW_WF);
+  app->view_syncing = FALSE;
+}
+
+static void on_view_toggled(GtkToggleButton *btn, gpointer user) {
   App *app = user;
-  gboolean vis = gtk_toggle_button_get_active(btn);
-  gtk_widget_set_visible(app->list_scroll, vis);
-  gtk_widget_set_visible(app->list_sep, vis);
-  gtk_widget_set_vexpand(app->tuned_scroll, !vis);
-  if (vis != app->list_visible) {
-    app->list_visible = vis;
+  if (app->view_syncing) { return; }
+  const guint mine = (GtkWidget *)btn == app->wf_btn ? VIEW_WF : VIEW_LIST;
+  const guint want = gtk_toggle_button_get_active(btn) ? mine
+                     : (app->view == mine ? VIEW_NONE : app->view);
+  if (want != app->view) {
+    app->view = want;
     settings_save(app);
   }
+  view_apply(app);
 }
 
 /* The decode pane's font rides a CSS provider — reloading the rule restyles
@@ -1051,6 +1136,8 @@ static void start_pipeline_done(GObject *src, GAsyncResult *res, gpointer user) 
   skim_pipeline_set_spot_cq_only(app->pipeline, app->cq_only);
   skim_pipeline_set_spot_round_hz(app->pipeline, app->spot_round);
   app->vfo_hz   = skim_pipeline_vfo_hz(app->pipeline);
+  if (app->wf) { skim_wf_view_set_vfo(app->wf, app->vfo_hz); }
+  skim_pipeline_set_spectrum_enabled(app->pipeline, app->view == VIEW_WF);
   tuned_label_update(app, NULL);
 }
 
@@ -1077,6 +1164,19 @@ static void probe_done(GObject *src, GAsyncResult *res, gpointer user) {
   g_object_unref(conn);
 
   /* The TCI port answers — bring the pipeline up off the main thread. */
+  app->starting = pipeline_create(app);
+  adw_window_title_set_subtitle(app->title, "connecting…");
+  GTask *t = g_task_new(NULL, NULL, start_pipeline_done, app);
+  g_task_set_task_data(t, app->starting, NULL);
+  g_task_run_in_thread(t, start_pipeline_thread);
+  g_object_unref(t);
+}
+
+/* A pipeline wired to this App: MASTER.SCP if present, the per-day decode
+ * log, the telnet feed, and every UI callback (all of them just ev_post —
+ * whichever thread the engine runs on). Shared by the live path (probe_done)
+ * and the offline replay (SKIM_IQ_FILE). */
+static SkimPipeline *pipeline_create(App *app) {
   char *dict = g_build_filename(g_get_user_config_dir(), "skimmer-for-linux",
                                 "master.scp", NULL);
   /* Raw decodes go to a per-day log for decoder QA (M3 off-air A/B). */
@@ -1099,20 +1199,109 @@ static void probe_done(GObject *src, GAsyncResult *res, gpointer user) {
     .decode_log_path = dlog,
     .rbn = app->rbn,                           /* NULL when the feed is off  */
   };
-  app->starting = skim_pipeline_new(&cfg);
+  SkimPipeline *p = skim_pipeline_new(&cfg);
   g_free(dict);
   g_free(dlog);
-  skim_pipeline_set_station_cb(app->starting, pipe_station_cb, app);
-  skim_pipeline_set_station_gone_cb(app->starting, pipe_gone_cb, app);
-  skim_pipeline_set_text_cb(app->starting, pipe_text_cb, app);
-  skim_pipeline_set_over_cb(app->starting, pipe_over_cb, app);
-  skim_pipeline_set_state_cb(app->starting, pipe_state_cb, app);
-  skim_pipeline_set_vfo_cb(app->starting, pipe_vfo_cb, app);
-  adw_window_title_set_subtitle(app->title, "connecting…");
-  GTask *t = g_task_new(NULL, NULL, start_pipeline_done, app);
-  g_task_set_task_data(t, app->starting, NULL);
-  g_task_run_in_thread(t, start_pipeline_thread);
-  g_object_unref(t);
+  skim_pipeline_set_station_cb(p, pipe_station_cb, app);
+  skim_pipeline_set_station_gone_cb(p, pipe_gone_cb, app);
+  skim_pipeline_set_text_cb(p, pipe_text_cb, app);
+  skim_pipeline_set_over_cb(p, pipe_over_cb, app);
+  skim_pipeline_set_state_cb(p, pipe_state_cb, app);
+  skim_pipeline_set_vfo_cb(p, pipe_vfo_cb, app);
+  skim_pipeline_set_spectrum_cb(p, pipe_spectrum_cb, app);
+  return p;
+}
+
+/* --- offline replay into the UI (SKIM_IQ_FILE) ------------------------------------------
+ * Development/demo path: SKIM_IQ_FILE=<capture.cf32> feeds a recording through
+ * the OFFLINE pipeline at real-time pace on its own thread, looping at EOF —
+ * no TCI, no radio, the port scanner never starts. Rate and centre come from
+ * the capture's .meta sidecar (rate_hz: / center_hz:, as skimmer-tci-probe
+ * writes it) or SKIM_IQ_RATE / SKIM_IQ_CENTER. Callbacks arrive on the feeder
+ * thread exactly as the engine thread's do — the same event queue. */
+static double meta_num(const char *meta_path, const char *key) {
+  char *txt = NULL;
+  double v = 0;
+  if (g_file_get_contents(meta_path, &txt, NULL, NULL)) {
+    for (char *line = txt; line && *line; ) {
+      char *nl = strchr(line, '\n');
+      if (g_str_has_prefix(line, key)) { v = g_ascii_strtod(line + strlen(key), NULL); break; }
+      line = nl ? nl + 1 : NULL;
+    }
+    g_free(txt);
+  }
+  return v;
+}
+
+static gpointer replay_thread(gpointer data) {
+  App *app = data;
+  const guint blk = 8192;
+  float *buf = g_new(float, 2 * blk);
+  while (g_atomic_int_get(&app->replay_run)) {
+    FILE *f = fopen(app->replay_path, "rb");
+    if (!f) { g_warning("replay: cannot open %s", app->replay_path); break; }
+    const gint64 t0 = g_get_monotonic_time();
+    guint64 frames = 0;
+    size_t n;
+    while (g_atomic_int_get(&app->replay_run) &&
+           (n = fread(buf, 2 * sizeof(float), blk, f)) > 0) {
+      skim_pipeline_feed(app->pipeline, buf, (guint)n, app->replay_rate,
+                         app->replay_center);
+      frames += n;
+      const gint64 due = t0 + (gint64)((double)frames / app->replay_rate * G_USEC_PER_SEC);
+      const gint64 now = g_get_monotonic_time();
+      if (due > now) { g_usleep((gulong)(due - now)); }
+    }
+    fclose(f);
+    if (g_atomic_int_get(&app->replay_run)) {
+      g_message("replay: %s — end of file, looping", app->replay_path);
+    }
+  }
+  g_free(buf);
+  return NULL;
+}
+
+static void replay_stop(App *app) {
+  if (!app->replay_thread) { return; }
+  g_atomic_int_set(&app->replay_run, 0);
+  g_thread_join(app->replay_thread);
+  app->replay_thread = NULL;
+}
+
+static void replay_start(App *app) {
+  const char *path = g_getenv("SKIM_IQ_FILE");
+  if (!path || !*path) { return; }
+  g_free(app->replay_path);
+  app->replay_path = g_strdup(path);
+  char *meta = g_strdup_printf("%s.meta", path);
+  const char *er = g_getenv("SKIM_IQ_RATE"), *ec = g_getenv("SKIM_IQ_CENTER");
+  app->replay_rate   = er ? g_ascii_strtod(er, NULL) : meta_num(meta, "rate_hz:");
+  app->replay_center = ec ? g_ascii_strtod(ec, NULL) : meta_num(meta, "center_hz:");
+  g_free(meta);
+  if (app->replay_rate <= 0 || app->replay_center <= 0) {
+    g_warning("replay: %s — no rate/centre (.meta sidecar or SKIM_IQ_RATE/SKIM_IQ_CENTER)", path);
+    return;
+  }
+  SkimPipeline *p = pipeline_create(app);
+  GError *err = NULL;
+  if (!skim_pipeline_start_offline(p, &err)) {
+    g_warning("replay: %s", err ? err->message : "offline start failed");
+    g_clear_error(&err);
+    skim_pipeline_free(p);
+    return;
+  }
+  app->pipeline = p;
+  skim_pipeline_set_spectrum_enabled(p, app->view == VIEW_WF);
+  char *base = g_path_get_basename(path);
+  char *sub  = g_strdup_printf("replay: %s · %.0f k · %.3f kHz", base,
+                               app->replay_rate / 1000.0, app->replay_center / 1000.0);
+  adw_window_title_set_subtitle(app->title, sub);
+  g_free(sub);
+  g_free(base);
+  g_message("replay: %s at %.0f Hz, centre %.0f Hz (offline pipeline, looping)",
+            path, app->replay_rate, app->replay_center);
+  g_atomic_int_set(&app->replay_run, 1);
+  app->replay_thread = g_thread_new("skim-replay", replay_thread, app);
 }
 
 static gboolean scan_tick(gpointer data) {
@@ -1214,6 +1403,8 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
    * fresh pipeline just like a host change does; a mode change swaps the
    * backend and the bank geometry, which only a rebuild can do. */
   if (host_changed || mode_changed || rbn_changed) {
+    const gboolean replaying = app->replay_thread != NULL;
+    if (replaying) { replay_stop(app); }        /* feeder off BEFORE the free */
     if (app->pipeline) {
       skim_pipeline_stop(app->pipeline);
       g_clear_pointer(&app->pipeline, skim_pipeline_free);
@@ -1222,7 +1413,7 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
       app->tuned_slot_hz = 0;
       tuned_label_update(app, NULL);
     }
-    scan_tick(app);
+    if (replaying) { replay_start(app); } else { scan_tick(app); }
   }
 }
 
@@ -1621,6 +1812,7 @@ static void app_teardown(App *app) {
   g_clear_handle_id(&app->age_tick_id, g_source_remove);
   g_clear_handle_id(&app->lag_tick_id, g_source_remove);
   g_clear_handle_id(&app->scan_tick_id, g_source_remove);
+  replay_stop(app);                            /* SKIM_IQ_FILE feeder, if any */
   if (app->pipeline) {
     skim_pipeline_stop(app->pipeline);
     g_clear_pointer(&app->pipeline, skim_pipeline_free);
@@ -1673,7 +1865,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   app->cq_only      = settings_load_cq_only();
   app->spot_round   = settings_load_spot_round();
   app->decode_font  = settings_load_decode_font();
-  app->list_visible = settings_load_list_visible();
+  app->view         = settings_load_view();
   settings_load_rbn(app);
   rbn_apply(app);                /* the telnet server is up before the radio */
 
@@ -1706,12 +1898,21 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
     adw_header_bar_pack_end(ADW_HEADER_BAR(header), menu_btn);
   }
 
-  GtkWidget *list_btn = gtk_toggle_button_new();
-  gtk_button_set_icon_name(GTK_BUTTON(list_btn), "view-list-symbolic");
-  gtk_widget_set_tooltip_text(list_btn, "Show station list");
-  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(list_btn), app->list_visible);
-  g_signal_connect(list_btn, "toggled", G_CALLBACK(on_list_toggled), app);
-  adw_header_bar_pack_end(ADW_HEADER_BAR(header), list_btn);
+  /* View toggles (M8): station list | waterfall; both off = pane only. Two
+   * toggles, not a radio group, so the pane-only state stays reachable. */
+  GtkWidget *views = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_add_css_class(views, "linked");
+  app->list_btn = gtk_toggle_button_new();
+  gtk_button_set_icon_name(GTK_BUTTON(app->list_btn), "view-list-symbolic");
+  gtk_widget_set_tooltip_text(app->list_btn, "Station list");
+  g_signal_connect(app->list_btn, "toggled", G_CALLBACK(on_view_toggled), app);
+  gtk_box_append(GTK_BOX(views), app->list_btn);
+  app->wf_btn = gtk_toggle_button_new();
+  gtk_button_set_icon_name(GTK_BUTTON(app->wf_btn), "view-continuous-symbolic");
+  gtk_widget_set_tooltip_text(app->wf_btn, "Waterfall");
+  g_signal_connect(app->wf_btn, "toggled", G_CALLBACK(on_view_toggled), app);
+  gtk_box_append(GTK_BOX(views), app->wf_btn);
+  adw_header_bar_pack_end(ADW_HEADER_BAR(header), views);
 
   /* Station list, sorted by frequency — a text band map. Activate a row
    * (double-click / Enter) to tune the radio to that station. */
@@ -1812,23 +2013,31 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
 
   GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_box_append(GTK_BOX(box), header);
-  gtk_box_append(GTK_BOX(box), list_scroll);
+  app->top_stack = gtk_stack_new();
+  gtk_stack_add_named(GTK_STACK(app->top_stack), list_scroll, "list");
+  app->wf = SKIM_WF_VIEW(skim_wf_view_new());
+  gtk_stack_add_named(GTK_STACK(app->top_stack), GTK_WIDGET(app->wf), "waterfall");
+  gtk_widget_set_vexpand(app->top_stack, TRUE);
+  gtk_box_append(GTK_BOX(box), app->top_stack);
   app->list_scroll = list_scroll;
   app->list_sep    = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
   gtk_box_append(GTK_BOX(box), app->list_sep);
   gtk_box_append(GTK_BOX(box), GTK_WIDGET(app->tuned_label));
   gtk_box_append(GTK_BOX(box), tuned_scroll);
   gtk_box_append(GTK_BOX(box), GTK_WIDGET(app->status));
-  gtk_widget_set_visible(list_scroll, app->list_visible);
-  gtk_widget_set_visible(app->list_sep, app->list_visible);
-  gtk_widget_set_vexpand(tuned_scroll, !app->list_visible);
+  view_apply(app);
 
   adw_application_window_set_content(ADW_APPLICATION_WINDOW(window), box);
   gtk_window_present(GTK_WINDOW(window));
 
-  /* Find the server: probe now, then keep scanning while disconnected. */
-  scan_tick(app);
-  app->scan_tick_id = g_timeout_add_seconds(3, scan_tick, app);
+  /* Find the server: probe now, then keep scanning while disconnected —
+   * unless a recording is being replayed into the UI (SKIM_IQ_FILE). */
+  if (g_getenv("SKIM_IQ_FILE")) {
+    replay_start(app);
+  } else {
+    scan_tick(app);
+    app->scan_tick_id = g_timeout_add_seconds(3, scan_tick, app);
+  }
 }
 
 /* --version prints and exits in the LOCAL instance, before GApplication

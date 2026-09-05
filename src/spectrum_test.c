@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "app/wf_compose.h"
 #include "engine/pipeline.h"
 #include "engine/spectrum.h"
 
@@ -236,11 +237,170 @@ static void pipeline_section(void) {
   skim_pipeline_free(p);
 }
 
+/* --- 3. the composer: frequency vertical, newest right, max-pooled ------------- */
+
+/* Rows of the newest column that show the palette TOP (a tone well above
+ * the floor saturates the map) — returns count, first and last y. */
+static guint bright_rows(const guint32 *pix, int w, int hgt, int x, int *y0, int *y1) {
+  const guint32 top = skim_wf_palette_argb(255);
+  guint n = 0;
+  *y0 = -1; *y1 = -1;
+  for (int y = 0; y < hgt; y++) {
+    if (pix[(gsize)y * w + x] == top) {
+      n++;
+      if (*y0 < 0) { *y0 = y; }
+      *y1 = y;
+    }
+  }
+  return n;
+}
+
+static void compose_section(void) {
+  printf("-- composer\n");
+  const guint  nbins  = 2048;                        /* the 48 k geometry    */
+  const double center = 14020000.0, bin = SKIM_SPECTRUM_BIN_HZ;
+  const double tone_hz = center + 12000.0;
+  const guint  tone_bin = (guint)lrint((tone_hz - center) / bin + nbins / 2.0);
+  SkimWfHistory *h = skim_wf_history_new(64);
+  guint8 *row = g_new(guint8, nbins);
+  /* 40 rows of floor (byte 90 = −110 dBFS), then 20 rows with the tone
+   * (byte 185 = −15 dBFS: 95 dB over the floor → palette top). */
+  for (int r = 0; r < 60; r++) {
+    memset(row, 90, nbins);
+    if (r >= 40) { row[tone_bin] = 185; }
+    skim_wf_history_push(h, row, nbins, center, bin);
+  }
+  char what[200];
+  check("history stores every pushed row", skim_wf_history_rows(h) == 60);
+  g_snprintf(what, sizeof(what), "tracked floor %.1f dBFS (rows are −110)",
+             skim_wf_history_floor_db(h));
+  check(what, fabs(skim_wf_history_floor_db(h) + 110.0) < 0.5);
+
+  /* Orientation of the mapping itself: higher frequency → smaller y. */
+  SkimWfWindow win = { .f_top_hz = tone_hz + 2000.0, .f_bot_hz = tone_hz - 2000.0,
+                       .rows_per_px = 1 };
+  const int w = 100, hgt = 400;                     /* 10 Hz per pixel row  */
+  check("higher frequency maps to a SMALLER y (top of the picture)",
+        skim_wf_y_of_hz(&win, hgt, tone_hz + 1000.0) < skim_wf_y_of_hz(&win, hgt, tone_hz));
+  check("hz_of_y(y_of_hz(f)) round-trips",
+        fabs(skim_wf_hz_of_y(&win, hgt, skim_wf_y_of_hz(&win, hgt, tone_hz)) - tone_hz) < 1e-6);
+
+  /* Zoomed IN (several pixels per bin): the tone is a short bright run of
+   * rows centred on y_of_hz(tone), in the newest column. */
+  guint32 *pix = g_new(guint32, (gsize)w * hgt);
+  skim_wf_compose(h, &win, pix, w, hgt, w);
+  const int y_exp = (int)floor(skim_wf_y_of_hz(&win, hgt, tone_hz));
+  int y0, y1;
+  guint n = bright_rows(pix, w, hgt, w - 1, &y0, &y1);
+  g_snprintf(what, sizeof(what), "zoomed in: tone = bright rows %d..%d CENTRED on y %d (bin = %.1f px)",
+             y0, y1, y_exp, bin / 10.0);
+  check(what, n >= 2 && n <= 4 && y0 <= y_exp && y1 >= y_exp &&
+        abs((y0 + y1) - 2 * y_exp) <= 1);
+  /* Time: the tone rode the newest 20 rows → columns w−20 … w−1 bright,
+   * w−21 dark, and the oldest columns beyond the history are floor. */
+  check("time: column w−20 still shows the tone",
+        bright_rows(pix, w, hgt, w - 20, &y0, &y1) >= 1);
+  check("time: column w−21 (before the tone started) is floor",
+        bright_rows(pix, w, hgt, w - 21, &y0, &y1) == 0);
+  check("time: column 0 (beyond the 60-row history) is the floor colour",
+        pix[(gsize)y_exp * w + 0] == skim_wf_palette_argb(0));
+
+  /* Zoomed OUT (whole 48 kHz band on 300 rows ≈ 6.8 bins per pixel): the
+   * lone tone bin must survive max-pooling as a bright pixel at its y. */
+  SkimWfWindow wide = { .f_top_hz = skim_wf_history_hi_hz(h),
+                        .f_bot_hz = skim_wf_history_lo_hz(h), .rows_per_px = 2 };
+  const int hgt2 = 300;
+  guint32 *pix2 = g_new(guint32, (gsize)w * hgt2);
+  skim_wf_compose(h, &wide, pix2, w, hgt2, w);
+  const int y_exp2 = (int)floor(skim_wf_y_of_hz(&wide, hgt2, tone_hz));
+  n = bright_rows(pix2, w, hgt2, w - 1, &y0, &y1);
+  g_snprintf(what, sizeof(what), "zoomed out: tone kept by max-pooling at y %d (bright %d..%d; a bin on a row edge may show in both)",
+             y_exp2, y0, y1);
+  check(what, n >= 1 && n <= 2 && y0 <= y_exp2 && y1 >= y_exp2);
+  check("zoomed out + rows_per_px 2: column w−10 (rows 18..19) still bright, w−11 dark",
+        bright_rows(pix2, w, hgt2, w - 10, &y0, &y1) >= 1 &&
+        bright_rows(pix2, w, hgt2, w - 11, &y0, &y1) == 0);
+
+  /* A window reaching past the band edge paints floor there. */
+  SkimWfWindow over = { .f_top_hz = skim_wf_history_hi_hz(h) + 5000.0,
+                        .f_bot_hz = skim_wf_history_hi_hz(h) - 5000.0, .rows_per_px = 1 };
+  skim_wf_compose(h, &over, pix, w, hgt, w);
+  check("outside the band: floor colour", pix[0] == skim_wf_palette_argb(0));
+
+  /* The band moves (retune): the history restarts. */
+  skim_wf_history_push(h, row, nbins, center + 1000.0, bin);
+  check("a new stream centre clears the history (1 row left)", skim_wf_history_rows(h) == 1);
+
+  /* Cost of the worst case (informative, not a check): the whole 192 k band
+   * on a 700×600 picture (≈ 14 bins per pixel row), full recompose vs the
+   * incremental two columns a drain typically adds. */
+  {
+    SkimWfHistory *big = skim_wf_history_new(SKIM_WF_HISTORY_ROWS);
+    const guint nb = 8192;
+    guint8 *r8 = g_new(guint8, nb);
+    for (int r = 0; r < 1400; r++) {
+      for (guint i = 0; i < nb; i++) { r8[i] = (guint8)(84 + ((i * 7 + r) & 15)); }
+      skim_wf_history_push(big, r8, nb, 14030000.0, bin);
+    }
+    SkimWfWindow full = { .f_top_hz = skim_wf_history_hi_hz(big),
+                          .f_bot_hz = skim_wf_history_lo_hz(big), .rows_per_px = 2 };
+    const int W = 700, Hh = 600;
+    guint32 *px = g_new(guint32, (gsize)W * Hh);
+    gint64 t0 = g_get_monotonic_time();
+    for (int k = 0; k < 5; k++) { skim_wf_compose(big, &full, px, W, Hh, W); }
+    const double full_ms = (double)(g_get_monotonic_time() - t0) / 5000.0;
+    t0 = g_get_monotonic_time();
+    for (int k = 0; k < 200; k++) { skim_wf_compose(big, &full, px, W, Hh, 2); }
+    const double inc_us = (double)(g_get_monotonic_time() - t0) / 200.0;
+    printf("  info full-band recompose 700×600: %.1f ms; two new columns: %.0f µs\n",
+           full_ms, inc_us);
+    g_free(px); g_free(r8); skim_wf_history_free(big);
+  }
+
+  /* Optional eyeball: SKIM_WF_PPM=<file> writes a synthetic scene. */
+  const char *ppm = g_getenv("SKIM_WF_PPM");
+  if (ppm) {
+    SkimWfHistory *d = skim_wf_history_new(SKIM_WF_HISTORY_ROWS);
+    const guint nb = 8192; const double c = 14030000.0;
+    guint8 *r8 = g_new(guint8, nb);
+    guint32 seed = 7;
+    for (int r = 0; r < 700; r++) {
+      for (guint i = 0; i < nb; i++) { seed = seed * 1664525u + 1013904223u; r8[i] = 84 + (seed >> 28); }
+      const guint bA = (guint)lrint(5200.0 / bin + nb / 2.0);
+      const guint bB = (guint)lrint(-3100.0 / bin + nb / 2.0);
+      const guint bC = (guint)lrint(800.0 / bin + nb / 2.0);
+      r8[bA] = 165; r8[bA - 1] = 140; r8[bA + 1] = 140;          /* strong, continuous */
+      if ((r / 5) % 3 != 2) { r8[bB] = 150; r8[bB + 1] = 130; }  /* keyed              */
+      r8[bC] = 104;                                              /* weak, +14 dB       */
+      skim_wf_history_push(d, r8, nb, c, bin);
+    }
+    SkimWfWindow sw = { .f_top_hz = c + 10000.0, .f_bot_hz = c - 10000.0, .rows_per_px = SKIM_WF_ROWS_PER_PX };
+    const int W = 640, Hh = 480;
+    guint32 *px = g_new(guint32, (gsize)W * Hh);
+    skim_wf_compose(d, &sw, px, W, Hh, W);
+    FILE *f = fopen(ppm, "wb");
+    if (f) {
+      fprintf(f, "P6\n%d %d\n255\n", W, Hh);
+      for (gsize i = 0; i < (gsize)W * Hh; i++) {
+        const guint8 rgb[3] = { (px[i] >> 16) & 255, (px[i] >> 8) & 255, px[i] & 255 };
+        fwrite(rgb, 1, 3, f);
+      }
+      fclose(f);
+      printf("  (wrote %s)\n", ppm);
+    }
+    g_free(px); g_free(r8); skim_wf_history_free(d);
+  }
+
+  g_free(pix); g_free(pix2); g_free(row);
+  skim_wf_history_free(h);
+}
+
 int main(void) {
   printf("=== skimmer-spectrum-test — M8 spectrum tap ===\n");
   const double rates[] = { 48000.0, 96000.0, 192000.0, 384000.0 };
   for (guint i = 0; i < G_N_ELEMENTS(rates); i++) { rate_section(rates[i]); }
   pipeline_section();
+  compose_section();
   printf("=== %d checks, %d failed ===\n", checks, fails);
   return fails ? 1 : 0;
 }

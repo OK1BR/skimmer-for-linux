@@ -628,6 +628,44 @@ where relevant, a live check against a running `sdr-for-linux`.
   strongest bin at 14 017/14 027 kHz (CW segment) and 14 074–14 076 kHz (the
   FT8 band) — a mirrored spectrum would have put them at 14 098–14 157 kHz.
   12 gates total.
+  **The view (same day, headless-verified).** `src/app/wf_compose.c` is the
+  GLib-only history + composer (gate-tested): full-resolution rows in a ring
+  (`SKIM_WF_HISTORY_ROWS` 2048 ≈ 22 s, 16 MB at 192 k), a pannable/zoomable
+  window composed into 0xAARRGGBB pixels — frequency VERTICAL with the highest
+  at the top, time to the RIGHT, and MAX-pooling in both axes (several bins per
+  pixel row when zoomed out, `SKIM_WF_ROWS_PER_PX` = 2 history rows per column
+  = 21 ms/px), so a 50 Hz CW line never averages away; bins are centred on
+  their frequency (the + 0.5 the gate caught: without it every line sat half a
+  bin high). Palette table, interpolation and the percentile noise-floor
+  auto-range are copied from sdr-for-linux's `waterfall.c` (`SKIM_WF_SPAN_DB`
+  40 above the 20th-percentile floor, EMA τ ≈ 1 s) so the two apps colour a
+  band alike. `src/app/wf_view.c` is the GTK4 widget: pixels go up as a
+  `GdkMemoryTexture` (NEAREST, sdr's snapshot pattern), new rows shift the
+  picture left and compose only the new columns (17 µs for two), a pan, zoom,
+  resize or a > 1 dB floor drift recomposes everything (5.4 ms for the whole
+  192 k band on 700×600); Cairo draws the kHz scale (CW Skimmer style — the
+  kHz's last three digits, tick ladder 100 Hz … 50 kHz picked for ≥ 26 px),
+  the VFO as a spot-green line + tab, and the (still empty) callsign column.
+  Wheel pans the frequency window, Ctrl+wheel zooms (2 kHz … the band); the
+  window follows the VFO until the operator pans, a VFO change re-arms it.
+  **App:** rows travel the ONE event queue (EV_SPECTRUM, blob + centre + bin;
+  at most `SPEC_PENDING_MAX` 48 pending — the oldest row is dropped, a
+  stalled UI must not hoard 1.5 MB/s), one `queue_draw` per drain; the top
+  area is a `GtkStack` {station list | waterfall} driven by two linked header
+  toggles (both off = decode pane only, the old behaviour), persisted as
+  `[ui] view` (the pre-M8 `station_list` key migrates); the engine computes
+  spectrum rows ONLY while the waterfall shows. **`SKIM_IQ_FILE=<cf32>`**
+  replays a recording into the UI through the offline pipeline at real-time
+  pace (its `.meta` sidecar or `SKIM_IQ_RATE`/`SKIM_IQ_CENTER`), looping — no
+  radio needed for a look or a demo. Verified headless (Broadway + a separate
+  headless Chrome): the 2026-08-15 RTTY fixture shows the FSK pairs at 14 082
+  and 14 087 kHz and the carriers near 14 090 in a 20 kHz window, scale
+  078–096; `SKIM_LAG_DEBUG` under the replay: 94 rows/s through the queue,
+  worst drain 0.2 ms, no stall. Gate `skimmer-spectrum-test` 39 → 51 checks
+  (composer: orientation, round-trip, zoomed-in rows centred on the tone,
+  zoomed-out max-pooling, time direction, beyond-history and out-of-band
+  floor, history reset on a centre change). **Next: the callsign column +
+  click-to-tune, then Richard's live look decides bin/hop/span/palette.**
 
 ## Safety / etiquette
 

@@ -115,7 +115,7 @@ test('channelizer', skimmer_chan_test, timeout : 120)
 # M8: offline gate — spectrum tap orientation (+f ABOVE centre) at every
 # rate, bin/row bookkeeping, byte dynamic range, pipeline enable/TX-hold.
 skimmer_spectrum_test = executable('skimmer-spectrum-test',
-  ['src/spectrum_test.c'],
+  ['src/spectrum_test.c', 'src/app/wf_compose.c'],   # composer is GLib-only
   include_directories : include_directories('src'),
   dependencies : engine_deps,
   link_with : engine_lib,
@@ -209,7 +209,7 @@ test('rbn-feed', skimmer_rbn_test, timeout : 120)
 
 # --- Application ------------------------------------------------------------
 executable('skimmer-for-linux',
-  ['src/app/main.c'],
+  ['src/app/main.c', 'src/app/wf_compose.c', 'src/app/wf_view.c'],
   include_directories : engine_inc,
   dependencies : [gtk_dep, adw_dep, glib_dep],
   link_with : engine_lib,

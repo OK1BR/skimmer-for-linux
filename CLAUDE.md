@@ -717,8 +717,20 @@ default OFF (`skim_pipeline_set_spectrum_enabled`). Gate
 48/96/192/384 k is the first assertion; real-air check on the RTTY fixture
 puts the strongest bins in the CW segment and the FT8 band, where they
 belong. `SKIM_SPECTRUM_DUMP=1` on `skimmer-replay` prints the peak once a
-second. **12 gates.** Next: the view (rotated composer + texture, scale, VFO
-marker), then the callsign column + click.
+second. **12 gates.** **The view landed the same day (headless-verified on
+the RTTY fixture via Broadway + headless Chrome):** `wf_compose.c` (GLib-only,
+gate-tested: full-res ring, pan/zoom window, max-pooling both axes, bins
+centred — the + 0.5 the gate caught; palette + percentile floor copied from
+sdr's waterfall.c) and `wf_view.c` (GdkMemoryTexture NEAREST, incremental
+columns 17 µs, full band recompose 5.4 ms, kHz scale, VFO marker, wheel =
+pan, Ctrl+wheel = zoom, follows the VFO until panned). Rows ride the ONE
+event queue as EV_SPECTRUM (cap 48 pending, oldest dropped), one queue_draw
+per drain; header toggles list | waterfall over a GtkStack, `[ui] view`
+persisted (old `station_list` migrates); spectrum computed only while shown.
+**`SKIM_IQ_FILE=<cf32>` replays a recording into the UI** (offline pipeline,
+real-time pace, looping) — the way to look at the waterfall without a
+radio. Lag telemetry under the replay: 94 rows/s, worst drain 0.2 ms.
+Gate 51 checks. Next: callsign column + click, then the live look.
 
 ## Layout
 
