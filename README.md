@@ -20,7 +20,7 @@ feed**.
 > telnet spot feed (M6). Fresh off the bench: a per-channel **tone splitter**
 > (two stations in one channel decode separately) and a **fist model** (the
 > decoder learns each operator's own spacing). Everything is gated offline —
-> `meson test`, 10 gates, plus a ~50× realtime replay harness for A/B runs on
+> `meson test`, 11 gates, plus a ~50× realtime replay harness for A/B runs on
 > recorded off-air IQ. See [`docs/SCOPE.md`](docs/SCOPE.md) for the full plan.
 
 ![The decode pane during a contest evening](docs/screenshot-decode-pane.png)
@@ -183,7 +183,7 @@ The engine is GLib-only — no GTK anywhere near DSP — so every milestone ship
 an **offline gate binary**: mock TCI server round-trips, synthetic-keying
 decoder suites (run for *both* CW backends), two-tone splitter fixtures, a
 full offline pipeline over a real WebSocket asserting spot frequencies exact
-to the Hz. Eight gates run in `meson test`; a replay harness pushes recorded
+to the Hz. Eleven gates run in `meson test`; a replay harness pushes recorded
 off-air IQ through the real pipeline at ~60× realtime, which is how every
 decoder change gets an A/B against yesterday's build on the same corpus
 before it ships.
@@ -232,7 +232,7 @@ packages on the [Releases page](https://github.com/OK1BR/skimmer-for-linux/relea
   helper: `git clone https://aur.archlinux.org/skimmer-for-linux.git &&
   cd skimmer-for-linux && makepkg -si`. The same recipe lives in this repo
   as [`packaging/PKGBUILD`](packaging/PKGBUILD) — it builds the tagged
-  release tarball and runs the ten gates in `check()` before packaging.
+  release tarball and runs the eleven gates in `check()` before packaging.
 
 Both distro packages are install-tested in clean containers before they are
 attached to a release.
@@ -242,7 +242,7 @@ attached to a release.
 ```sh
 meson setup build
 meson compile -C build
-meson test -C build             # 10 offline gates, no radio needed
+meson test -C build             # 11 offline gates, no radio needed
 ./build/skimmer-for-linux
 ```
 
