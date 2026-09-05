@@ -704,6 +704,21 @@ returns when it exists. Harness after: second and third launch each exit 0
 at once, the primary logs `app: second launch — presenting the existing
 window` twice, the feed binds once, zero warnings. The backlog's bug
 section is empty.
+**M8 — waterfall view, engine half (offline-proven 2026-09-05; Richard's
+"ano" to SKM-4 half 1).** CW Skimmer's layout is the brief (frequency
+vertical, time sideways, callsign column to the right, click tunes the
+single VFO); the TX-split half is NOT possible against sdr-for-linux today
+(`vfo:rx,ch,f` ignores the channel, split/RIT/XIT are echo-only, no VFO B
+anywhere — filed as SDR-12 there). `spectrum.c` = FFT tap on the raw band,
+bin 23.4375 Hz at every rate (N from the rate), a row per 10.7 ms, fftshifted
+bytes = dBFS + 200, fed BEFORE the TX hold so the picture never freezes,
+default OFF (`skim_pipeline_set_spectrum_enabled`). Gate
+`skimmer-spectrum-test` 39 checks — the +12 kHz-ABOVE-centre orientation at
+48/96/192/384 k is the first assertion; real-air check on the RTTY fixture
+puts the strongest bins in the CW segment and the FT8 band, where they
+belong. `SKIM_SPECTRUM_DUMP=1` on `skimmer-replay` prints the peak once a
+second. **12 gates.** Next: the view (rotated composer + texture, scale, VFO
+marker), then the callsign column + click.
 
 ## Layout
 

@@ -60,6 +60,29 @@ static double meta_get(const char *path, const char *key) {
   return v;
 }
 
+static void spectrum_cb(const guint8 *row, guint nbins, double center_hz,
+                        double bin_hz, gpointer user) {
+  (void)user;
+  static guint rows;
+  static double t_per_row;
+  if (!t_per_row) { t_per_row = 1.0 / (bin_hz * nbins) * (nbins / 4.0); }
+  rows++;
+  const guint per_sec = (guint)(1.0 / t_per_row + 0.5);
+  if (rows % MAX(per_sec, 1u)) { return; }
+  guint pk = 0;
+  guint hist[256] = { 0 };
+  for (guint i = 0; i < nbins; i++) {
+    if (row[i] > row[pk]) { pk = i; }
+    hist[row[i]]++;
+  }
+  guint cum = 0, fl = 0;
+  for (guint b = 0; b < 256; b++) { cum += hist[b]; if (cum >= nbins / 5) { fl = b; break; } }
+  fprintf(stderr, "spectrum: t=%4us peak %.1f kHz (byte %u, floor %u, +%.1f dB)\n",
+          rows / MAX(per_sec, 1u),
+          (center_hz + ((double)pk - nbins / 2.0) * bin_hz) / 1000.0,
+          row[pk], fl, (double)row[pk] - fl);
+}
+
 static int by_freq(gconstpointer a, gconstpointer b) {
   const SkimStation *sa = *(const SkimStation *const *)a;
   const SkimStation *sb = *(const SkimStation *const *)b;
@@ -117,6 +140,13 @@ int main(int argc, char **argv) {
   skim_pipeline_set_text_cb(p, text_cb, NULL);
   skim_pipeline_set_station_cb(p, station_cb, NULL);
   skim_pipeline_set_station_gone_cb(p, gone_cb, NULL);
+  /* SKIM_SPECTRUM_DUMP=1: run the M8 spectrum tap too and print the
+   * strongest bin's ABSOLUTE frequency about once a second — the real-air
+   * orientation check (a known station must land on its own kHz). */
+  if (g_getenv("SKIM_SPECTRUM_DUMP")) {
+    skim_pipeline_set_spectrum_cb(p, spectrum_cb, NULL);
+    skim_pipeline_set_spectrum_enabled(p, TRUE);
+  }
 
   GError *err = NULL;
   if (!skim_pipeline_start_offline(p, &err)) {

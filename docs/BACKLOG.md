@@ -235,7 +235,7 @@ the upstream Python example over recorded contest audio and compare its output
 against the DSP backend on the same recording.
 
 ### SKM-4 — In-app waterfall with decodes placed by frequency, click to set TX
-- **Type:** idea · **Severity:** — · **Status:** open (reporter answered, not reviewed yet)
+- **Type:** idea · **Severity:** — · **Status:** doing — half 1 (waterfall + callsign column, click tunes RX) since 2026-09-05; half 2 (click sets TX) deferred to sdr-for-linux `SDR-12`
 - **Source:** e-mail from Roy Andre Løntjern, LB0EI, 2026-08-29; answered 2026-08-30
   with a request for a step-by-step description of his workflow, which he sent the
   same day
@@ -267,6 +267,17 @@ Two halves, and only one of them is missing:
 
 Nothing is designed yet, and nothing from his answer is summarised here on
 purpose — the detail lives in the archived mail thread (see **Detail** above).
+
+**Decision (Richard, 2026-09-05):** build half 1 now — CW Skimmer's layout
+(`ContestShot.gif`) as the reference: frequency vertical, time sideways, kHz
+scale, callsign column to the right with a dot per station on its frequency,
+click tunes the (single) VFO like a station row. Half 2 is settled as NOT
+supportable today, verified in sdr-for-linux's sources: the TCI `vfo:rx,ch,f`
+handler ignores the channel index and sets the one frequency,
+`split_enable`/`rit_*`/`xit_*` are echo-only (no backend), and the SDR has no
+VFO B or split at all — filed there as `SDR-12`. Design and progress live in
+`docs/SCOPE.md` under **M8**. The mail thread was not re-read for this (it is
+not in the Gmail archive; the screenshot Richard pointed to is the brief).
 
 ### SKM-5 — IC-7610 wideband IQ as a source (`ic7610ftdi`)
 - **Type:** idea · **Severity:** — · **Status:** open (not investigated)

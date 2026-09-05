@@ -108,7 +108,8 @@ The skimmer is a **feeder**, not a second full SDR window:
 - **RBN telnet feed is a goal** (native Linux RBN nodes are scarce) — this drives
   a *robust* callsign validator; we must not spot garbage.
 - A full own-panorama waterfall (à la CW Skimmer) is a later, optional phase once
-  the decoder is good; `waterfall.c` can seed it.
+  the decoder is good; `waterfall.c` can seed it. *(Pulled forward 2026-09-05 as
+  M8 on LB0EI's request, Richard's call — see the M8 entry.)*
 
 ## Milestones (each independently testable, in the `sdr-for-linux` house style)
 
@@ -582,8 +583,51 @@ where relevant, a live check against a running `sdr-for-linux`.
   Separate class spotted on the way (NOT startup): a reproducible mid-over
   loss of ` S` after `DE` (`DEV1JDZ`, `VQJDZ` — engine and sim agree), to
   be dissected on the same fixture.
-- **Later — PSK backend** (BPSK31 + BPSK63, Costas loop, varicode) and an
-  optional **own-panorama waterfall** (port `waterfall.c`).
+- **Later — PSK backend** (BPSK31 + BPSK63, Costas loop, varicode). *(The
+  own-panorama waterfall that used to sit here is M8 below, since 2026-09-05.)*
+- **M8 — waterfall view (BACKLOG SKM-4, half 1). Engine tap IMPLEMENTED
+  (offline gate 2026-09-05); the view is in progress.** Roy Andre Løntjern,
+  LB0EI, keeps Windows for CW Skimmer's pileup display: a waterfall with
+  frequency VERTICAL and time flowing sideways, a kHz scale, and a column of
+  callsigns to the right of it, each on its own frequency, click to tune.
+  Richard adopted exactly that layout (2026-09-05, CW Skimmer's
+  `ContestShot.gif` as the reference): it takes the station list's slot in the
+  top half of the window via a header toggle, the decode pane stays below,
+  a click on a callsign tunes like a station row. **The TX half of Roy's
+  workflow is NOT in scope here:** in a split pileup the click has to move the
+  TX frequency, and sdr-for-linux has no VFO B or split — its TCI `vfo:rx,ch,f`
+  handler ignores the channel index and sets the single frequency, and
+  `split_enable`/`rit_*`/`xit_*` are accepted, stored and echoed without a
+  backend (read in `tci_server.c`, 2026-09-05). That is sdr-for-linux work
+  first (its BACKLOG SDR-12); the skimmer will use whatever TCI offers once it
+  exists.
+  **Engine (`spectrum.c`, GLib + fftw3f):** an FFT tap on the raw IQ band,
+  independent of the channelizer — a picture must show keying, so the window
+  must be shorter than a dit, which the 125 Hz channels never are. Two named
+  constants define it: the target bin `SKIM_SPECTRUM_BIN_HZ` = 23.4375 Hz (N
+  derived from the rate — 2048/4096/8192/16384 at 48/96/192/384 k, so the bin
+  is the same whatever `iq_samplerate` the radio announces) and
+  `SKIM_SPECTRUM_HOP_DIV` = 4 (a row every N/4 frames = 10.7 ms, 93.75 rows/s
+  at every rate; 42.7 ms Hann window at 192 k). Both are first guesses for
+  Richard's live look. Forward FFT, fftshifted rows, byte = dBFS + 200
+  (sdr-for-linux's waterfall convention shifted to full-scale; a −6 dBFS tone
+  reads 194, a −60 dBFS noise floor ~95). Pipeline: `skim_pipeline_set_spectrum_cb`
+  + `skim_pipeline_set_spectrum_enabled` (atomic, default OFF — no FFT for a
+  hidden view); the tap is fed at the top of `process_block`, BEFORE the TX
+  hold check, so the picture keeps flowing while the decoders freeze; the
+  object is built lazily on the engine thread at the block's rate (fftw's
+  planner is not thread-safe — same thread as the channelizer's plan).
+  **Gate `skimmer-spectrum-test` (39 checks):** at all four rates a +12 kHz
+  tone lands ABOVE the centre within ±bin/2 and a tone below the centre
+  below it (the 2026-07-15 mirror trap, gated), bin width constant, 90 rows
+  per second of IQ, tone−floor ≥ 55 dB in bytes, reset semantics; through the
+  offline pipeline: no rows while disabled, rows carry the stream centre,
+  peak on the right absolute Hz, rows keep coming during TX hold, silence
+  after disable. **Real-air orientation check:** `SKIM_SPECTRUM_DUMP=1`
+  replay of the 2026-08-15 RTTY fixture (centre 14 086 960) puts the band's
+  strongest bin at 14 017/14 027 kHz (CW segment) and 14 074–14 076 kHz (the
+  FT8 band) — a mirrored spectrum would have put them at 14 098–14 157 kHz.
+  12 gates total.
 
 ## Safety / etiquette
 

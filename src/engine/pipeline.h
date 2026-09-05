@@ -67,6 +67,13 @@ typedef void (*SkimPipelineOverCb)(double freq_hz, SkimPaneOpKind kind,
 typedef void (*SkimPipelineStateCb)(gboolean connected, const char *detail, gpointer user);
 /* The radio's tuned frequency (vfo:0,0) changed. */
 typedef void (*SkimPipelineVfoCb)(double vfo_hz, gpointer user);
+/* M8 waterfall: one spectrum row of the raw IQ band (spectrum.h — nbins
+ * bytes, fftshifted, byte = dBFS + 200). center_hz is the stream centre the
+ * row was taken at; row index i sits at center_hz + (i − nbins/2) · bin_hz.
+ * Fires only while enabled (display-only work — no FFT for a hidden view). */
+typedef void (*SkimPipelineSpectrumCb)(const guint8 *row, guint nbins,
+                                       double center_hz, double bin_hz,
+                                       gpointer user);
 
 SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg);
 void          skim_pipeline_free(SkimPipeline *p);
@@ -77,6 +84,10 @@ void skim_pipeline_set_text_cb(SkimPipeline *p, SkimPipelineTextCb cb, gpointer 
 void skim_pipeline_set_over_cb(SkimPipeline *p, SkimPipelineOverCb cb, gpointer user);
 void skim_pipeline_set_state_cb(SkimPipeline *p, SkimPipelineStateCb cb, gpointer user);
 void skim_pipeline_set_vfo_cb(SkimPipeline *p, SkimPipelineVfoCb cb, gpointer user);
+void skim_pipeline_set_spectrum_cb(SkimPipeline *p, SkimPipelineSpectrumCb cb, gpointer user);
+/* Thread-safe switch for the spectrum tap (default off). */
+void     skim_pipeline_set_spectrum_enabled(SkimPipeline *p, gboolean on);
+gboolean skim_pipeline_spectrum_enabled(const SkimPipeline *p);
 
 /* Connect + start decoding. Blocks for the TCI handshake. */
 gboolean skim_pipeline_start(SkimPipeline *p, GError **error);

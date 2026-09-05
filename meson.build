@@ -52,6 +52,7 @@ engine_sources = [
   'src/engine/spot_out.c',     # M5/M6: spot policy — dedup, rate, sinks
   'src/engine/dup_query.c',    # logbook dup lookup (UDP 2238) → spot colour
   'src/engine/rbn_feed.c',     # M6: RBN telnet server (CW Skimmer dialect)
+  'src/engine/spectrum.c',     # M8: band spectrum rows for the waterfall
   'src/engine/pipeline.c',     # M5: the engine assembled end to end
 ]
 engine_deps = [glib_dep, gio_dep, lws_dep, wdsp_dep, fftw3f_dep, m_dep]
@@ -110,6 +111,16 @@ skimmer_chan_test = executable('skimmer-chan-test',
   link_with : engine_lib,
 )
 test('channelizer', skimmer_chan_test, timeout : 120)
+
+# M8: offline gate — spectrum tap orientation (+f ABOVE centre) at every
+# rate, bin/row bookkeeping, byte dynamic range, pipeline enable/TX-hold.
+skimmer_spectrum_test = executable('skimmer-spectrum-test',
+  ['src/spectrum_test.c'],
+  include_directories : include_directories('src'),
+  dependencies : engine_deps,
+  link_with : engine_lib,
+)
+test('spectrum', skimmer_spectrum_test, timeout : 120)
 
 # M3: offline gate — CW backend on synthetic keying (speeds, SNR, jitter,
 # QSB, speed change, squelch-on-noise, channelizer integration).
