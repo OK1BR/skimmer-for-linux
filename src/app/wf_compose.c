@@ -211,7 +211,7 @@ typedef struct {
 
 struct _SkimWfGuard {
   GuardSlot *fifo;                             /* oldest first               */
-  guint      depth, len;
+  guint      depth, len, settle;
   guint64    seq, suspect_until;               /* rows numbered from 1       */
   double     last_center;
   gboolean   have_center;
@@ -220,9 +220,10 @@ struct _SkimWfGuard {
   gpointer            user;
 };
 
-SkimWfGuard *skim_wf_guard_new(guint guard_rows) {
+SkimWfGuard *skim_wf_guard_new(guint guard_rows, guint settle_rows) {
   SkimWfGuard *g = g_new0(SkimWfGuard, 1);
-  g->depth = MAX(guard_rows, 1u);
+  g->depth  = MAX(guard_rows, 1u);
+  g->settle = MAX(settle_rows, g->depth);
   g->fifo  = g_new0(GuardSlot, g->depth);
   return g;
 }
@@ -247,10 +248,11 @@ void skim_wf_guard_push(SkimWfGuard *g, const guint8 *row, guint nbins,
   gboolean suspect = FALSE;
   if (g->have_center && fabs(center_hz - g->last_center) > 0.5) {
     /* Centre changed between the previous row and this one: the rows still
-     * waiting were taken while the label may already have been stale, the
-     * next GUARD rows may still carry the old band. */
+     * waiting were taken while the label may already have been stale, and
+     * nothing that follows can be trusted until the label has stood still
+     * for `settle` rows — a polling server re-labels mid-turn. */
     for (guint i = 0; i < g->len; i++) { g->fifo[i].suspect = TRUE; }
-    g->suspect_until = g->seq + g->depth - 1;
+    g->suspect_until = g->seq + g->settle - 1;
   }
   g->have_center = TRUE;
   g->last_center = center_hz;

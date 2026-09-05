@@ -729,8 +729,10 @@ VFO = arrow on the scale; history in ABSOLUTE frequency with a per-row bin
 shift, because the SDR has no CTUN and every retune moves the IQ centre —
 his second live-look catch, "you reset my waterfall"; third catch "it tears
 while tuning" → the SDR reported GUI tuning only every 500 ms — fixed there
-(`tci_server_freq_changed`) + a 3-row retune guard here that drops rows ±3
-around a centre change). Rows ride the ONE
+(`tci_server_freq_changed`) + a retune guard here: 3-row delay, and after a
+centre change EVERY row is dropped until the centre has stood still ~0.7 s —
+the picture pauses while the knob turns instead of growing teeth, no matter
+how slowly a server reports). Rows ride the ONE
 event queue as EV_SPECTRUM (cap 48 pending, oldest dropped), one queue_draw
 per drain; header toggles list | waterfall over a GtkStack, `[ui] view`
 persisted (old `station_list` migrates); spectrum computed only while shown.

@@ -375,7 +375,7 @@ static void skim_wf_view_class_init(SkimWfViewClass *klass) {
 
 static void skim_wf_view_init(SkimWfView *v) {
   v->hist        = skim_wf_history_new(SKIM_WF_HISTORY_ROWS);
-  v->guard       = skim_wf_guard_new(SKIM_WF_RETUNE_GUARD);
+  v->guard       = skim_wf_guard_new(SKIM_WF_RETUNE_GUARD, SKIM_WF_RETUNE_SETTLE);
   skim_wf_guard_set_commit_cb(v->guard, view_commit_row, v);
   v->span_hz     = DEF_SPAN_HZ;
   v->rows_per_px = SKIM_WF_ROWS_PER_PX;

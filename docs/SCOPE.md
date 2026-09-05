@@ -670,12 +670,18 @@ where relevant, a live check against a running `sdr-for-linux`.
   broadcasts dds/vfo IMMEDIATELY from its frequency setter
   (`tci_server_freq_changed()` in `engine_set_frequency`, every tuning path;
   takes effect once the SDR runs that build), and the skimmer's
-  `SkimWfGuard` delays every row by `SKIM_WF_RETUNE_GUARD` = 3 rows and drops
-  the rows within ±3 of a centre change (≈ 32 ms either side — the residual
-  transport latency), so a mislabelled row can never reach the picture; while
-  the knob turns continuously the waterfall pauses and resumes when it stops.
-  Gate: 40 rows across a centre change → 31 committed in order, 6 dropped, 3
-  waiting; a steady centre drops nothing (60 checks).
+  `SkimWfGuard` delays every row by `SKIM_WF_RETUNE_GUARD` = 3 rows, drops
+  the rows waiting when the centre changes, and then drops EVERY row until
+  the centre has stood still for `SKIM_WF_RETUNE_SETTLE` = 66 rows (≈ 0.7 s,
+  longer than any TCI server's polling cadence) — so a label that only
+  updates every 500 ms can never place a row on a stale centre and no server
+  version can grow teeth. Richard's rule, stated at the third look: when the
+  centre moves the picture only gets filled in at the edges, nothing restarts,
+  nothing recentres; while the knob turns the waterfall pauses and resumes
+  ~0.7 s after it stops, the marker keeps moving. Gate: 50 rows across a
+  change → 34 committed in order, 13 dropped, 3 waiting; a knob turning
+  (centre changes every 6 rows) commits nothing mid-turn; a steady centre
+  drops nothing (61 checks).
   **App:** rows travel the ONE event queue (EV_SPECTRUM, blob + centre + bin;
   at most `SPEC_PENDING_MAX` 48 pending — the oldest row is dropped, a
   stalled UI must not hoard 1.5 MB/s), one `queue_draw` per drain; the top

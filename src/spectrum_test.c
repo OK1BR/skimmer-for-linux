@@ -395,31 +395,49 @@ static void compose_section(void) {
   g_snprintf(what, sizeof(what), "…and a pre-retune column still shows it at y %d", ye);
   check(what, bright_rows(pix, w, hgt, w - 15, &yb0, &yb1) >= 1 && yb0 <= ye && yb1 >= ye);
 
-  /* Retune guard: rows ±GUARD around a centre change are dropped, the rest
-   * committed in order with their own centre; nothing is lost otherwise. */
+  /* Retune guard: the G rows waiting before a centre change and every row
+   * after it until the centre has stood still for SETTLE rows are dropped;
+   * the rest is committed in order with its own centre. */
   {
+    const guint G = 3, S = 10;
     GuardGot got = { 0, 0, TRUE, 0 };
-    SkimWfGuard *gd = skim_wf_guard_new(SKIM_WF_RETUNE_GUARD);
+    SkimWfGuard *gd = skim_wf_guard_new(G, S);
     skim_wf_guard_set_commit_cb(gd, guard_commit, &got);
     guint8 r1[4];
-    /* 20 rows at centre A, then 20 at centre B; row byte 0 = its sequence. */
-    for (guint i = 1; i <= 40; i++) {
+    /* 20 rows at centre A, then 30 at centre B; row byte 0 = its sequence. */
+    for (guint i = 1; i <= 50; i++) {
       r1[0] = (guint8)i; r1[1] = r1[2] = r1[3] = 0;
       skim_wf_guard_push(gd, r1, 4, i <= 20 ? 1000.0 : 2000.0, 1.0);
     }
-    const guint G = SKIM_WF_RETUNE_GUARD;
-    g_snprintf(what, sizeof(what), "guard: 40 rows in → %u committed, %u dropped, %u still waiting",
-               got.n, skim_wf_guard_dropped(gd), G);
-    check(what, got.n == 40 - 2 * G - G && skim_wf_guard_dropped(gd) == 2 * G);
+    g_snprintf(what, sizeof(what), "guard: 50 rows in → %u committed, %u dropped (3 before + 10 settle), 3 waiting",
+               got.n, skim_wf_guard_dropped(gd));
+    check(what, got.n == 50 - G - S - G && skim_wf_guard_dropped(gd) == G + S);
     check("guard: committed rows stay in order", got.in_order);
     check("guard: the last committed row carries the NEW centre", got.last_c == 2000.0);
+    /* A label that keeps changing (polling server re-labels mid-turn) never
+     * settles: NOTHING from the turn gets out, the first rows after it do. */
+    GuardGot turn = { 0, 0, TRUE, 0 };
+    SkimWfGuard *gt = skim_wf_guard_new(G, S);
+    skim_wf_guard_set_commit_cb(gt, guard_commit, &turn);
+    for (guint i = 1; i <= 80; i++) {
+      r1[0] = (guint8)i;
+      /* rows 21..50: a new centre every 6 rows (< S) — the knob turning */
+      const double c = i <= 20 ? 1000.0 : i <= 50 ? 1000.0 + 100.0 * ((i - 21) / 6 + 1) : 1600.0;
+      skim_wf_guard_push(gt, r1, 4, c, 1.0);
+    }
+    /* out: rows 1..17 (3 dropped before the first change), then 61..77 */
+    g_snprintf(what, sizeof(what), "guard: a turning knob commits nothing mid-turn (%u out, %u dropped)",
+               turn.n, skim_wf_guard_dropped(gt));
+    check(what, turn.n == 17 + 17 && skim_wf_guard_dropped(gt) == 80 - 34 - G && turn.in_order &&
+          turn.last_c == 1600.0);
     /* No retune → nothing dropped, everything (bar the waiting tail) out. */
     GuardGot quiet = { 0, 0, TRUE, 0 };
-    SkimWfGuard *gq = skim_wf_guard_new(G);
+    SkimWfGuard *gq = skim_wf_guard_new(G, S);
     skim_wf_guard_set_commit_cb(gq, guard_commit, &quiet);
     for (guint i = 1; i <= 30; i++) { r1[0] = (guint8)i; skim_wf_guard_push(gq, r1, 4, 1000.0, 1.0); }
     check("guard: steady centre drops nothing", quiet.n == 30 - G && skim_wf_guard_dropped(gq) == 0);
     skim_wf_guard_free(gd);
+    skim_wf_guard_free(gt);
     skim_wf_guard_free(gq);
   }
 

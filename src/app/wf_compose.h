@@ -30,8 +30,14 @@
 #define SKIM_WF_FLOOR_PCT     20     /* percentile used as the floor estimate     */
 #define SKIM_WF_FLOOR_SMOOTH  0.01   /* EMA per row (τ ≈ 1 s at 94 rows/s)        */
 #define SKIM_WF_DB_OFFSET     200.0  /* spectrum.h byte encoding                  */
-#define SKIM_WF_RETUNE_GUARD  3      /* rows dropped either side of a centre
-                                      * change (≈ 32 ms at 94 rows/s)             */
+#define SKIM_WF_RETUNE_GUARD  3      /* rows dropped BEFORE a centre change
+                                      * (≈ 32 ms at 94 rows/s — the delay)        */
+#define SKIM_WF_RETUNE_SETTLE 66     /* rows dropped AFTER a centre change until
+                                      * the centre has stayed put this long
+                                      * (≈ 0.7 s: longer than any TCI server's
+                                      * polling cadence, sdr-for-linux's was
+                                      * 500 ms — while the knob turns the picture
+                                      * PAUSES instead of growing teeth)          */
 
 typedef struct _SkimWfHistory SkimWfHistory;
 
@@ -76,16 +82,18 @@ void skim_wf_compose(const SkimWfHistory *h, const SkimWfWindow *win,
                      guint32 *pix, int w, int hgt, int cols);
 
 /* Retune guard. The stream centre label rides the TCI control channel while
- * the IQ rides the data channel, so around a retune a few rows carry the
- * wrong centre — drawn in absolute frequency they tear the picture. The guard
- * delays every row by SKIM_WF_RETUNE_GUARD rows and drops the rows within
- * ±GUARD of a centre change (both those already waiting and those that
- * follow); everything else is committed unchanged, in order. */
+ * the IQ rides the data channel, so around a retune rows carry the wrong
+ * centre — drawn in absolute frequency they tear the picture (teeth while the
+ * knob turns). The guard delays every row by `guard_rows` and, at a centre
+ * change, drops the rows already waiting AND every following row until the
+ * centre has been stable for `settle_rows`; everything else is committed
+ * unchanged, in order. A label that only updates every 500 ms can therefore
+ * never place a row on a stale centre — the picture pauses while tuning. */
 typedef struct _SkimWfGuard SkimWfGuard;
 typedef void (*SkimWfGuardCommitCb)(const guint8 *row, guint nbins,
                                     double center_hz, double bin_hz, gpointer user);
 
-SkimWfGuard *skim_wf_guard_new(guint guard_rows);
+SkimWfGuard *skim_wf_guard_new(guint guard_rows, guint settle_rows);
 void         skim_wf_guard_free(SkimWfGuard *g);
 void         skim_wf_guard_set_commit_cb(SkimWfGuard *g, SkimWfGuardCommitCb cb, gpointer user);
 void         skim_wf_guard_push(SkimWfGuard *g, const guint8 *row, guint nbins,
