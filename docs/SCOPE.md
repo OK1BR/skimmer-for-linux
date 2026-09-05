@@ -1024,6 +1024,26 @@ where relevant, a live check against a running `sdr-for-linux`.
   but the pipeline flushes its decoders on a centre change anyway — go there
   only if spot frequencies during tuning ever matter.
 
+  **The callsign click is LIVE (Richard, 2026-09-05 22:05): open item (1)
+  CLOSED.** log-for-linux launched from its `builddir` (76349f8, relinked)
+  beside the running sdr 98c57de + skimmer 2ec8fd1 — all three on the one
+  TCI server, the logbook's dup service on 127.0.0.1:2238, its Call entry
+  empty. He clicked a station label in the waterfall column: "jo, to
+  vypadá, že funguje" — the radio tuned and the logbook took the call. What
+  the logs add: the running instance has no `SKIM_PANE_DEBUG`, so the
+  `wf click:` line is not written (gated, by design); the `SKIM_WF_DEBUG`
+  probe recorded two DISCRETE retunes at the moment of the test —
+  22:05:03 +855 bins (≈ +20.0 kHz) and 22:05:46 −855 bins back — each a
+  single label step with every row after it at L=0, the signature of a
+  click-tune (a knob sweep writes many small steps). Neither the SDR relay
+  nor the logbook logs a received click, so the prefill half rests on his
+  eyes alone. With this the click-through's last link (CLAUDE.md "open
+  before the tag" (2): prefill into an EMPTY Call entry) is confirmed as
+  well. Open, in order, now: (2) the column takes over SNR/WPM/heard/age,
+  THEN the station list is deleted; (3) SDR-13; (4) coherent re-centring
+  only after the NCO phase measurement; (5) DDC latency; (6) bin/hop/span,
+  crowded fan-out, column drain cost.
+
 ## Safety / etiquette
 
 Read-only against the radio, with one deliberate exception: the skimmer

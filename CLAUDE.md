@@ -869,6 +869,20 @@ imported the TCI client (main ran at import) and tuned his radio to 4 Hz for
 ~25 s; restored, main-guarded. Not built by design: a polling-server settle
 fallback (a click + stillness looks the same).
 
+**Callsign click LIVE-VERIFIED (Richard, 2026-09-05 22:05) — open item (1)
+CLOSED.** Logbook from its `builddir` (76349f8) beside sdr 98c57de + skimmer
+2ec8fd1 on the one TCI server, Call entry empty; a click on a waterfall
+column label: "jo, to vypadá, že funguje" — radio tuned, logbook took the
+call. Log corroboration for the tune half: two discrete ±855-bin retunes
+at 22:05:03/22:05:46 in the `SKIM_WF_DEBUG` probe (single label step, rows
+after at L=0 — a click, not a knob). The `wf click:` line is gated on
+`SKIM_PANE_DEBUG` (unset live) and neither relay nor logbook logs a
+received click, so the prefill half rests on his eyes. The pre-tag open
+item (2) above (prefill into an EMPTY Call entry) is closed by the same
+test. Open, in order: column takes over the list's columns → list deleted
+→ SDR-13 → coherent re-centring after a phase measurement → DDC latency →
+bin/hop/span + fan-out + drain cost.
+
 ## Layout
 
 ```
