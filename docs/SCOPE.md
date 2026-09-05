@@ -646,8 +646,13 @@ where relevant, a live check against a running `sdr-for-linux`.
   192 k band on 700×600); Cairo draws the kHz scale (CW Skimmer style — the
   kHz's last three digits, tick ladder 100 Hz … 50 kHz picked for ≥ 26 px),
   the VFO as a spot-green line + tab, and the (still empty) callsign column.
-  Wheel pans the frequency window, Ctrl+wheel zooms (2 kHz … the band); the
-  window follows the VFO until the operator pans, a VFO change re-arms it.
+  Wheel pans the frequency window, Ctrl+wheel zooms (2 kHz … the band), and
+  the scale strip can be grabbed and dragged (grab cursor; the label under
+  the pointer travels with it). **A retune moves ONLY the green marker**
+  (Richard at the first live look: the window must never jump under his
+  eyes); when the VFO leaves the window an arrow at the top or bottom of the
+  scale says which way. The window moves by itself only when the whole band
+  moves (a DDS retune clears the history and recentres on the VFO).
   **App:** rows travel the ONE event queue (EV_SPECTRUM, blob + centre + bin;
   at most `SPEC_PENDING_MAX` 48 pending — the oldest row is dropped, a
   stalled UI must not hoard 1.5 MB/s), one `queue_draw` per drain; the top

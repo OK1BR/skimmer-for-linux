@@ -5,9 +5,11 @@
  * scale strip to the right of the picture, the tuned frequency as a green
  * marker, and a column for the callsigns (filled in by the station model —
  * see skim_wf_view_set_stations). Pixels come from wf_compose.c; this file
- * owns the texture, the scale, the marker and the wheel: scroll pans the
- * frequency window, Ctrl+scroll zooms it. The window follows the VFO until
- * the operator pans by hand; a VFO change re-arms following.
+ * owns the texture, the scale, the marker and the mouse: the wheel pans the
+ * frequency window, Ctrl+wheel zooms it, and the scale strip can be GRABBED
+ * and dragged. A retune of the radio moves ONLY the green marker — the
+ * window never jumps under the operator's eyes (Richard, 2026-09-05); when
+ * the marker leaves the window a small arrow on the scale says which way.
  */
 #ifndef SKIM_WF_VIEW_H
 #define SKIM_WF_VIEW_H

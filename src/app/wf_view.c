@@ -21,7 +21,6 @@
 #define COLUMN_W      180     /* callsign column                            */
 #define MIN_SPAN_HZ  2000.0
 #define DEF_SPAN_HZ 20000.0
-#define FOLLOW_BAND   0.5     /* VFO may wander this fraction of the span   */
 #define REFLOOR_DB    1.0     /* floor drift that forces a full recompose   */
 
 struct _SkimWfView {
@@ -30,9 +29,10 @@ struct _SkimWfView {
   double         centre_hz;                    /* visible window centre      */
   double         span_hz;
   gboolean       have_centre;
-  gboolean       follow;
   double         vfo_hz;
   guint          rows_per_px;
+  gboolean       dragging;                     /* scale strip grabbed        */
+  double         drag_centre0;                 /* centre when the grab began */
 
   guint32       *pix;                          /* wf_w × h                   */
   int            pix_w, pix_h;
@@ -75,11 +75,11 @@ void skim_wf_view_push(SkimWfView *v, const guint8 *row, guint nbins,
                          nbins != skim_wf_history_bins(v->hist);
   skim_wf_history_push(v->hist, row, nbins, center_hz, bin_hz);
   if (moved) {
-    /* First row, or the band moved: start on the VFO if we know it, else
-     * on the band centre, and repaint from scratch. */
-    if (!v->have_centre || v->follow) {
-      v->centre_hz = v->vfo_hz > 0 ? v->vfo_hz : center_hz;
-    }
+    /* First row, or the whole band moved (the radio's DDS centre changed):
+     * the old window means nothing now — start on the VFO if we know it,
+     * else on the band centre, and repaint from scratch. This is the ONLY
+     * time the window moves by itself. */
+    v->centre_hz   = v->vfo_hz > 0 ? v->vfo_hz : center_hz;
     v->have_centre = TRUE;
     clamp_window(v);
     v->need_full = TRUE;
@@ -90,14 +90,9 @@ void skim_wf_view_push(SkimWfView *v, const guint8 *row, guint nbins,
 
 void skim_wf_view_set_vfo(SkimWfView *v, double hz) {
   if (hz == v->vfo_hz) { return; }
-  v->vfo_hz = hz;
-  v->follow = TRUE;                            /* the operator tuned: go there */
-  if (hz > 0 && (fabs(hz - v->centre_hz) > v->span_hz * FOLLOW_BAND / 2.0)) {
-    v->centre_hz = hz;
-    clamp_window(v);
-    v->need_full = TRUE;
-  }
-  v->tex_stale = TRUE;
+  v->vfo_hz = hz;                              /* marker only — the window
+                                                * stays where the operator
+                                                * put it                     */
   gtk_widget_queue_draw(GTK_WIDGET(v));
 }
 
@@ -130,13 +125,54 @@ static gboolean on_scroll(GtkEventControllerScroll *ctl, double dx, double dy,
     v->span_hz *= pow(1.25, dy);               /* wheel down = zoom out      */
   } else {
     v->centre_hz -= dy * v->span_hz * 0.1;     /* wheel down = lower freqs   */
-    v->follow = FALSE;                         /* hand on the wheel          */
   }
   clamp_window(v);
   v->need_full = TRUE;
   v->tex_stale = TRUE;
   gtk_widget_queue_draw(GTK_WIDGET(v));
   return TRUE;
+}
+
+/* --- grab the scale strip and drag it ----------------------------------------------- */
+
+static gboolean in_scale(const SkimWfView *v, double x) {
+  const int wf_w = wf_width(v);
+  return x >= wf_w && x < wf_w + SCALE_W;
+}
+
+static void on_drag_begin(GtkGestureDrag *g, double x, double y, gpointer user) {
+  (void)g; (void)y;
+  SkimWfView *v = user;
+  v->dragging = in_scale(v, x) && skim_wf_history_rows(v->hist) > 0;
+  v->drag_centre0 = v->centre_hz;
+}
+
+static void on_drag_update(GtkGestureDrag *g, double dx, double dy, gpointer user) {
+  (void)g; (void)dx;
+  SkimWfView *v = user;
+  if (!v->dragging) { return; }
+  /* The label under the pointer travels WITH the pointer: dragging the axis
+   * down by dy px raises the frequency at any fixed pixel by dy · span / h,
+   * i.e. the centre goes up by that much. */
+  const int h = gtk_widget_get_height(GTK_WIDGET(v));
+  if (h <= 0) { return; }
+  v->centre_hz = v->drag_centre0 + dy * v->span_hz / (double)h;
+  clamp_window(v);
+  v->need_full = TRUE;
+  v->tex_stale = TRUE;
+  gtk_widget_queue_draw(GTK_WIDGET(v));
+}
+
+static void on_drag_end(GtkGestureDrag *g, double dx, double dy, gpointer user) {
+  (void)g; (void)dx; (void)dy;
+  SkimWfView *v = user;
+  v->dragging = FALSE;
+}
+
+static void on_motion(GtkEventControllerMotion *m, double x, double y, gpointer user) {
+  (void)m; (void)y;
+  SkimWfView *v = user;
+  gtk_widget_set_cursor_from_name(GTK_WIDGET(v), in_scale(v, x) ? "grab" : NULL);
 }
 
 /* --- rendering -------------------------------------------------------------------- */
@@ -226,9 +262,21 @@ static void draw_marker(SkimWfView *v, cairo_t *cr, int wf_w, int h) {
   SkimWfWindow win;
   window_of(v, &win);
   const double y = floor(skim_wf_y_of_hz(&win, h, v->vfo_hz)) + 0.5;
-  if (y < 0 || y > h) { return; }
-  /* Spot green (SKIM_SPOT_ARGB family colour) across the picture + a tab. */
+  /* Spot green (SKIM_SPOT_ARGB family colour). */
   cairo_set_source_rgba(cr, 0.19, 0.75, 0.38, 0.9);
+  if (y < 0 || y > h) {
+    /* The radio sits outside the window: an arrow on the scale strip says
+     * which way — the window itself never chases the VFO. */
+    const double ax = wf_w + SCALE_W / 2.0;
+    if (y < 0) {
+      cairo_move_to(cr, ax, 3); cairo_line_to(cr, ax - 6, 12); cairo_line_to(cr, ax + 6, 12);
+    } else {
+      cairo_move_to(cr, ax, h - 3); cairo_line_to(cr, ax - 6, h - 12); cairo_line_to(cr, ax + 6, h - 12);
+    }
+    cairo_close_path(cr);
+    cairo_fill(cr);
+    return;
+  }
   cairo_set_line_width(cr, 1.0);
   cairo_move_to(cr, 0, y);
   cairo_line_to(cr, wf_w, y);
@@ -304,7 +352,6 @@ static void skim_wf_view_init(SkimWfView *v) {
   v->hist        = skim_wf_history_new(SKIM_WF_HISTORY_ROWS);
   v->span_hz     = DEF_SPAN_HZ;
   v->rows_per_px = SKIM_WF_ROWS_PER_PX;
-  v->follow      = TRUE;
   v->need_full   = TRUE;
   v->tex_stale   = TRUE;
   gtk_widget_set_hexpand(GTK_WIDGET(v), TRUE);
@@ -314,6 +361,15 @@ static void skim_wf_view_init(SkimWfView *v) {
       GTK_EVENT_CONTROLLER_SCROLL_VERTICAL | GTK_EVENT_CONTROLLER_SCROLL_DISCRETE);
   g_signal_connect(sc, "scroll", G_CALLBACK(on_scroll), v);
   gtk_widget_add_controller(GTK_WIDGET(v), sc);
+  GtkGesture *drag = gtk_gesture_drag_new();
+  gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag), GDK_BUTTON_PRIMARY);
+  g_signal_connect(drag, "drag-begin", G_CALLBACK(on_drag_begin), v);
+  g_signal_connect(drag, "drag-update", G_CALLBACK(on_drag_update), v);
+  g_signal_connect(drag, "drag-end", G_CALLBACK(on_drag_end), v);
+  gtk_widget_add_controller(GTK_WIDGET(v), GTK_EVENT_CONTROLLER(drag));
+  GtkEventController *mo = gtk_event_controller_motion_new();
+  g_signal_connect(mo, "motion", G_CALLBACK(on_motion), v);
+  gtk_widget_add_controller(GTK_WIDGET(v), mo);
 }
 
 GtkWidget *skim_wf_view_new(void) {
