@@ -900,6 +900,13 @@ built: dB smoothing — the suffix may flicker under load, his look
 decides. Step two (delete the list, its toggle, sorter, fmt_*) waits for
 that look.
 
+**Live look on the column (Richard, 2026-09-05 ~23:25): the dB after the
+call is OUT — "stačí to, co je v tooltipu, tam to vypadá líp".** Label is
+"CQ SV1JDZ" again; the tooltip alone carries kHz / speed / dB / heard /
+age. `skim_wf_label_text` + `_snr_text` and their four checks removed
+(spectrum 117 → 113), tooltip machinery unchanged. Step two (delete the
+list) next, on his word.
+
 ## Layout
 
 ```

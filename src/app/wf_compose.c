@@ -406,17 +406,6 @@ int skim_wf_label_at(const SkimWfLabel *lab, guint n, double pitch, double py) {
 
 /* -------- callsign column text ------------------------------------------------ */
 
-void skim_wf_label_snr_text(char *out, gsize n, double snr_db) {
-  g_snprintf(out, n, " %.0f dB", snr_db);
-}
-
-void skim_wf_label_text(char *out, gsize n, const char *call, gboolean cq,
-                        double snr_db) {
-  char sfx[24];
-  skim_wf_label_snr_text(sfx, sizeof(sfx), snr_db);
-  g_snprintf(out, n, "%s%s%s", cq ? "CQ " : "", call, sfx);
-}
-
 void skim_wf_age_text(char *out, gsize n, gint64 last_heard_us, gint64 now_us) {
   gint64 s = (now_us - last_heard_us) / G_USEC_PER_SEC;
   if (s < 0) { s = 0; }

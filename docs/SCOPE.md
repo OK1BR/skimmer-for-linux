@@ -1081,6 +1081,16 @@ where relevant, a live check against a running `sdr-for-linux`.
   is needed at all. Step two (delete the list, its toggle, sorter and
   formatters) waits for that look.
 
+  **Live look (Richard, 2026-09-05 ~23:25): "22 dB co je za volačkou se
+  tam moc nehodí… stačí to, co je v tooltipu, tam to vypadá líp."** The dB
+  after the call is OUT; the label is "CQ SV1JDZ" again and the tooltip
+  alone carries the list's columns (kHz, speed, dB, heard, age). Removed
+  with it: `skim_wf_label_text` / `skim_wf_label_snr_text`, the second
+  Pango layout and its four gate checks (spectrum 117 → 113); the tooltip
+  path, `SkimWfStation`'s new fields and the tip-area rule stay as built.
+  The flicker caveat above is moot — no number sits on the label. Step
+  two (delete the list) is next, on his word.
+
 ## Safety / etiquette
 
 Read-only against the radio, with one deliberate exception: the skimmer

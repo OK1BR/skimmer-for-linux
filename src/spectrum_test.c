@@ -701,20 +701,11 @@ static void labels_section(void) {
   check("hit: a hidden label is never hit", o[0].y < 0 && skim_wf_label_at(o, 40, P, 5.0) != 0);
 }
 
-/* --- callsign column text: the station list's cell formats, pinned ------------- */
+/* --- callsign column tooltip: the station list's cell formats, pinned ---------- */
 
 static void text_section(void) {
-  printf("[text] callsign column label + tooltip\n");
+  printf("[text] callsign column tooltip\n");
   char t[160];
-  skim_wf_label_text(t, sizeof(t), "DL1ABC", TRUE, 23.4);
-  check("label: caller = \"CQ DL1ABC 23 dB\"", strcmp(t, "CQ DL1ABC 23 dB") == 0);
-  skim_wf_label_text(t, sizeof(t), "OK1BR/P", FALSE, 7.6);
-  check("label: S&P station has no CQ prefix, dB rounds", strcmp(t, "OK1BR/P 8 dB") == 0);
-  skim_wf_label_text(t, sizeof(t), "F5UTN", TRUE, -3.2);
-  check("label: a negative strength keeps its sign", strcmp(t, "CQ F5UTN -3 dB") == 0);
-  skim_wf_label_snr_text(t, sizeof(t), 23.4);
-  check("label: the suffix alone is what the label ends with", strcmp(t, " 23 dB") == 0);
-
   const gint64 now = 1000 * G_USEC_PER_SEC;
   skim_wf_age_text(t, sizeof(t), now - 8 * G_USEC_PER_SEC - 400000, now);
   check("age: under a minute = whole seconds", strcmp(t, "8s") == 0);

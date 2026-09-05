@@ -980,8 +980,8 @@ static int settings_load_palette(void) {
 /* The top view. A fresh install opens on the WATERFALL: with the callsign
  * column it is the view one works from (Richard, 2026-09-05 — "the list
  * probably isn't needed"); the column now carries the list's columns too
- * (dB after the call, speed / heard / age in the tooltip), so the list and
- * its toggle stay only until his look — then they go. A saved choice —
+ * (kHz, speed, dB, heard, age in the label's tooltip), so the list and its
+ * toggle stay only until his look — then they go. A saved choice —
  * including the pre-M8 list-only key — always wins. */
 static guint settings_load_view(void) {
   char *path = settings_file();

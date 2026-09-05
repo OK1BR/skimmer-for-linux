@@ -151,17 +151,11 @@ int skim_wf_label_at(const SkimWfLabel *lab, guint n, double pitch, double py);
 
 /* -------- callsign column text ------------------------------------------------ */
 
-/* The column carries the station list's columns (Richard, 2026-09-05: the
- * strength after the call, CW Skimmer style, the rest in a tooltip — so the
- * list can go). The formats ARE the list's cell formats, pinned here where
- * the gate can read them. */
-
-/* " 23 dB" — the strength suffix the widget draws dimmer after the call. */
-void skim_wf_label_snr_text(char *out, gsize n, double snr_db);
-
-/* The whole label: "CQ DL1ABC 23 dB" (no "CQ " for an S&P station). */
-void skim_wf_label_text(char *out, gsize n, const char *call, gboolean cq,
-                        double snr_db);
+/* The column carries the station list's columns in the label's TOOLTIP
+ * (Richard, 2026-09-05 — so the list can go; a "23 dB" after the call was
+ * tried and taken out on his live look: "staci to, co je v tooltipu"). The
+ * formats ARE the list's cell formats, pinned here where the gate can read
+ * them. */
 
 /* "8s" under a minute, "1m05s" above, never negative. now_us is the CALLER's
  * clock (monotonic live, stream time in a replay) so the age is testable. */

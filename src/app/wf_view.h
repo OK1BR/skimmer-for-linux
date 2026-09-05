@@ -5,9 +5,8 @@
  * scale strip to the right of the picture, the tuned frequency as a green
  * marker, and the callsign column (CW Skimmer's: a rail with a dot on every
  * station's frequency, the callsign beside it, crowded labels fanned apart
- * with a connector back to the dot, the strength after the call and the
- * rest of the station list's columns in the label's tooltip — a click on a
- * label tunes the radio).
+ * with a connector back to the dot, the station list's columns in the
+ * label's tooltip — a click on a label tunes the radio).
  * Pixels come from wf_compose.c; this file owns the texture, the scale, the
  * marker, the column and the mouse: the wheel pans the frequency window,
  * Ctrl+wheel zooms it, and the scale strip can be GRABBED and dragged. A retune of the radio moves ONLY the green marker — the
@@ -36,9 +35,9 @@ void skim_wf_view_set_vfo(SkimWfView *v, double hz);
 
 /* The callsign column: a snapshot of the station table, one entry per
  * tracked station (CQ and S&P alike — the column IS the station list in
- * another shape: the strength rides the label, speed / heard / age sit in
- * the label's tooltip). The widget copies the array; call again on every
- * change. Colours follow the logbook verdict exactly as the pane and the
+ * another shape: kHz, speed, dB, heard and age sit in the label's tooltip;
+ * a dB after the call was tried and taken out on Richard's live look). The
+ * widget copies the array; call again on every change. Colours follow the logbook verdict exactly as the pane and the
  * panadapter spots do (gray = DUP/B4/INV); the pane's fixed station is drawn
  * bold. */
 typedef struct {
@@ -47,7 +46,7 @@ typedef struct {
   gboolean cq;         /* heard CALLING → "CQ " prefix                       */
   gboolean gray;       /* the logbook says do not call (skim_dup_verdict_gray)*/
   gboolean tuned;      /* the decode pane's fixed station                    */
-  double   snr_db;     /* after the call; seat priority over capacity        */
+  double   snr_db;     /* tooltip; seat priority when over capacity          */
   char     mode[8];    /* "CW" / "RTTY" — picks WPM or Bd in the tooltip     */
   double   speed;      /* WPM or baud                                        */
   guint    reports;    /* decode events folded into the record ("heard")    */
