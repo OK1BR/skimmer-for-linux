@@ -661,7 +661,21 @@ where relevant, a live check against a running `sdr-for-linux`.
   shows in the old columns and floor in the new ones (gated, 56 checks). The
   window recentres on the VFO only when the new band no longer overlaps it
   at all (a band change), and only a rate change (new bin width) clears the
-  history.
+  history. **Retune tearing (third live-look catch, same day: "it breaks up
+  and jitters while tuning"):** the centre label rides the TCI control
+  channel while the IQ rides the data channel, and sdr-for-linux reported
+  GUI-side tuning only through its 500 ms reporter — so while the knob turned
+  the skimmer stamped up to half a second of rows with a stale centre and drew
+  them shifted (the sloping traces). Two-sided fix: sdr-for-linux now
+  broadcasts dds/vfo IMMEDIATELY from its frequency setter
+  (`tci_server_freq_changed()` in `engine_set_frequency`, every tuning path;
+  takes effect once the SDR runs that build), and the skimmer's
+  `SkimWfGuard` delays every row by `SKIM_WF_RETUNE_GUARD` = 3 rows and drops
+  the rows within ±3 of a centre change (≈ 32 ms either side — the residual
+  transport latency), so a mislabelled row can never reach the picture; while
+  the knob turns continuously the waterfall pauses and resumes when it stops.
+  Gate: 40 rows across a centre change → 31 committed in order, 6 dropped, 3
+  waiting; a steady centre drops nothing (60 checks).
   **App:** rows travel the ONE event queue (EV_SPECTRUM, blob + centre + bin;
   at most `SPEC_PENDING_MAX` 48 pending — the oldest row is dropped, a
   stalled UI must not hoard 1.5 MB/s), one `queue_draw` per drain; the top

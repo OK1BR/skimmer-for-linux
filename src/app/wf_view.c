@@ -26,6 +26,7 @@
 struct _SkimWfView {
   GtkWidget      parent_instance;
   SkimWfHistory *hist;
+  SkimWfGuard   *guard;                        /* rows around a retune → out */
   double         centre_hz;                    /* visible window centre      */
   double         span_hz;
   gboolean       have_centre;
@@ -71,8 +72,10 @@ static int wf_width(const SkimWfView *v) {
 
 /* --- data in ---------------------------------------------------------------------- */
 
-void skim_wf_view_push(SkimWfView *v, const guint8 *row, guint nbins,
-                       double center_hz, double bin_hz) {
+/* A row the retune guard let through (a few rows late, never mislabelled). */
+static void view_commit_row(const guint8 *row, guint nbins, double center_hz,
+                            double bin_hz, gpointer user) {
+  SkimWfView *v = user;
   const gboolean fresh = skim_wf_history_rows(v->hist) == 0 ||
                          nbins != skim_wf_history_bins(v->hist);
   const double old_c = skim_wf_history_center_hz(v->hist);
@@ -102,6 +105,11 @@ void skim_wf_view_push(SkimWfView *v, const guint8 *row, guint nbins,
   }
   v->pending_rows++;
   v->tex_stale = TRUE;
+}
+
+void skim_wf_view_push(SkimWfView *v, const guint8 *row, guint nbins,
+                       double center_hz, double bin_hz) {
+  skim_wf_guard_push(v->guard, row, nbins, center_hz, bin_hz);
 }
 
 void skim_wf_view_set_vfo(SkimWfView *v, double hz) {
@@ -352,6 +360,7 @@ static void skim_wf_view_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
 static void skim_wf_view_dispose(GObject *obj) {
   SkimWfView *v = SKIM_WF_VIEW(obj);
   g_clear_object(&v->tex);
+  g_clear_pointer(&v->guard, skim_wf_guard_free);
   g_clear_pointer(&v->hist, skim_wf_history_free);
   g_clear_pointer(&v->pix, g_free);
   G_OBJECT_CLASS(skim_wf_view_parent_class)->dispose(obj);
@@ -366,6 +375,8 @@ static void skim_wf_view_class_init(SkimWfViewClass *klass) {
 
 static void skim_wf_view_init(SkimWfView *v) {
   v->hist        = skim_wf_history_new(SKIM_WF_HISTORY_ROWS);
+  v->guard       = skim_wf_guard_new(SKIM_WF_RETUNE_GUARD);
+  skim_wf_guard_set_commit_cb(v->guard, view_commit_row, v);
   v->span_hz     = DEF_SPAN_HZ;
   v->rows_per_px = SKIM_WF_ROWS_PER_PX;
   v->need_full   = TRUE;

@@ -30,6 +30,8 @@
 #define SKIM_WF_FLOOR_PCT     20     /* percentile used as the floor estimate     */
 #define SKIM_WF_FLOOR_SMOOTH  0.01   /* EMA per row (τ ≈ 1 s at 94 rows/s)        */
 #define SKIM_WF_DB_OFFSET     200.0  /* spectrum.h byte encoding                  */
+#define SKIM_WF_RETUNE_GUARD  3      /* rows dropped either side of a centre
+                                      * change (≈ 32 ms at 94 rows/s)             */
 
 typedef struct _SkimWfHistory SkimWfHistory;
 
@@ -72,6 +74,23 @@ double skim_wf_hz_of_y(const SkimWfWindow *win, int hgt, double y);
  * beyond the stored history take the palette's floor colour. */
 void skim_wf_compose(const SkimWfHistory *h, const SkimWfWindow *win,
                      guint32 *pix, int w, int hgt, int cols);
+
+/* Retune guard. The stream centre label rides the TCI control channel while
+ * the IQ rides the data channel, so around a retune a few rows carry the
+ * wrong centre — drawn in absolute frequency they tear the picture. The guard
+ * delays every row by SKIM_WF_RETUNE_GUARD rows and drops the rows within
+ * ±GUARD of a centre change (both those already waiting and those that
+ * follow); everything else is committed unchanged, in order. */
+typedef struct _SkimWfGuard SkimWfGuard;
+typedef void (*SkimWfGuardCommitCb)(const guint8 *row, guint nbins,
+                                    double center_hz, double bin_hz, gpointer user);
+
+SkimWfGuard *skim_wf_guard_new(guint guard_rows);
+void         skim_wf_guard_free(SkimWfGuard *g);
+void         skim_wf_guard_set_commit_cb(SkimWfGuard *g, SkimWfGuardCommitCb cb, gpointer user);
+void         skim_wf_guard_push(SkimWfGuard *g, const guint8 *row, guint nbins,
+                                double center_hz, double bin_hz);
+guint        skim_wf_guard_dropped(const SkimWfGuard *g);   /* rows dropped so far */
 
 /* Palette (sdr-for-linux waterfall.c table; index 0 = "Classic"). */
 int         skim_wf_palette_count(void);

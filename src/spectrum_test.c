@@ -273,6 +273,15 @@ static guint bright_near(const guint32 *pix, int w, int hgt, int x, int yc, int 
   return n;
 }
 
+/* Retune-guard capture: rows out, order (byte 0 = sequence), last centre. */
+typedef struct { guint n; double last_c; gboolean in_order; guint8 prev; } GuardGot;
+static void guard_commit(const guint8 *r, guint nb, double c, double b, gpointer u) {
+  (void)nb; (void)b;
+  GuardGot *gg = u;
+  if (gg->n && r[0] <= gg->prev) { gg->in_order = FALSE; }
+  gg->prev = r[0]; gg->n++; gg->last_c = c;
+}
+
 static void compose_section(void) {
   printf("-- composer\n");
   const guint  nbins  = 2048;                        /* the 48 k geometry    */
@@ -385,6 +394,34 @@ static void compose_section(void) {
         bright_rows(pix, w, hgt, w - 1, &ya0, &ya1) == 0);
   g_snprintf(what, sizeof(what), "…and a pre-retune column still shows it at y %d", ye);
   check(what, bright_rows(pix, w, hgt, w - 15, &yb0, &yb1) >= 1 && yb0 <= ye && yb1 >= ye);
+
+  /* Retune guard: rows ±GUARD around a centre change are dropped, the rest
+   * committed in order with their own centre; nothing is lost otherwise. */
+  {
+    GuardGot got = { 0, 0, TRUE, 0 };
+    SkimWfGuard *gd = skim_wf_guard_new(SKIM_WF_RETUNE_GUARD);
+    skim_wf_guard_set_commit_cb(gd, guard_commit, &got);
+    guint8 r1[4];
+    /* 20 rows at centre A, then 20 at centre B; row byte 0 = its sequence. */
+    for (guint i = 1; i <= 40; i++) {
+      r1[0] = (guint8)i; r1[1] = r1[2] = r1[3] = 0;
+      skim_wf_guard_push(gd, r1, 4, i <= 20 ? 1000.0 : 2000.0, 1.0);
+    }
+    const guint G = SKIM_WF_RETUNE_GUARD;
+    g_snprintf(what, sizeof(what), "guard: 40 rows in → %u committed, %u dropped, %u still waiting",
+               got.n, skim_wf_guard_dropped(gd), G);
+    check(what, got.n == 40 - 2 * G - G && skim_wf_guard_dropped(gd) == 2 * G);
+    check("guard: committed rows stay in order", got.in_order);
+    check("guard: the last committed row carries the NEW centre", got.last_c == 2000.0);
+    /* No retune → nothing dropped, everything (bar the waiting tail) out. */
+    GuardGot quiet = { 0, 0, TRUE, 0 };
+    SkimWfGuard *gq = skim_wf_guard_new(G);
+    skim_wf_guard_set_commit_cb(gq, guard_commit, &quiet);
+    for (guint i = 1; i <= 30; i++) { r1[0] = (guint8)i; skim_wf_guard_push(gq, r1, 4, 1000.0, 1.0); }
+    check("guard: steady centre drops nothing", quiet.n == 30 - G && skim_wf_guard_dropped(gq) == 0);
+    skim_wf_guard_free(gd);
+    skim_wf_guard_free(gq);
+  }
 
   /* Cost of the worst case (informative, not a check): the whole 192 k band
    * on a 700×600 picture (≈ 14 bins per pixel row), full recompose vs the
