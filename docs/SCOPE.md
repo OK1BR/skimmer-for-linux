@@ -1091,6 +1091,31 @@ where relevant, a live check against a running `sdr-for-linux`.
   The flicker caveat above is moot — no number sits on the label. Step
   two (delete the list) is next, on his word.
 
+  **The station list is GONE (Richard's "ano, vyhoď ten seznam", 2026-09-05
+  ~23:30; step two of his two-step call).** Deleted from `main.c`: the
+  frequency-sorted `GtkColumnView` with its seven columns and cell
+  formatters (`fmt_*`, `cell_setup` / `cell_bind`, `add_column`), the
+  `GtkSortListModel` + `freq_cmp`, `on_row_activated`, the WPM/Bd column
+  retitle on a mode change, the list toggle and the `GtkStack` that held
+  list | waterfall, and `VIEW_LIST`. What stays: the `GListStore` of
+  `SkimRow` with its call→row hash and O(1) in-place updates — it is the
+  station table's mirror, read by the waterfall column (`wf_stations_sync`)
+  and the tuned-pane resolver — and the pane-only layout: the header keeps
+  ONE toggle, waterfall on / off, `[ui] view` = "waterfall" | "none"; a saved
+  "list" and the pre-M8 `station_list=true` fall to the waterfall, the
+  list's successor. `age_tick` no longer re-announces the store (that fed
+  the list's Age column; the tooltip computes its age at query time). The
+  waterfall widget sits in the window box directly; the separator under it
+  is `pane_sep` now. Build clean, 12 gates green (no gate covered the
+  list). Headless (Broadway, private D-Bus, RTTY fixture, CDP): a config
+  saved with `view=list` opens on the waterfall with the single toggle;
+  toggle off → pane alone, no hairline, `view=none` written; toggle on →
+  waterfall + column ("CQ SV1JDZ"), `view=waterfall` written; zero GTK
+  warnings. −190 lines. Open, in order, now: SDR-13 (sdr-for-linux came up
+  at 1 Hz after a restart) → coherent re-centring only after the NCO phase
+  measurement → `SDRFL_DDC_LAT_MS` → bin/hop/span, crowded fan-out, column
+  drain cost under contest load.
+
 ## Safety / etiquette
 
 Read-only against the radio, with one deliberate exception: the skimmer

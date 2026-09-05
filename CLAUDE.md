@@ -907,6 +907,18 @@ age. `skim_wf_label_text` + `_snr_text` and their four checks removed
 (spectrum 117 → 113), tooltip machinery unchanged. Step two (delete the
 list) next, on his word.
 
+**The station list is GONE (Richard's "ano, vyhoď ten seznam", 2026-09-05
+~23:30) — step two done.** `main.c` −190 lines: `GtkColumnView` + columns +
+formatters, sort model + `freq_cmp`, `on_row_activated`, list toggle,
+`GtkStack`, `VIEW_LIST`. The `GListStore` of `SkimRow` stays as the station
+table's mirror (column + pane resolver read it). Header keeps ONE toggle,
+waterfall on / off; `[ui] view` = "waterfall" | "none", a saved "list" (and
+pre-M8 `station_list=true`) falls to the waterfall. Headless-verified
+(Broadway, RTTY fixture, CDP toggling; settings written as expected, zero
+warnings); 12 gates green. **Open, in order: SDR-13 → coherent re-centring
+only after the NCO phase measurement → DDC latency → bin/hop/span, fan-out,
+column drain cost under contest load.**
+
 ## Layout
 
 ```
@@ -919,7 +931,8 @@ src/engine/   headless, GLib-only:
   station      per-frequency station tracker
   callsign     extraction + validation (RBN-grade)
   spot_out     TCI SPOT feed + RBN telnet feed
-src/app/      GTK4/libadwaita: main.c, window (station list + log), later waterfall
+src/app/      GTK4/libadwaita: main.c (window: waterfall + callsign column over the
+              decode pane), wf_view.c (widget), wf_compose.c (GLib-only pixels + layout)
 vendor/wdsp/  in-tree WDSP copy (FFT + resampler)
 docs/SCOPE.md the plan
 ```

@@ -1,12 +1,14 @@
-/* main.c — skimmer-for-linux GTK4/libadwaita front-end (M5).
+/* main.c — skimmer-for-linux GTK4/libadwaita front-end (M5, M8).
  *
- * A light station list over the headless engine pipeline: a sorted
- * GtkColumnView of stations (call / freq / WPM / SNR / heard count) and a
- * bottom pane showing the decode text at the radio's TUNED frequency (the
- * vfo:0,0 the server broadcasts). Decoded text is kept per frequency, so the
- * pane always shows one frequency's history — never a mixed log. Activating
- * a row TUNES the radio there (the only radio state the skimmer ever touches,
- * and only on the user's click). No connect button: a scanner probes
+ * A light window over the headless engine pipeline: the waterfall with its
+ * callsign column (M8 — CW Skimmer's layout; the frequency-sorted station
+ * list it replaced went 2026-09-05 at Richard's call, the column's tooltip
+ * carries its columns) and a bottom pane showing the decode text at the
+ * radio's TUNED frequency (the vfo:0,0 the server broadcasts). Decoded text
+ * is kept per frequency, so the pane always shows one frequency's history —
+ * never a mixed log. A click on a callsign TUNES the radio there (the only
+ * radio state the skimmer ever touches, and only on the user's click). No
+ * connect button: a scanner probes
  * <host>:40001 (host set in Preferences, persisted) and the pipeline follows
  * the server up and down automatically. Engine callbacks fire on
  * engine/network threads and are coalesced into ONE queue drained by a
@@ -75,7 +77,7 @@ static SkimRow *skim_row_new(const SkimStation *st) {
 
 /* --- app state -------------------------------------------------------------------- */
 
-enum { VIEW_NONE = 0, VIEW_LIST = 1, VIEW_WF = 2 };
+enum { VIEW_NONE = 0, VIEW_WF = 1 };   /* the station list view is gone   */
 
 /* Spectrum rows are display-only: bound what a stalled UI can pile up (a
  * 16 KB row 94× a second is 1.5 MB/s of pending memory otherwise). */
@@ -111,12 +113,12 @@ typedef struct {
                                   * and text feed both key off it, so they
                                   * can never disagree                        */
   double          tuned_slot_hz; /* its pinned frequency (slot key)           */
-  GListStore     *stations;      /* of SkimRow                                */
-  GtkColumnViewColumn *speed_col; /* header follows the mode (WPM / Bd)       */
+  GListStore     *stations;      /* of SkimRow — the station table's mirror;
+                                  * the waterfall column and the tuned-pane
+                                  * resolver read it                          */
   GHashTable     *row_by_call;   /* call → SkimRow* (owns a ref) — O(1) event
                                   * application; the per-event store scan
                                   * pegged the UI thread (2026-08-01)         */
-  GtkSortListModel *sorted;
   GtkTextBuffer  *tuned;         /* decode text at the tuned frequency        */
   GtkTextTag     *draft_tag;     /* dim: reader may still rewrite this text   */
   GtkTextTag     *scp_tag;       /* green+underline: MASTER.SCP knows this
@@ -127,15 +129,13 @@ typedef struct {
   gboolean        pane_hand;     /* hand cursor currently shown over the pane */
   GtkLabel       *tuned_label;
   GtkWidget      *tuned_scroll;  /* the decode pane's scroller                */
-  GtkWidget      *list_scroll;   /* the station list's scroller               */
-  GtkWidget      *list_sep;      /* separator between list and decode pane    */
+  GtkWidget      *pane_sep;      /* separator between waterfall and pane      */
   GtkWidget      *head_sep;      /* hairline under the header — waterfall only */
-  guint           view;          /* top area: VIEW_NONE / VIEW_LIST / VIEW_WF
-                                  * (persisted [ui] view); the decode pane is
-                                  * ALWAYS visible                            */
-  gboolean        view_syncing;  /* toggles set by code, not by the user      */
-  GtkWidget      *top_stack;     /* "list" | "waterfall"                      */
-  GtkWidget      *list_btn, *wf_btn;
+  guint           view;          /* top area: VIEW_WF / VIEW_NONE (persisted
+                                  * [ui] view); the decode pane is ALWAYS
+                                  * visible                                   */
+  gboolean        view_syncing;  /* toggle set by code, not by the user       */
+  GtkWidget      *wf_btn;        /* header toggle: waterfall on / off         */
   SkimWfView     *wf;            /* M8 waterfall view                         */
   int             palette;       /* waterfall colour scheme (persisted [ui]) — the
                                   * same table sdr-for-linux offers            */
@@ -878,8 +878,6 @@ static gboolean lag_tick(gpointer data) {
 static gboolean age_tick(gpointer data) {
   App *app = data;
   if (app->closing) { return G_SOURCE_REMOVE; }
-  guint n = g_list_model_get_n_items(G_LIST_MODEL(app->stations));
-  if (n) { g_list_model_items_changed(G_LIST_MODEL(app->stations), 0, n, n); }
   /* Re-tint the recent pane tail with fresh logbook verdicts — a call
    * logged a moment ago must gray out in place, not only in new text.
    * The no-churn guard in scp_tag_token makes an unchanged pass free. */
@@ -977,12 +975,10 @@ static int settings_load_palette(void) {
   return (v < 0 || v >= skim_wf_palette_count()) ? 0 : v;
 }
 
-/* The top view. A fresh install opens on the WATERFALL: with the callsign
- * column it is the view one works from (Richard, 2026-09-05 — "the list
- * probably isn't needed"); the column now carries the list's columns too
- * (kHz, speed, dB, heard, age in the label's tooltip), so the list and its
- * toggle stay only until his look — then they go. A saved choice —
- * including the pre-M8 list-only key — always wins. */
+/* The top view: the waterfall (default — with the callsign column it is the
+ * view one works from, Richard 2026-09-05) or nothing (pane only). A saved
+ * choice wins; "list" and the pre-M8 `station_list` key fall to the
+ * waterfall, the station list's successor (the list went 2026-09-05). */
 static guint settings_load_view(void) {
   char *path = settings_file();
   GKeyFile *kf = g_key_file_new();
@@ -990,12 +986,11 @@ static guint settings_load_view(void) {
   if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
     char *s = g_key_file_get_string(kf, "ui", "view", NULL);
     if (s) {
-      v = g_strcmp0(s, "waterfall") == 0 ? VIEW_WF
-        : g_strcmp0(s, "none") == 0      ? VIEW_NONE : VIEW_LIST;
+      v = g_strcmp0(s, "none") == 0 ? VIEW_NONE : VIEW_WF;
       g_free(s);
     } else if (g_key_file_has_key(kf, "ui", "station_list", NULL)) {
       /* pre-M8 settings: the list toggle alone */
-      v = g_key_file_get_boolean(kf, "ui", "station_list", NULL) ? VIEW_LIST
+      v = g_key_file_get_boolean(kf, "ui", "station_list", NULL) ? VIEW_WF
                                                                   : VIEW_NONE;
     }
   }
@@ -1069,8 +1064,7 @@ static void settings_save(const App *app) {
   g_key_file_set_integer(kf, "ui", "decode_font_pt", app->decode_font);
   g_key_file_set_integer(kf, "ui", "palette", app->palette);
   g_key_file_set_string(kf, "ui", "view",
-                        app->view == VIEW_WF ? "waterfall"
-                        : app->view == VIEW_LIST ? "list" : "none");
+                        app->view == VIEW_WF ? "waterfall" : "none");
   g_key_file_remove_key(kf, "ui", "station_list", NULL);   /* pre-M8 key   */
   g_key_file_remove_group(kf, "reader", NULL);   /* the neural reader is gone
                                                   * (Richard, 2026-07-19)    */
@@ -1101,37 +1095,30 @@ static void rbn_apply(App *app) {
   }
 }
 
-/* Station list show/hide (the header-bar toggle next to the primary menu).
- * The CW decode pane stays put and takes over the space when the list
- * hides. */
-/* The top area shows the station list, the waterfall, or nothing (pane
- * only). The engine computes spectrum rows ONLY while the waterfall shows. */
+/* The top area shows the waterfall or nothing (pane only) — the header-bar
+ * toggle next to the primary menu; the decode pane stays put and takes over
+ * the space when the waterfall hides. The engine computes spectrum rows
+ * ONLY while the waterfall shows. (Until 2026-09-05 a second toggle put the
+ * station list here; the column's tooltip carries its columns now.) */
 static void view_apply(App *app) {
-  const gboolean top = app->view != VIEW_NONE;
-  gtk_widget_set_visible(app->top_stack, top);
-  gtk_widget_set_visible(app->list_sep, top);
-  gtk_widget_set_visible(app->head_sep, app->view == VIEW_WF);
+  const gboolean top = app->view == VIEW_WF;
+  gtk_widget_set_visible(GTK_WIDGET(app->wf), top);
+  gtk_widget_set_visible(app->pane_sep, top);
+  gtk_widget_set_visible(app->head_sep, top);
   gtk_widget_set_vexpand(app->tuned_scroll, !top);
-  if (top) {
-    gtk_stack_set_visible_child_name(GTK_STACK(app->top_stack),
-                                     app->view == VIEW_WF ? "waterfall" : "list");
-  }
   if (app->pipeline) {
-    skim_pipeline_set_spectrum_enabled(app->pipeline, app->view == VIEW_WF);
+    skim_pipeline_set_spectrum_enabled(app->pipeline, top);
   }
   wf_stations_sync(app);                       /* no-op unless waterfall     */
   app->view_syncing = TRUE;
-  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->list_btn), app->view == VIEW_LIST);
-  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->wf_btn), app->view == VIEW_WF);
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->wf_btn), top);
   app->view_syncing = FALSE;
 }
 
 static void on_view_toggled(GtkToggleButton *btn, gpointer user) {
   App *app = user;
   if (app->view_syncing) { return; }
-  const guint mine = (GtkWidget *)btn == app->wf_btn ? VIEW_WF : VIEW_LIST;
-  const guint want = gtk_toggle_button_get_active(btn) ? mine
-                     : (app->view == mine ? VIEW_NONE : app->view);
+  const guint want = gtk_toggle_button_get_active(btn) ? VIEW_WF : VIEW_NONE;
   if (want != app->view) {
     app->view = want;
     settings_save(app);
@@ -1388,14 +1375,6 @@ static gboolean scan_tick(gpointer data) {
 
 /* --- preferences -------------------------------------------------------------------------- */
 
-/* The station list's speed column: WPM in CW, Bd in RTTY. */
-static void speed_col_retitle(App *app) {
-  if (app->speed_col) {
-    gtk_column_view_column_set_title(app->speed_col,
-                                     app->dec_mode ? "Bd" : "WPM");
-  }
-}
-
 static void on_pref_palette(AdwComboRow *r, GParamSpec *ps, gpointer user) {
   (void)ps;
   App *app = user;
@@ -1469,7 +1448,6 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   }
   if (mode_changed) {
     app->dec_mode = dec_mode;
-    speed_col_retitle(app);
   }
   if (host_changed || mode_changed || cq_changed || round_changed ||
       font_changed || rbn_changed) {
@@ -1695,94 +1673,6 @@ static void act_about(GSimpleAction *action, GVariant *param, gpointer user) {
 static void act_prefs(GSimpleAction *action, GVariant *param, gpointer user) {
   (void)action; (void)param;
   prefs_open(NULL, user);
-}
-
-/* --- column helpers -------------------------------------------------------------------- */
-
-typedef void (*RowToText)(const SkimStation *st, char *out, gsize n);
-
-static void cell_setup(GtkSignalListItemFactory *f, GtkListItem *item, gpointer u) {
-  (void)f; (void)u;
-  GtkWidget *label = gtk_label_new(NULL);
-  gtk_label_set_xalign(GTK_LABEL(label), 0.0);
-  gtk_widget_add_css_class(label, "numeric");
-  gtk_list_item_set_child(item, label);
-}
-
-static void cell_bind(GtkSignalListItemFactory *f, GtkListItem *item, gpointer u) {
-  (void)f;
-  RowToText fmt = (RowToText)u;
-  SkimRow *r = gtk_list_item_get_item(item);
-  char text[64];
-  fmt(&r->st, text, sizeof(text));
-  gtk_label_set_text(GTK_LABEL(gtk_list_item_get_child(item)), text);
-}
-
-static void fmt_call(const SkimStation *st, char *o, gsize n) {
-  g_strlcpy(o, st->call, n);
-}
-static void fmt_freq(const SkimStation *st, char *o, gsize n) {
-  g_snprintf(o, n, "%.2f", st->freq_hz / 1000.0);   /* 10 Hz — the estimate's
-                                                     * real accuracy         */
-}
-static void fmt_wpm(const SkimStation *st, char *o, gsize n) {
-  g_snprintf(o, n, "%.0f", st->speed);
-}
-static void fmt_snr(const SkimStation *st, char *o, gsize n) {
-  g_snprintf(o, n, "%.0f dB", st->snr_db);
-}
-static void fmt_heard(const SkimStation *st, char *o, gsize n) {
-  g_snprintf(o, n, "%u×", st->reports);
-}
-static void fmt_cq(const SkimStation *st, char *o, gsize n) {
-  g_strlcpy(o, st->cq ? "CQ" : "", n);
-}
-static void fmt_age(const SkimStation *st, char *o, gsize n) {
-  int s = (int)((g_get_monotonic_time() - st->last_heard) / G_USEC_PER_SEC);
-  if (s < 0) { s = 0; }
-  if (s < 60) {
-    g_snprintf(o, n, "%ds", s);
-  } else {
-    g_snprintf(o, n, "%dm%02ds", s / 60, s % 60);
-  }
-}
-
-static GtkColumnViewColumn *add_column(GtkColumnView *view, const char *title,
-                                       RowToText fmt, gboolean expand) {
-  GtkListItemFactory *f = gtk_signal_list_item_factory_new();
-  g_signal_connect(f, "setup", G_CALLBACK(cell_setup), NULL);
-  g_signal_connect(f, "bind", G_CALLBACK(cell_bind), (gpointer)fmt);
-  GtkColumnViewColumn *col = gtk_column_view_column_new(title, f);
-  gtk_column_view_column_set_expand(col, expand);
-  gtk_column_view_append_column(view, col);
-  g_object_unref(col);                        /* the view holds the ref      */
-  return col;
-}
-
-static int freq_cmp(gconstpointer a, gconstpointer b, gpointer u) {
-  (void)u;
-  const SkimRow *ra = a, *rb = b;
-  return (ra->st.freq_hz > rb->st.freq_hz) - (ra->st.freq_hz < rb->st.freq_hz);
-}
-
-/* Row activated (SINGLE click / Enter) → tune the radio to the station; the
- * vfo broadcast comes back and swaps the tuned pane to that frequency. */
-static void on_row_activated(GtkColumnView *view, guint position, gpointer user) {
-  (void)view;
-  App *app = user;
-  SkimRow *r = g_list_model_get_item(G_LIST_MODEL(app->sorted), position);
-  if (r) {
-    if (app->pipeline) { skim_pipeline_tune(app->pipeline, r->st.freq_hz); }
-    /* Fix the pane on the CLICKED station right away — the user said which
-     * one they want; the vfo broadcast confirms the retune later and the
-     * sticky resolver keeps this choice. */
-    g_strlcpy(app->tuned_call, r->st.call, sizeof(app->tuned_call));
-    app->tuned_slot_hz = r->st.freq_hz;
-    tuned_label_update(app, &r->st);
-    tuned_pane_reload(app);
-    wf_stations_sync(app);
-    g_object_unref(r);
-  }
 }
 
 /* A click on a callsign in the waterfall column is the panadapter-spot
@@ -2025,46 +1915,22 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
     adw_header_bar_pack_end(ADW_HEADER_BAR(header), menu_btn);
   }
 
-  /* View toggles (M8): station list | waterfall; both off = pane only. Two
-   * toggles, not a radio group, so the pane-only state stays reachable. */
-  GtkWidget *views = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_widget_add_css_class(views, "linked");
-  app->list_btn = gtk_toggle_button_new();
-  gtk_button_set_icon_name(GTK_BUTTON(app->list_btn), "view-list-symbolic");
-  gtk_widget_set_tooltip_text(app->list_btn, "Station list");
-  g_signal_connect(app->list_btn, "toggled", G_CALLBACK(on_view_toggled), app);
-  gtk_box_append(GTK_BOX(views), app->list_btn);
+  /* View toggle (M8): waterfall on / off — off = the decode pane alone. (A
+   * linked pair with the station list until 2026-09-05.) */
   app->wf_btn = gtk_toggle_button_new();
   gtk_button_set_icon_name(GTK_BUTTON(app->wf_btn), "view-continuous-symbolic");
   gtk_widget_set_tooltip_text(app->wf_btn, "Waterfall");
   g_signal_connect(app->wf_btn, "toggled", G_CALLBACK(on_view_toggled), app);
-  gtk_box_append(GTK_BOX(views), app->wf_btn);
-  adw_header_bar_pack_end(ADW_HEADER_BAR(header), views);
+  adw_header_bar_pack_end(ADW_HEADER_BAR(header), app->wf_btn);
 
-  /* Station list, sorted by frequency — a text band map. Activate a row
-   * (double-click / Enter) to tune the radio to that station. */
+  /* The station table's mirror: one SkimRow per tracked station, kept O(1)
+   * by call (apply_station / apply_gone) — the waterfall's callsign column
+   * and the tuned-pane resolver read it. (Until 2026-09-05 a frequency-sorted
+   * GtkColumnView showed it as a text band map; the column took over.) */
   app->freq_logs = g_ptr_array_new_with_free_func(freqlog_free);
   app->stations = g_list_store_new(SKIM_TYPE_ROW);
   app->row_by_call = g_hash_table_new_full(g_str_hash, g_str_equal,
                                            g_free, g_object_unref);
-  GtkSorter *sorter = GTK_SORTER(gtk_custom_sorter_new(freq_cmp, NULL, NULL));
-  app->sorted = gtk_sort_list_model_new(G_LIST_MODEL(app->stations), sorter);
-  g_object_ref(app->sorted);
-  GtkSingleSelection *sel = gtk_single_selection_new(G_LIST_MODEL(app->sorted));
-  GtkWidget *view = gtk_column_view_new(GTK_SELECTION_MODEL(sel));
-  gtk_column_view_set_single_click_activate(GTK_COLUMN_VIEW(view), TRUE);
-  g_signal_connect(view, "activate", G_CALLBACK(on_row_activated), app);
-  add_column(GTK_COLUMN_VIEW(view), "Call", fmt_call, TRUE);
-  add_column(GTK_COLUMN_VIEW(view), "kHz", fmt_freq, FALSE);
-  app->speed_col = add_column(GTK_COLUMN_VIEW(view),
-                              app->dec_mode ? "Bd" : "WPM", fmt_wpm, FALSE);
-  add_column(GTK_COLUMN_VIEW(view), "SNR", fmt_snr, FALSE);
-  add_column(GTK_COLUMN_VIEW(view), "Heard", fmt_heard, FALSE);
-  add_column(GTK_COLUMN_VIEW(view), "CQ", fmt_cq, FALSE);
-  add_column(GTK_COLUMN_VIEW(view), "Age", fmt_age, FALSE);
-  GtkWidget *list_scroll = gtk_scrolled_window_new();
-  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(list_scroll), view);
-  gtk_widget_set_vexpand(list_scroll, TRUE);
 
   /* The tuned pane: decode text at the frequency the radio is tuned to. */
   app->tuned_label = GTK_LABEL(gtk_label_new("Tuned: —"));
@@ -2142,21 +2008,16 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   gtk_box_append(GTK_BOX(box), header);
   /* A hairline under the header, the same faint line that separates the
    * decode pane below (Richard, 2026-09-05 — the waterfall met the header
-   * with no edge). Shown ONLY while the waterfall is the top view, hidden
-   * for the list and the pane-only layout (his second remark). */
+   * with no edge). Shown ONLY while the waterfall shows, hidden for the
+   * pane-only layout (his second remark). */
   app->head_sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
   gtk_box_append(GTK_BOX(box), app->head_sep);
-  app->top_stack = gtk_stack_new();
-  gtk_stack_add_named(GTK_STACK(app->top_stack), list_scroll, "list");
   app->wf = SKIM_WF_VIEW(skim_wf_view_new());
   skim_wf_view_set_palette(app->wf, app->palette);
   skim_wf_view_set_click_cb(app->wf, on_wf_call_clicked, app);
-  gtk_stack_add_named(GTK_STACK(app->top_stack), GTK_WIDGET(app->wf), "waterfall");
-  gtk_widget_set_vexpand(app->top_stack, TRUE);
-  gtk_box_append(GTK_BOX(box), app->top_stack);
-  app->list_scroll = list_scroll;
-  app->list_sep    = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
-  gtk_box_append(GTK_BOX(box), app->list_sep);
+  gtk_box_append(GTK_BOX(box), GTK_WIDGET(app->wf));
+  app->pane_sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+  gtk_box_append(GTK_BOX(box), app->pane_sep);
   gtk_box_append(GTK_BOX(box), GTK_WIDGET(app->tuned_label));
   gtk_box_append(GTK_BOX(box), tuned_scroll);
   gtk_box_append(GTK_BOX(box), GTK_WIDGET(app->status));
