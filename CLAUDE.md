@@ -853,7 +853,14 @@ socket backlog; fixed in sdr-for-linux 98c57de with a capture clock from the
 pushes (boundary by TIME; gate ±0.5 ms). An n/16 guard band in the skimmer
 cut was built, measured to add nothing (the segment Hann's taper already
 leaves a late label no weight: 58 dB down) and removed; gate 100 → 108.
-Only the SDR needs a restart. ⚠ 20:44 a peek script
+SDR restarted 21:27 on the clock: flip metric 0 rows on 14/16 retunes, 0 of
+116 sweep rows ≥ 4 bins off. **LIVE VERDICT (Richard, ~21:35): on 80 m "už
+to nedělá" — the waterfall flows through a retune, no teeth, no bars, no
+pause; open item (3) CLOSED.** His first look had been at 1 Hz on the DC
+line at 50–100 kHz/s, where a line is inherently ~4× wider while turning.
+Left, each a separate decision: coherent re-centring of the window (only if
+the DDC NCO is phase-continuous — measure first), `SDRFL_DDC_LAT_MS` 1.0 ms
+unmeasured below a row, the SDR coming up at 1 Hz after a restart. ⚠ 20:44 a peek script
 imported the TCI client (main ran at import) and tuned his radio to 4 Hz for
 ~25 s; restored, main-guarded. Not built by design: a polling-server settle
 fallback (a click + stillness looks the same).

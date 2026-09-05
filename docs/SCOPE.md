@@ -978,7 +978,25 @@ where relevant, a live check against a running `sdr-for-linux`.
   paints no ghost even WITHOUT it — the fresh Hann tapers to zero at the
   boundary, 58 dB down) and removed; the late-label check stays (gate
   spectrum 100 → 108 with it). The running skimmer build behaves
-  identically; only the SDR needs a restart for the clock. Not built, on purpose: a polling-server fallback (settle
+  identically; only the SDR needs a restart for the clock. **SDR restarted
+  21:27 on the capture clock (his "ano, zkus"); the probe's flip metric
+  read 0 rows on 14 of 16 retunes (it had been 1–2), and 0 of 116
+  confident sweep rows sat ≥ 4 bins off (max 2). Richard's first look was
+  at 1 Hz on the ADC's DC line, 60 dB up, dragging at 50–100 kHz/s (median
+  22 bins per row): there a line is inherently ~4× wider while the knob
+  turns and beads at every notch — physics of a 10.7 ms hop. LIVE VERDICT,
+  Richard 2026-09-05 ~21:35: "pravda! na 80m co sleduju, tak tam už to
+  nedělá" — on a real band the waterfall flows through a retune with no
+  teeth, no bars, no pause. Open item (3) is CLOSED.** Left on the table,
+  each a separate decision: (a) coherent re-centring of the window (mix
+  every segment to one centre before the FFT so the full 4-hop window
+  stays usable while turning — sharp lines even at 100 kHz/s) works only
+  if the radio's DDC NCO is phase-continuous across a retune; measure the
+  phase jump on a strong stable carrier first, never assume; (b)
+  `SDRFL_DDC_LAT_MS` 1.0 ms is the radio's own pipeline, unmeasured below
+  a row — the probe cannot see it, and the Hann taper hides it; (c) the
+  SDR came up at "RX 1 Hz" after the restart, not at his last frequency —
+  filed on the sdr-for-linux side. Not built, on purpose: a polling-server fallback (settle
   when labels arrive in ≥ 400 ms steps) — one click followed by stillness is
   indistinguishable from a polling label, so any cadence detector would bring
   the pause back on his most common gesture; no such server is measured.
