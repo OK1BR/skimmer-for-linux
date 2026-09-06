@@ -24,11 +24,18 @@
       RBN-grade, so nothing unvalidated ever reaches the wire.
     </p>
     <p>
-      Built to work with its sibling apps: click a decoded callsign and the
-      radio tunes while log-for-linux pre-fills its entry row, and calls
-      already worked dim to gray from the logbook's duplicate service. The
-      skimmer is read-only against the radio — it never keys, and the one
-      deliberate write is the tuning you asked for.
+      The window is a waterfall in CW Skimmer's layout — frequency down the
+      side, time flowing across — with a callsign column beside it: a dot on
+      every tracked station's frequency, its call next to it, and speed, SNR
+      and age in the tooltip. The decode pane below follows the tuned station.
+    </p>
+    <p>
+      Built to work with its sibling apps: click a callsign — in the column
+      or in the decode pane — and the radio tunes while log-for-linux
+      pre-fills its entry row, and calls already worked dim to gray from the
+      logbook's duplicate service. The skimmer is read-only against the
+      radio — it never keys, and the one deliberate write is the tuning you
+      asked for.
     </p>
   </description>
   <developer id="cz.ok1br">
@@ -50,6 +57,22 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.4.0" date="2026-09-06">
+      <description>
+        <p>
+          The skimmer got its own waterfall, in CW Skimmer's layout: frequency
+          down the side, time flowing across, a kHz scale, the SDR's six colour
+          schemes — and a callsign column beside it that puts a dot on every
+          tracked station's frequency with its call next to it. Click a call
+          and the radio tunes there while log-for-linux pre-fills its entry;
+          the tooltip carries speed, SNR, heard count and age. The picture
+          flows while you tune (with a current sdr-for-linux every line holds
+          its frequency through a retune), the station list is gone, the
+          Preferences are grouped in four tabs, and closing the window
+          mid-session or launching a second instance no longer misbehaves.
+        </p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-08-17">
       <description>
         <p>

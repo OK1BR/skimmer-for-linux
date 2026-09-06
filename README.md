@@ -17,7 +17,8 @@ feed**.
 > (the soft-decision Viterbi **v2**, default since 2026-08-04; the classical
 > v1 stays as a fallback) → RBN-grade callsign validation
 > (M4: corpus precision 1.0) → station tracker + spot feeder (M5) → local
-> telnet spot feed (M6). Fresh off the bench: a per-channel **tone splitter**
+> telnet spot feed (M6) → RTTY decoder (M7) → an in-app **waterfall** with
+> a callsign column, click to tune (M8). Fresh off the bench: a per-channel **tone splitter**
 > (two stations in one channel decode separately) and a **fist model** (the
 > decoder learns each operator's own spacing). Everything is gated offline —
 > `meson test`, 12 gates, plus a ~50× realtime replay harness for A/B runs on
@@ -29,6 +30,14 @@ feed**.
 highlighted — gray instead of green once the logbook says you have worked
 them. The status line counts the whole segment behind it: 107 stations and
 2383 spots off 1536 channels at 192 kHz.*
+
+The top of the window is a **waterfall** in CW Skimmer's layout — frequency
+vertical, time flowing sideways, a kHz scale, the SDR's colour schemes — with
+a **callsign column** beside it: a dot on every tracked station's frequency,
+its call next to it, speed / SNR / heard / age in the tooltip. A click on a
+call tunes the radio (and pre-fills `log-for-linux`); the decode pane below
+follows the tuned station. `SKIM_IQ_FILE=<capture.cf32>` replays a recording
+into the window at real-time pace, the way to look at it without a radio.
 
 ## How it works
 
@@ -192,7 +201,7 @@ before it ships.
 
 The skimmer consumes IQ and sends spots. It never keys, never changes radio
 state on its own; the single deliberate exception is tuning the VFO when the
-*user* activates a station row. The telnet feed is a **local** cluster source
+*user* clicks a callsign in the waterfall column or the decode pane. The telnet feed is a **local** cluster source
 for loggers — by decision there is no uplink to the RBN network (the only
 sanctioned path is a closed Windows-only aggregator), though the dialect stays
 compatible should that ever change.

@@ -7,6 +7,6 @@ Exec=@bindir@/skimmer-for-linux
 Icon=cz.ok1br.skimmer_for_linux
 Terminal=false
 Categories=Utility;HamRadio;
-Keywords=ham;radio;amateur;CW;morse;RTTY;skimmer;decoder;spot;cluster;telnet;RBN;TCI;SDR;contest;
+Keywords=ham;radio;amateur;CW;morse;RTTY;skimmer;waterfall;decoder;spot;cluster;telnet;RBN;TCI;SDR;contest;
 StartupNotify=true
 StartupWMClass=cz.ok1br.skimmer_for_linux
