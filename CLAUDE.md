@@ -936,6 +936,32 @@ from the published tarball, `.SRCINFO`, AUR push; **(b) RTTY over-head
 pre-roll fix** (OPEN item under M7 in SCOPE, fixture in
 `/var/tmp/skimmer-iq/`).
 
+**v0.4.0 RELEASED 2026-09-06 (Richard's "ano" to the shown bump diff + the
+notes, en + cs).** Content: M8 waterfall + callsign column + click-to-tune,
+the retune flow (IQ centre stamps), the station list gone, Preferences in
+four tabs, SKM-1/SKM-6. Bump a9dc73f (meson, metainfo release entry + a
+waterfall paragraph in the description, desktop Keywords, PKGBUILD SKIP,
+README regrounded: M7/M8 in Status, a waterfall paragraph, no "station
+row"), signed tag v0.4.0 = eb73cbe, checksum commit 194c42a (tarball
+sha256 bbd35f4d…cb1cfc — one `curl -f`, `tar t` before trust; codeload
+answered 200 first try). Flow refinement that WORKED: `gh release create
+--verify-tag --notes-file` run right after the tag push (release 10:38:31,
+CI run 34028010063 queued 10:38:56) — the CI attach step found the curated
+release, no empty body to edit afterwards. CI green (gates + artifacts),
+AppImage/deb/rpm attached. AUR 0.4.0-1 (fc5a832): the downloaded tarball
+was placed in the clone so `makepkg -f` did not download; sha matched,
+check() 12 gates green; namcap adds two informative "implicitly satisfied"
+warnings (cairo, pango — the waterfall links them directly, gtk4 pulls
+both) to the known three. CORRECTION to the entry above: sdr-for-linux's
+last tag is **v0.5.0** (3943ee4, 2026-08-25), not v0.4.2 — the local clone
+had no fetched tags; the four retune-flow commits (ee7d08b, 51f981a,
+e2fb076, 98c57de) all sit after v0.5.0, so the notes say "v0.5.0 works,
+the smooth retune wants main ≥ 98c57de" (the client falls back to the
+label when h[8] is 0, the server ignores unknown commands — both
+verified). sdr itself was not released (not asked). Not done: local
+install to ~/.local, a waterfall screenshot for README/metainfo (Richard's
+live shot). **Next: (b) the RTTY over-head pre-roll fix.**
+
 ## Layout
 
 ```

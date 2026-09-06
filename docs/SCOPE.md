@@ -1143,6 +1143,16 @@ where relevant, a live check against a running `sdr-for-linux`.
   over-head fix** (pre-roll replay, the OPEN item under M7 — measured
   causes, approved direction, fixture in `/var/tmp/skimmer-iq/`).
 
+**v0.4.0 RELEASED 2026-09-06** (Richard's "ano"): 41 commits since v0.3.0
+— M8 waterfall + callsign column + click-to-tune, the retune flow, the list
+gone, four Preferences tabs, SKM-1/SKM-6. Bump a9dc73f, signed tag
+eb73cbe, checksum 194c42a; the GitHub release was created with curated
+notes right after the tag push so CI (run 34028010063, green) attached
+AppImage/deb/rpm to it; AUR 0.4.0-1 (fc5a832, check() 12 gates). The notes
+state the sdr-for-linux dependency honestly: v0.5.0 works, the waterfall
+flowing through a retune needs sdr's main ≥ 98c57de (all four retune-flow
+commits sit after v0.5.0). Next: the RTTY over-head pre-roll fix (M7 OPEN).
+
 ## Safety / etiquette
 
 Read-only against the radio, with one deliberate exception: the skimmer
