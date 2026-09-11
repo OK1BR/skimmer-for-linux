@@ -996,6 +996,30 @@ server.** Hypothesis, unverified: a device bandwidth below our requested
 new lines decides. Open: how Tomas gets a build (main vs a v0.4.1 tag),
 and the reply in gh#2 (Richard's approval, en + cs).
 
+**v0.4.1 RELEASED 2026-09-11 (Richard's "dobře, pokračuj" to the shown bump
+diff + notes en/cs; his rule: NO epithet — title "Skimmer for Linux 0.4.1",
+tag message "release: v0.4.1").** Content: SKM-7..11 (TCI hardening + port
+setting + diagnostics), README regrounded (any TCI server "in principle",
+host + port in Preferences, not yet a tested target, gh#2 linked), metainfo
+release entry, PKGBUILD two-step. Flow as v0.4.0: bump commit → signed tag →
+push 19:33:07 → `gh release create --verify-tag --notes-file` 19:33:09 (CI
+run 34628325674 started 17:33:09Z, attached to the curated release) →
+tarball sha256 4f7c705b…ea378 (171 entries, `curl -f` + `tar t`) → checksum
+commit 5e48489 → AUR clone in `/var/tmp/skimmer-v041/aur`, `makepkg` with
+check() = 12 gates green, namcap only the known five informative warnings,
+`.SRCINFO`, commit ff119a4 "Update to 0.4.1" pushed 19:34:54 (page showed
+0.4.1-1 within a minute) → `meson install -C build-release` → `~/.local`
+launcher = 0.4.1, `builddir` rebuilt to 0.4.1 too. CI green: gates +
+artifacts, AppImage/deb/rpm attached (not draft, not prerelease). CI note:
+GitHub warns actions/checkout@v4, upload-artifact@v4 and
+softprops/action-gh-release@v2 target Node 20 and are forced onto Node 24 —
+bump the action majors before the next tag. About shows the version through
+`SKIMMER_VERSION` = meson `project_version` (Richard asked to watch it). The
+release build's engine is the code that ran live from 18:49 (spots on the
+feed and the panadapter verified). Next: the gh#2 reply (draft en + cs in
+`/var/tmp/skimmer-v041/reply-tomas-*.md`, waiting for Richard's "ano"),
+then SKM-12.
+
 ## Layout
 
 ```
