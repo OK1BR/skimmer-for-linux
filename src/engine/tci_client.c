@@ -82,6 +82,9 @@ struct _SkimTciClient {
   guint       blocks;         /* IQ blocks delivered this session            */
   gboolean    warned_fmt, warned_rx, warned_short, warned_pad, warned_bogus,
               warned_noiq, warned_rate;
+  lws_sorted_usec_list_t noiq_sul; /* wakes the service loop 3 s after iq_start
+                                    * left — lws_service() sleeps until an event,
+                                    * so a polling check alone came ~5 s late */
 
   volatile gint run;          /* service loop keeps going while 1            */
   gboolean      started;      /* start() succeeded (iq_start sent)           */
@@ -297,12 +300,19 @@ static void check_no_iq(SkimTciClient *c) {
   const gint64 t0 = c->iq_start_us;
   const guint  rate = c->iq_rate, req = c->iq_req_rate;
   g_mutex_unlock(&c->lock);
-  if (!t0 || g_get_monotonic_time() - t0 < NO_IQ_WARN_US) { return; }
+  /* -1 ms slack: the sul fires at exactly +3 s of the write, a hair after t0 */
+  if (!t0 || g_get_monotonic_time() - t0 < NO_IQ_WARN_US - 1000) { return; }
   c->warned_noiq = TRUE;
   g_warning("tci: no IQ block %d s after iq_start:0 — server announced "
             "iq_samplerate:%u (asked for %u); check the server's IQ / receiver "
             "settings (device bandwidth ≥ the IQ rate?)",
             (int)(NO_IQ_WARN_US / G_TIME_SPAN_SECOND), rate, req);
+}
+
+/* lws scheduler callback (service thread): the 3 s mark after iq_start:0. */
+static void noiq_sul_cb(lws_sorted_usec_list_t *sul) {
+  SkimTciClient *c = lws_container_of(sul, SkimTciClient, noiq_sul);
+  check_no_iq(c);
 }
 
 /* ---- LWS plumbing ------------------------------------------------------------ */
@@ -347,6 +357,11 @@ static int client_cb(struct lws *wsi, enum lws_callback_reasons reason,
       unsigned char *buf = g_malloc(LWS_PRE + n);
       memcpy(buf + LWS_PRE, msg, n);
       lws_write(wsi, buf + LWS_PRE, n, LWS_WRITE_TEXT);
+      if (g_str_has_prefix(msg, "iq_start:")) {
+        /* the no-IQ watchdog's alarm — on the service thread, as lws wants */
+        lws_sul_schedule(lws_get_context(wsi), 0, &c->noiq_sul, noiq_sul_cb,
+                         (lws_usec_t)NO_IQ_WARN_US);
+      }
       g_free(buf);
       g_free(msg);
     }
@@ -548,6 +563,7 @@ void skim_tci_client_stop(SkimTciClient *c) {
   lws_cancel_service(c->ctx);
   g_thread_join(c->thread);
   c->thread = NULL;
+  lws_sul_cancel(&c->noiq_sul);      /* service thread gone — safe to unlink */
   lws_context_destroy(c->ctx);
   c->ctx = NULL;
   c->wsi = NULL;

@@ -315,7 +315,17 @@ request (the pipeline builds the bank from the blocks' own rate, so this is
 information, not a fault); and a one-shot `g_warning` from the service
 thread when 3 s pass after `iq_start:0` with no IQ block, quoting what the
 server announced. A missing `iq_start` echo is NOT treated as an error (the
-spec marks the command client→server only).
+spec marks the command client→server only). All three lines are
+gate-exercised: a THIRD client session against a mock that answers
+`iq_samplerate` with 96000 and never starts IQ must produce the "server runs
+IQ at 96000 Hz (asked for 48000)" line and the 3 s warning (read back through
+a `g_log_set_writer_func` tap). Lesson from building it: `lws_service()` in
+libwebsockets ≥ 3.2 ignores its timeout and sleeps until an event, so a
+watchdog polled from the service loop fired ~5.3 s late on a silent
+connection — the alarm is now an `lws_sul_schedule` armed when `iq_start:0`
+is written (fires at +3.00 s, measured). Mock lesson: its outbox is global,
+so a new session must start with it emptied (the no-IQ session had received
+the previous session's tail). `tci-client` gate: 20 → 32 checks.
 
 ## Open — ideas
 
@@ -442,7 +452,7 @@ Milestones and their order live in `docs/SCOPE.md`. Nothing in this backlog
 blocks them: the bug section is closed again — SKM-1 fixed, SKM-2 explained,
 SKM-6 fixed (none noticed by the operator during 5 hours of contest
 operation across two days), and the gh#2 TCI hardening SKM-7..11 fixed on
-2026-09-11 with the `tci-client` gate at 29 checks. What remains for gh#2 is
+2026-09-11 with the `tci-client` gate at 32 checks. What remains for gh#2 is
 the first run against a real ExpertSDR3 — SM0ONR reports the skimmer works
 on his SunSDR once the device bandwidth is raised (156/312 kHz), so the
 "connected, no output" at his default settings is the open question the

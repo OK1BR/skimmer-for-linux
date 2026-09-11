@@ -22,7 +22,10 @@
  *     delivered; a message with trailing bytes delivers its one block and
  *     the stream goes on; a truncated message is dropped without desyncing
  *     the next; and with the iq_stamp echo withheld the reserved words are
- *     ignored (dds label, one whole-block callback).
+ *     ignored (dds label, one whole-block callback),
+ *   - the remote-tester diagnostics fire: a mock that answers iq_samplerate
+ *     with ANOTHER rate and never starts IQ produces the "server runs IQ at
+ *     X Hz (asked for Y)" line and the 3 s "no IQ block" warning.
  *
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
@@ -64,6 +67,32 @@ static volatile gint s_run = 1, s_streaming, s_push_dds, s_blocks_sent, s_stamp_
 static volatile gint s_echo_stamp = 1;   /* mock echoes iq_stamp:1 (sdr-for-linux does; others do not) */
 static volatile gint s_text_frames;      /* complete text frames received from the client */
 static volatile gint s_marks_sent;       /* MARKER blocks queued so far (one per fixture) */
+static volatile gint s_rate_echo;        /* ≠0: echo THIS iq_samplerate instead of the request */
+static volatile gint s_ignore_start;     /* 1: never start IQ (a device that cannot)      */
+
+/* log capture — the diagnostics are g_message/g_warning lines; the gate
+ * reads them back through a structured-log writer (default output kept) */
+static GMutex   l_lock;
+static GString *l_log;
+static GLogWriterOutput log_tap(GLogLevelFlags lvl, const GLogField *f, gsize n, gpointer u) {
+  (void)u;
+  for (gsize i = 0; i < n; i++) {
+    if (strcmp(f[i].key, "MESSAGE") == 0) {
+      g_mutex_lock(&l_lock);
+      if (f[i].length < 0) { g_string_append(l_log, (const char *)f[i].value); }
+      else { g_string_append_len(l_log, (const char *)f[i].value, f[i].length); }
+      g_string_append_c(l_log, '\n');
+      g_mutex_unlock(&l_lock);
+    }
+  }
+  return g_log_writer_default(lvl, f, n, u);
+}
+static int log_contains(const char *needle) {
+  g_mutex_lock(&l_lock);
+  const int hit = strstr(l_log->str, needle) != NULL;
+  g_mutex_unlock(&l_lock);
+  return hit;
+}
 
 static void srv_queue_text(const char *txt) {
   Msg *m = g_new0(Msg, 1);
@@ -119,11 +148,15 @@ static void srv_exec(char *cmd) {
 
   if (g_str_has_prefix(cmd, "iq_samplerate:")) {
     char echo[64];
-    g_snprintf(echo, sizeof(echo), "%s;", cmd);
+    const gint ovr = g_atomic_int_get(&s_rate_echo);
+    if (ovr) { g_snprintf(echo, sizeof(echo), "iq_samplerate:%d;", ovr); }
+    else     { g_snprintf(echo, sizeof(echo), "%s;", cmd); }
     srv_queue_text(echo);
   } else if (g_str_has_prefix(cmd, "iq_start:")) {
-    srv_queue_text("iq_start:0;");
-    g_atomic_int_set(&s_streaming, 1);
+    if (!g_atomic_int_get(&s_ignore_start)) {
+      srv_queue_text("iq_start:0;");
+      g_atomic_int_set(&s_streaming, 1);
+    }                                          /* else: silence, like a device that cannot */
   } else if (g_str_has_prefix(cmd, "iq_stop:")) {
     g_atomic_int_set(&s_streaming, 0);
     srv_queue_text("iq_stop:0;");
@@ -146,6 +179,13 @@ static int srv_cb(struct lws *wsi, enum lws_callback_reasons reason,
   case LWS_CALLBACK_ESTABLISHED:
     s_wsi = wsi;
     if (!rxbuf) { rxbuf = g_string_new(NULL); }
+    /* A fresh session starts with an EMPTY outbox — the queue is global and
+     * blocks left over from the previous client would be sent to this one
+     * (caught when the no-IQ session received the old session's tail). */
+    g_mutex_lock(&s_lock);
+    Msg *left;
+    while ((left = g_queue_pop_head(&s_out)) != NULL) { g_free(left->data); g_free(left); }
+    g_mutex_unlock(&s_lock);
     /* The whole init block batched into ONE text frame — the real server sends
      * many small frames, SDC-era clients must cope with either. Ends with
      * ready; then start; (the piHPSDR tail). */
@@ -191,6 +231,7 @@ static int srv_cb(struct lws *wsi, enum lws_callback_reasons reason,
   }
   case LWS_CALLBACK_CLOSED:
     s_wsi = NULL;
+    g_atomic_int_set(&s_streaming, 0);         /* the subscription died with the socket */
     return 0;
   default:
     return 0;
@@ -349,6 +390,10 @@ static int cond_click(void) {
 
 static SkimTciClient *g_client;
 static int cond_dds(void) { return skim_tci_client_center_hz(g_client) == 7030000.0; }
+static int cond_diag(void) {
+  return log_contains("tci: server runs IQ at 96000 Hz (asked for 48000)") &&
+         log_contains("tci: no IQ block 3 s after iq_start:0");
+}
 static int cond_stamp_asked(void) { return srv_rx_contains("iq_stamp:1;"); }
 
 /* Queue fixture `req` on the mock and wait until EVERY marker the mock has
@@ -375,6 +420,8 @@ static int fixture(int req) {
 int main(void) {
   printf("=== TCI client gate (offline, mock server) ===\n");
   s_rx = g_string_new(NULL);
+  l_log = g_string_new(NULL);
+  g_log_set_writer_func(log_tap, NULL, NULL);
   g_queue_init(&s_out);
 
   struct lws_context_creation_info info;
@@ -527,6 +574,32 @@ int main(void) {
   g_mutex_unlock(&c_lock);
   skim_tci_client_stop(c);
   skim_tci_client_free(c);
+
+  /* --- third session: the "connected, no output" picture (gh#2) --- */
+  /* The mock answers iq_samplerate with 96000 and never starts IQ; the
+   * client must say both in its log within ~3 s — that is what a remote
+   * tester's log has to carry. */
+  g_atomic_int_set(&s_rate_echo, 96000);
+  g_atomic_int_set(&s_ignore_start, 1);
+  capture_reset();
+  c = g_client = skim_tci_client_new("127.0.0.1", PORT);
+  skim_tci_client_set_iq_cb(c, iq_cb, NULL);
+  check("diag session: start() completes (the init block still ends in ready;)",
+        skim_tci_client_start(c, RATE, &err));
+  if (err) { printf("       (%s)\n", err->message); g_clear_error(&err); }
+  const int diag_ok = wait_ms(cond_diag, 5000);
+  check("diag: 'server runs IQ at 96000 Hz (asked for 48000)' + 'no IQ block 3 s after iq_start:0' logged",
+        diag_ok);
+  if (!diag_ok) {
+    g_mutex_lock(&l_lock);
+    printf("       captured log:\n%s", l_log->str);
+    g_mutex_unlock(&l_lock);
+  }
+  check("diag session: no IQ callback at all", g_atomic_int_get(&c_blocks) == 0);
+  skim_tci_client_stop(c);
+  skim_tci_client_free(c);
+  g_atomic_int_set(&s_rate_echo, 0);
+  g_atomic_int_set(&s_ignore_start, 0);
 
   g_atomic_int_set(&s_run, 0);
   lws_cancel_service(s_ctx);

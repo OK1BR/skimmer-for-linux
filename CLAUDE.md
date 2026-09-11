@@ -974,15 +974,19 @@ short message dropped + warned — SKM-9); blocks with h[0] ≠ 0 dropped
 h[8..10] count only after the server echoed `iq_stamp:1` (SKM-8); the IQ
 request goes out as three text frames (SKM-10); `[tci] port` is a setting
 (Preferences → Radio → Port, 1–65535, default 40001; probe, pipeline and
-About read it — SKM-11). Gate `skimmer-tci-test` 20 → 29 checks incl. a
-second session against a mock that never echoes `iq_stamp`; every fixture
+About read it — SKM-11). Gate `skimmer-tci-test` 20 → 32 checks incl. a
+second session against a mock that never echoes `iq_stamp` and a third
+against one that answers `iq_samplerate:96000` and never starts IQ (both
+diagnostic lines read back through a log-writer tap); every fixture
 is followed by a MARKER block and the wait is "all queued markers back"
 (the first version read three checks green on the pre-fix code because the
 fixture was still queued — timing trap, fixed); against the pre-fix client
 five checks go red. Three diagnostic log lines for a remote tester: first
 accepted block (receiver/rate/format/channels/frames), `iq_samplerate`
-echo ≠ request, and a 3 s no-IQ warning quoting what the server announced.
-12 gates green; SKM-11 headless-verified (isolated config on port 40123 →
+echo ≠ request, and a 3 s no-IQ warning quoting what the server announced
+— armed via `lws_sul_schedule` when `iq_start:0` is written, because
+`lws_service()` (lws ≥ 3.2) ignores its timeout and a polled check came
+~5 s late on a silent link. 12 gates green; SKM-11 headless-verified (isolated config on port 40123 →
 probe + WS connects land there). **His report the same afternoon: at his
 default settings "connects, no output"; with the device bandwidth at
 156 or 312 kHz the waterfall shows, decoding works and spots appear on the
