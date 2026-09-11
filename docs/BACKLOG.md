@@ -192,7 +192,7 @@ one-teardown-per-window design now holds by construction — one process, one
 `App`, one window.
 
 ### SKM-7 — IQ blocks are not filtered by receiver
-- **Type:** bug · **Severity:** high · **Status:** open
+- **Type:** bug · **Severity:** high · **Status:** done — fixed, gate-proven (2026-09-11)
 - **Source:** TCI compatibility audit for gh#2 (SM0ONR asks for SunSDR / ExpertSDR3), 2026-09-11 — not reproduced, no ExpertSDR3 here
 - **Detail:** `src/engine/tci_client.c` `drain_binary` (~183); Thetis `Project Files/Source/Console/TCIServer.cs` `wantsIQStream()` (ramdor/Thetis @852bf0ef)
 
@@ -205,8 +205,14 @@ would be fed into the RX0 channelizer — two bands mixed into one waterfall and
 decoder bank, spots on wrong frequencies. Fix: drop blocks with h[0] != 0 and
 log it once.
 
+**Resolution (2026-09-11):** `handle_block()` in `tci_client.c` drops every
+Stream block whose h[0] is not 0 before the type/format checks and logs the
+receiver number once per session. Gate: the mock queues a receiver-1 block
+at a telltale 96 kHz followed by a MARKER block — the marker's callback
+arrives, the 96 kHz one never does (red on the pre-fix client: rx1 = 1).
+
 ### SKM-8 — Centre stamps are read from reserved header words without the server's echo
-- **Type:** bug · **Severity:** high · **Status:** open
+- **Type:** bug · **Severity:** high · **Status:** done — fixed, gate-proven (2026-09-11)
 - **Source:** TCI compatibility audit for gh#2, 2026-09-11
 - **Detail:** `src/engine/tci_client.c` ~204-208 and `handle_command` (~101-148); TCI spec Ver. 2.0 §3.4 p.9; sdr-for-linux `docs/TCI-SCOPE.md` (IQ centre stamps)
 
@@ -219,8 +225,16 @@ decode and spot lands on a wrong frequency with no warning. Fix: set a flag on
 the `iq_stamp:1` echo and honour h[8..10] only then; otherwise keep the `dds`
 fallback.
 
+**Resolution (2026-09-11):** `handle_command()` sets `stamp_ok` on the
+`iq_stamp:1` echo (cleared in `stop()`); `handle_block()` reads h[8..10]
+only while it is set. Gate: a SECOND client session against the mock with
+the echo withheld and junk in h[8] (7021000) and a junk boundary (700) —
+every callback carries the dds label and the whole 2048-frame block (both
+checks red on the pre-fix client). `iq_stamp:1` is queued LAST so its echo
+precedes the first stamped block.
+
 ### SKM-9 — Binary IQ is parsed as one continuous byte stream across WebSocket messages
-- **Type:** bug · **Severity:** medium · **Status:** open
+- **Type:** bug · **Severity:** medium · **Status:** done — fixed, gate-proven (2026-09-11)
 - **Source:** TCI compatibility audit for gh#2, 2026-09-11
 - **Detail:** `src/engine/tci_client.c` `LWS_CALLBACK_CLIENT_RECEIVE` (~236-238), `drain_binary` (~170-217); TCI spec Ver. 2.0 §3.4 p.9
 
@@ -233,8 +247,23 @@ resets and silent data loss. Fix: one complete WS message = one block (collect
 fragments until `lws_is_final_fragment()`), parse its header, ignore trailing
 bytes.
 
+**Resolution (2026-09-11):** `LWS_CALLBACK_CLIENT_RECEIVE` collects binary
+fragments and parses ONE block when `lws_is_final_fragment() &&
+lws_remaining_packet_payload() == 0` (lws reports FIN on every rx-buffer
+piece of the final frame, so the payload test is what ends a message);
+trailing bytes are ignored with one `g_message` naming their count (a
+server concatenating blocks would show up there), a message shorter than
+its header claims is dropped with one `g_warning`, and the accumulator
+resets per message. Gate: a block with 100 trailing bytes delivers exactly
+once and the marker behind it parses; a block cut 1000 bytes short delivers
+nothing and the marker still arrives (on the pre-fix client the truncated
+case swallowed the marker — desync; the padded case passed there too,
+because the old code recovered through its "bogus Stream length" reset).
+The gate's fragmentation check (16448-byte blocks over an 8192-byte rx
+buffer) still holds.
+
 ### SKM-10 — The IQ request goes out as three commands in one text frame
-- **Type:** bug · **Severity:** medium · **Status:** open
+- **Type:** bug · **Severity:** medium · **Status:** done — fixed, gate-proven (2026-09-11)
 - **Source:** TCI compatibility audit for gh#2, 2026-09-11
 - **Detail:** `src/engine/tci_client.c` `skim_tci_client_start` (~420)
 
@@ -245,8 +274,13 @@ client written for ExpertSDR — sends one command per frame. If ExpertSDR3 read
 only the first command of a frame, `iq_start` is lost and the skimmer sits
 "connected" with no IQ. Fix: queue each command as its own message.
 
+**Resolution (2026-09-11):** three `cli_queue()` calls; the WRITEABLE
+handler already sends one queued string per frame. Gate: the mock counts
+complete text messages (`lws_is_final_fragment && remaining == 0`) — three
+by the time `iq_stamp:1` has arrived (one on the pre-fix client).
+
 ### SKM-11 — The TCI port cannot be set
-- **Type:** bug · **Severity:** medium · **Status:** open
+- **Type:** bug · **Severity:** medium · **Status:** done — built, headless-verified (2026-09-11)
 - **Source:** TCI compatibility audit for gh#2, 2026-09-11; Richard: the port must be configurable, as it is in log-for-linux
 - **Detail:** `src/app/main.c` ~1247 (pipeline config), ~1370 (reachability probe), ~1500 (Preferences text); only `[tci] host` is persisted (~930, ~1057)
 
@@ -257,6 +291,31 @@ unreachable. Fix: a `[tci] port` key (1–65535, default 40001) loaded and saved
 next to `host`, a Port row in Preferences → TCI server, used by both the
 pipeline and the probe; a change reconnects like a host change. Reference:
 log-for-linux `src/app/settings.c` (~145-149).
+
+**Resolution (2026-09-11):** `App.tci_port`, `settings_load_tci_port()`
+(`[tci] port`, 1–65535, 40001 otherwise), saved next to `host`; the
+pipeline config, the 3 s probe and its "searching for host:port…" subtitle
+and the About debug_info all read it; Preferences → Radio → TCI server has
+a Port spin row (1–65535) under Host, the group text no longer names 40001
+as a fact but as the usual value ("ExpertSDR3 shows its own in its
+settings"); `prefs_closed` treats a port change like a host change (save +
+pipeline rebuild + rescan). Verified headless (Broadway, private D-Bus,
+isolated XDG dirs — Richard's live instance untouched): with `port=40123`
+in the isolated settings and a bare TCP listener on 127.0.0.1:40123 the
+listener took six connections in 16 s — probe + WebSocket connect every
+~5 s, the handshake timeout cadence — so the value reaches both the probe
+and the TCI client. NOT exercised: the Preferences round trip (spin row →
+save); Richard's look.
+
+**Also added for the remote tester (gh#2, "connects, no output"):** three
+log lines in `tci_client.c` — `tci: IQ stream up — receiver, rate, format,
+channels, frames/block` on the first accepted block; `tci: server runs IQ
+at X Hz (asked for Y)` when the `iq_samplerate` echo differs from the
+request (the pipeline builds the bank from the blocks' own rate, so this is
+information, not a fault); and a one-shot `g_warning` from the service
+thread when 3 s pass after `iq_start:0` with no IQ block, quoting what the
+server announced. A missing `iq_start` echo is NOT treated as an error (the
+spec marks the command client→server only).
 
 ## Open — ideas
 
@@ -380,6 +439,11 @@ before anything is promised, starting with what `ic7610ftdi` actually delivers
 ## Roadmap
 
 Milestones and their order live in `docs/SCOPE.md`. Nothing in this backlog
-blocks them: all three bugs are closed (SKM-1 fixed, SKM-2 explained, SKM-6
-fixed), and none of them was noticed by the operator during 5 hours of
-contest operation across two days.
+blocks them: the bug section is closed again — SKM-1 fixed, SKM-2 explained,
+SKM-6 fixed (none noticed by the operator during 5 hours of contest
+operation across two days), and the gh#2 TCI hardening SKM-7..11 fixed on
+2026-09-11 with the `tci-client` gate at 29 checks. What remains for gh#2 is
+the first run against a real ExpertSDR3 — SM0ONR reports the skimmer works
+on his SunSDR once the device bandwidth is raised (156/312 kHz), so the
+"connected, no output" at his default settings is the open question the
+new log lines are meant to answer from his log.

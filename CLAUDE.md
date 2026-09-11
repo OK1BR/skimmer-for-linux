@@ -962,6 +962,36 @@ verified). sdr itself was not released (not asked). Not done: local
 install to ~/.local, a waterfall screenshot for README/metainfo (Richard's
 live shot). **Next: (b) the RTTY over-head pre-roll fix.**
 
+**gh#2 — SunSDR/ExpertSDR3 asked for; TCI hardening SKM-7..11 DONE
+(offline-proven 2026-09-11; first foreign-server report the same day).**
+Tomas SM0ONR (gh#2, 2026-09-10) asks whether a SunSDR runs the skimmer.
+Audit of `tci_client.c` against the TCI 2.0 spec + Thetis' TCIServer.cs
+found five assumptions that hold only for sdr-for-linux, all fixed: ONE
+WebSocket message = ONE Stream block (`lws_is_final_fragment &&
+lws_remaining_packet_payload == 0`; trailing bytes ignored + logged once,
+short message dropped + warned — SKM-9); blocks with h[0] ≠ 0 dropped
+(Thetis AlwaysStreamIQ pushes every receiver — SKM-7); the centre stamps
+h[8..10] count only after the server echoed `iq_stamp:1` (SKM-8); the IQ
+request goes out as three text frames (SKM-10); `[tci] port` is a setting
+(Preferences → Radio → Port, 1–65535, default 40001; probe, pipeline and
+About read it — SKM-11). Gate `skimmer-tci-test` 20 → 29 checks incl. a
+second session against a mock that never echoes `iq_stamp`; every fixture
+is followed by a MARKER block and the wait is "all queued markers back"
+(the first version read three checks green on the pre-fix code because the
+fixture was still queued — timing trap, fixed); against the pre-fix client
+five checks go red. Three diagnostic log lines for a remote tester: first
+accepted block (receiver/rate/format/channels/frames), `iq_samplerate`
+echo ≠ request, and a 3 s no-IQ warning quoting what the server announced.
+12 gates green; SKM-11 headless-verified (isolated config on port 40123 →
+probe + WS connects land there). **His report the same afternoon: at his
+default settings "connects, no output"; with the device bandwidth at
+156 or 312 kHz the waterfall shows, decoding works and spots appear on the
+ExpertSDR3 panorama — the first confirmed run against a foreign TCI
+server.** Hypothesis, unverified: a device bandwidth below our requested
+192 k makes ExpertSDR3 refuse or silently not start IQ; his log with the
+new lines decides. Open: how Tomas gets a build (main vs a v0.4.1 tag),
+and the reply in gh#2 (Richard's approval, en + cs).
+
 ## Layout
 
 ```
