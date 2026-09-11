@@ -501,6 +501,103 @@ bench — an IC-705 and an IC-7610. Not ruled out for the future; it needs study
 before anything is promised, starting with what `ic7610ftdi` actually delivers
 (sample rate, bandwidth, format, licence).
 
+### SKM-14 — Waterfall time span as a setting, default much shorter so keying reads
+- **Type:** idea · **Severity:** — · **Status:** open
+- **Source:** Richard, 2026-09-11 ("rychlost pohybu spektra" — the speed the spectrum moves), after the Whole Milk demos (OH7LZB, 10 Sep 2026: youtu.be/FSvMRQ1qojw Mac, youtu.be/qqQsqIUnPXw Windows)
+- **Detail:** measured off the demo videos by frame cross-correlation (local notes in `~/Downloads/whole-milk/`, not in the repo)
+
+Whole Milk's waterfall shows **~4 s of history across its width** (Mac demo, toolbar selector "4 s";
+3.8 s and 4.3 s measured in two segments). The selector *is* the span: in the Windows demo "3 s"
+measures 2.8 s and "6 s" 5.5 s across the waterfall. Ours is fixed: `SKIM_SPECTRUM_HOP_DIV` 4 →
+93.75 rows/s, `SKIM_WF_ROWS_PER_PX` 2 → 21.3 ms/px ≈ 47 px/s, i.e. **~15 s on a 700 px
+waterfall**. At 25 WPM a dit (48 ms) is ~2 px wide here; at their span it is ~4 pt (assuming a 2×
+Retina capture) and single dits and dahs read in the picture. `rows_per_px` is an integer ≥ 1
+(`wf_compose.c`, `MAX(win->rows_per_px, 1u)`), so a span under ~7.5 s at 700 px needs either a
+fractional rows-per-px (one row stretched over more than a pixel) or a higher row rate
+(`HOP_DIV` 8 = 187.5 rows/s, twice the FFT work). Make the span a user setting (seconds across the
+visible width, like their selector); the default is picked at Richard's live look.
+
+### SKM-15 — A tail of the decoded text next to each call in the waterfall column
+- **Type:** idea · **Severity:** — · **Status:** open
+- **Source:** Richard, 2026-09-11 ("úryvek dekódovaného textu, vedle volačky"), Whole Milk Mac demo
+- **Detail:** demo frames ~35 s, 90 s, 170–175 s (local `~/Downloads/whole-milk/vsechny-snimky/mac/`)
+
+Whole Milk draws one text line per signal to the right of the waterfall: the frequency's holder call in
+brackets (`[UA3QGT]`), then the running decoded text (latest overs, `…` between them), joined to the
+signal's frequency by a dot and a leader line; the pane underneath holds the full transcript of the
+selected signal. Zoomed out over a crowded band the lines stack and the leaders fan out to them.
+Ours: the column (`wf_view.c`, `COLUMN_W` 180 px) carries a dot and the call only; kHz / speed / dB /
+heard / age live in the tooltip (a dB after the call was tried and taken out on Richard's look,
+2026-09-05), and the decode pane follows only the tuned station. Wanted: the last N characters of a
+station's decoded text after its call. Open points: a wider or elastic column (or text flowing over
+the decode area), where the snippet comes from (tracker's recent text), and a collision policy when
+zoomed out — today the weakest labels are hidden over capacity (`wf_view.c` ~321), theirs stack
+and fan out.
+
+### SKM-16 — Spectrum zoom in the manner of Whole Milk's
+- **Type:** idea · **Severity:** — · **Status:** open
+- **Source:** Richard, 2026-09-11 ("zoomování spektra"), Whole Milk Mac demo 170–171 s; the Windows build shows a `zoom 9.3x` / `zoom 11.7x` badge in the waterfall corner
+- **Detail:** 20 fps frames of the Mac transition (local `~/Downloads/whole-milk/`)
+
+In the demo a zoom from ~10 kHz to ~50 kHz completes in ~0.1–0.15 s: the waterfall is redrawn at the
+new scale including its history, and the text lines re-arrange in a short animation into stacked
+rows with fanned leaders (see SKM-15). Ours already keeps full-resolution history and recomposes on
+zoom (5.4 ms for 192 k on 700×600): Ctrl+wheel = 1.25× per step from 2 kHz to the band, wheel pans,
+the scale strip drags. Which part of theirs to take (transition, badge, gesture, the column following
+the zoom) is settled with Richard before any code.
+
+### SKM-17 — Highlight protocol keywords in the decoded text by colour / shade
+- **Type:** idea · **Severity:** — · **Status:** open
+- **Source:** Richard, 2026-09-11 ("zvýraznění klíčových slov jinou barvou/odstínem"), after the Whole Milk demo
+
+Ours colours only validated callsigns (`scp` tag in the TCI spot colour, `scp-dup` gray once the
+logbook has the station, `main.c` ~1985–2000) and shades uncommitted draft text gray. Wanted:
+protocol words by role in their own colour or shade — calling (CQ / TEST / QRZ), DE, report
+(5NN / RST), closing (TU / 73 / K / BK), the exchange — in the decode pane and in the column snippet
+(SKM-15). Note from the demo, inferred from frames and not stated by its author: Whole Milk's
+colours seem to encode decoder confidence rather than a word's role — tokens whose tooltip reads
+`confidence 1.00` (CQ, 5NN, RDA) are white, the yellow / orange / red ones are mostly garbage
+(`3YFLCSM`, `SU5H5HHHE`). Which classes and shades: at Richard's look.
+
+### SKM-18 — Neural decoding, second attempt: bigger, faster models on GPU / NPU (CPU as baseline)
+- **Type:** idea · **Severity:** — · **Status:** open (nothing decided)
+- **Source:** Richard, 2026-09-11 ("zaměřil bych se znovu na tu neuronku… využití GPU, NPU, případně CPU, ale výkonnější a rychlejší modely"), after the Whole Milk demos
+- **Detail:** SKM-3 (DeepCW evaluation and its licence gate); CLAUDE.md "Neural CW reader" (July prototype) and "LIVE VERDIKT run5" (2026-07-19)
+
+Why this is not a rerun of July: the July reader was a ~310k-param dilated TCN + CTC over
+**symbolic run durations**. It re-read what the classical demodulator had already decided, so it
+inherited every demodulation error. It ran on the CPU in dependency-free C, and two trained
+generations failed to be a net positive on a live band ("the AI comes OUT of decoding",
+2026-07-19). The neural decoders shown to work today start from the **signal**:
+
+- **DeepCW** (e04/deepcw-engine, AGPL-3.0) is a ~15 MB CTC CNN over a log-magnitude
+  spectrogram: 3200 Hz audio, 256-point FFT, 400–1200 Hz → 65 bins (per AetherSDR RFC #4817, open
+  since 2026-08-07).
+- **Whole Milk's** general decoder, per its own UI tooltip, is `cw_ctc.onnx on trtrtx`: a CTC model
+  in ONNX, run through ONNX Runtime's NVIDIA TensorRT-RTX execution provider and fed the whole band
+  at 46.9 Hz bins. A second, dearer decoder is called "Whisper" (that is all that is known).
+  The file name is **not** DeepCW's (that model ships as `model.onnx`), so it is presumably his own.
+
+Hardware on the dev machine: an RTX 5070 (CUDA / TensorRT), an Intel NPU (Core Ultra 7 265,
+`vpu_37xx`, ~13 TOPS; OpenVINO inference verified 2026-07-18; research 2026-08-25 found it no
+faster than an iGPU, its value is a few watts and a free GPU) and the CPU as the baseline.
+
+Questions, in order:
+
+1. **Input.** Per-channel baseband or audio (DeepCW's shape) versus band-wide spectrogram tiles
+   (Whole Milk's). The second maps onto the spectrum tap that already exists (`spectrum.c`,
+   23.4 Hz bins, 93.75 rows/s).
+2. **Model and licence.**
+   - DeepCW: AGPL-3.0, gated as in SKM-3.
+   - lucpaysan/CW-LAB: GPL-3.0, ONNX models of ~7 MB.
+   - ag1le/LSTM_morse: MIT, TensorFlow LSTM.
+   - Our own training, reusing the July synthetic-fist and consensus-harvest approach.
+3. **Runtime.** ONNX Runtime with CUDA / TensorRT-RTX / OpenVINO providers as an *optional*
+   dependency, with a CPU fallback (an NPU- or NVIDIA-only backend is useless to anyone else).
+4. **Cost.** What one band-second costs on each device.
+5. **Proof.** An offline A/B against v2 on recorded contest IQ with the replay harness.
+   July's lesson: gains on synthetic CER did not survive a live band.
+
 ## Roadmap
 
 Milestones and their order live in `docs/SCOPE.md`. Nothing in this backlog
