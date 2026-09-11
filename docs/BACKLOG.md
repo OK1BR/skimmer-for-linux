@@ -191,6 +191,73 @@ the feed port is bound exactly once, zero warnings; 11 gates green. SKM-1's
 one-teardown-per-window design now holds by construction — one process, one
 `App`, one window.
 
+### SKM-7 — IQ blocks are not filtered by receiver
+- **Type:** bug · **Severity:** high · **Status:** open
+- **Source:** TCI compatibility audit for gh#2 (SM0ONR asks for SunSDR / ExpertSDR3), 2026-09-11 — not reproduced, no ExpertSDR3 here
+- **Detail:** `src/engine/tci_client.c` `drain_binary` (~183); Thetis `Project Files/Source/Console/TCIServer.cs` `wantsIQStream()` (ramdor/Thetis @852bf0ef)
+
+`drain_binary` accepts every block with type IQ, 2 channels and float32, but
+never looks at the header's `receiver` word (h[0]). We only send `iq_start:0`,
+yet a server may push other receivers' IQ to us too: Thetis has an
+`AlwaysStreamIQ` option that streams IQ of all receivers to every client
+(verified in its source), and a SunSDR2 reports `trx_count: 2`. RX1 blocks
+would be fed into the RX0 channelizer — two bands mixed into one waterfall and
+decoder bank, spots on wrong frequencies. Fix: drop blocks with h[0] != 0 and
+log it once.
+
+### SKM-8 — Centre stamps are read from reserved header words without the server's echo
+- **Type:** bug · **Severity:** high · **Status:** open
+- **Source:** TCI compatibility audit for gh#2, 2026-09-11
+- **Detail:** `src/engine/tci_client.c` ~204-208 and `handle_command` (~101-148); TCI spec Ver. 2.0 §3.4 p.9; sdr-for-linux `docs/TCI-SCOPE.md` (IQ centre stamps)
+
+`iq_stamp:1` is our family extension: sdr-for-linux echoes it and fills
+reserv[0..2] (h[8..10]). The client uses h[8] as the block centre whenever it
+is non-zero and never checks that the server echoed `iq_stamp:1`. The spec only
+calls these words "reserved" — it does not promise zeros. Thetis zeroes them
+(verified); ExpertSDR3 is closed source. If a server puts anything there, every
+decode and spot lands on a wrong frequency with no warning. Fix: set a flag on
+the `iq_stamp:1` echo and honour h[8..10] only then; otherwise keep the `dds`
+fallback.
+
+### SKM-9 — Binary IQ is parsed as one continuous byte stream across WebSocket messages
+- **Type:** bug · **Severity:** medium · **Status:** open
+- **Source:** TCI compatibility audit for gh#2, 2026-09-11
+- **Detail:** `src/engine/tci_client.c` `LWS_CALLBACK_CLIENT_RECEIVE` (~236-238), `drain_binary` (~170-217); TCI spec Ver. 2.0 §3.4 p.9
+
+Binary frames are appended to one `GByteArray` and cut purely by the header's
+`length`, so the code assumes every message is exactly 64 + length×4 bytes.
+The spec draws the block as a struct with a fixed `data[16384]`; sdr-for-linux
+and Thetis send exact sizes (verified), ExpertSDR3 unknown. If a server pads a
+message, the padding is read as the next header — "bogus Stream length"
+resets and silent data loss. Fix: one complete WS message = one block (collect
+fragments until `lws_is_final_fragment()`), parse its header, ignore trailing
+bytes.
+
+### SKM-10 — The IQ request goes out as three commands in one text frame
+- **Type:** bug · **Severity:** medium · **Status:** open
+- **Source:** TCI compatibility audit for gh#2, 2026-09-11
+- **Detail:** `src/engine/tci_client.c` `skim_tci_client_start` (~420)
+
+`iq_samplerate:192000;iq_start:0;iq_stamp:1;` is queued as a single WebSocket
+text frame. The spec says nothing about several commands per frame.
+sdr-for-linux and Thetis split on `;` (Thetis verified), but ftl/tci — a Go
+client written for ExpertSDR — sends one command per frame. If ExpertSDR3 reads
+only the first command of a frame, `iq_start` is lost and the skimmer sits
+"connected" with no IQ. Fix: queue each command as its own message.
+
+### SKM-11 — The TCI port cannot be set
+- **Type:** bug · **Severity:** medium · **Status:** open
+- **Source:** TCI compatibility audit for gh#2, 2026-09-11; Richard: the port must be configurable, as it is in log-for-linux
+- **Detail:** `src/app/main.c` ~1247 (pipeline config), ~1370 (reachability probe), ~1500 (Preferences text); only `[tci] host` is persisted (~930, ~1057)
+
+Only the host is a setting; 40001 is hard-coded in three places. The TCI spec
+names no default port and the server side decides it (ExpertSDR3 users are told
+to check the port in its settings), so a server on any other port is
+unreachable. Fix: a `[tci] port` key (1–65535, default 40001) loaded and saved
+next to `host`, a Port row in Preferences → TCI server, used by both the
+pipeline and the probe; a change reconnects like a host change. Reference:
+log-for-linux `src/app/settings.c` (~145-149).
+
 ## Open — ideas
 
 ### SKM-3 — Evaluate DeepCW as a neural decode backend alongside the DSP one
