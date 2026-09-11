@@ -6,8 +6,10 @@ of CW Skimmer / SDC, built as a **TCI client** for
 [`sdr-for-linux`](https://github.com/OK1BR/sdr-for-linux).
 
 `skimmer-for-linux` connects to the ExpertSDR-compatible **TCI server** in
-`sdr-for-linux`, pulls a wideband IQ stream straight from the radio, splits it
-into hundreds of narrow channels, and decodes them in parallel. Valid callsigns
+`sdr-for-linux` (or, in principle, any other TCI server — see
+[Requirements](#requirements)), pulls a wideband IQ stream straight from the
+radio, splits it into hundreds of narrow channels, and decodes them in
+parallel. Valid callsigns
 are pushed back as **spots** onto the `sdr-for-linux` panadapter (click to
 tune) and served to local loggers over a **CW-Skimmer-dialect telnet cluster
 feed**.
@@ -223,6 +225,12 @@ mode is a pluggable decode backend on shared infrastructure.
 
 - A running [`sdr-for-linux`](https://github.com/OK1BR/sdr-for-linux) with its
   **TCI server enabled** (Prefs → Radio → TCI), reachable over the network.
+  Host and port are set in Preferences → Radio (40001 unless the server says
+  otherwise). Since 0.4.1 the TCI client makes no sdr-for-linux-only
+  assumptions, so other TCI servers should work in principle — one
+  SunSDR / ExpertSDR3 run has been reported so far
+  ([#2](https://github.com/OK1BR/skimmer-for-linux/issues/2)); they are not
+  yet a tested, supported target.
 - Linux, GTK4 + libadwaita, GLib, libwebsockets, FFTW (single + double).
 - Build: `meson` + `ninja`.
 
@@ -280,7 +288,9 @@ extractor uses it as a dictionary boost. Settings live in
 Same author (OK1BR), same house style: native GTK4/C, GPLv3, in-tree vendoring
 of proven DSP (WDSP). This is a separate repo because the skimmer is a distinct
 tool that talks to the radio only over TCI — it could in principle run against
-any ExpertSDR-compatible TCI server.
+any ExpertSDR-compatible TCI server, and since 0.4.1 its TCI client is written
+to the spec rather than to `sdr-for-linux`'s habits (one block per WebSocket
+message, receiver filter, acknowledged extensions only, configurable port).
 
 ## Licence
 

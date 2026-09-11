@@ -57,6 +57,20 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.4.1" date="2026-09-11">
+      <description>
+        <p>
+          TCI client hardening for servers other than sdr-for-linux, prompted
+          by the first SunSDR / ExpertSDR3 report: one IQ block per WebSocket
+          message, blocks of other receivers dropped, the centre-stamp
+          extension honoured only after the server acknowledges it, one
+          command per text frame, and the TCI port is a setting (Preferences →
+          Radio). The log now says when IQ starts, when the server runs a
+          different sample rate than asked for, and when no IQ arrives within
+          three seconds of the request.
+        </p>
+      </description>
+    </release>
     <release version="0.4.0" date="2026-09-06">
       <description>
         <p>
