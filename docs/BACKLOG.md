@@ -327,6 +327,61 @@ is written (fires at +3.00 s, measured). Mock lesson: its outbox is global,
 so a new session must start with it emptied (the no-IQ session had received
 the previous session's tail). `tci-client` gate: 20 → 32 checks.
 
+### SKM-12 — A callsign torn into three or more tokens is spotted as its two-token fragment
+- **Type:** bug · **Severity:** high (a wrong callsign on the panadapter) · **Status:** open
+- **Source:** Richard's sdr-for-linux screenshot 2026-09-11 18:58 (label `UA6H` at 14038.5) + the live decode log `~/.local/share/skimmer-for-linux/decodes-2026-09-11.log`, 14039.x, 18:49–18:57
+- **Detail:** token stream saved to `/var/tmp/skimmer-iq/ua6hnu-live-text-14039-18h49-18h57.txt` (980 chars of joined pane text); mechanism in `src/engine/callsign.c` — the join hypothesis (~393-410) and `skim_callsign_extractor_best_ex` (tie → longer call); `src/engine/station.c` `clip_fold`
+
+The operator on 14039 keys `CQ CQ DE UA6 H NU UA6 H NU PSE K` with inter-word
+gaps INSIDE the callsign, so v2 reads it correctly but as three tokens: over
+eight minutes the log holds `UA6` 12×, `H` 35×, `NU` 32× and `UA6HNU` never
+(sometimes even four pieces, `UA 6 H NU`). The extractor's join hypothesis
+glues only two ADJACENT tokens: `UA6`+`H` = `UA6H` validates (UA6 prefix + H
+suffix) and `H` alone is no call, so the join is accepted; `H`+`NU` = `HNU`
+does not validate, and the join is never chained onto the previous join, so
+`UA6HNU` is never even proposed. Repetition lifts `UA6H` past the 0.70
+panadapter bar, and the station table's clip fold cannot retire it because
+the longer call is never reported. The real call is most likely UA6HNU
+(inferred from the repeated pattern, not verified). Same rukopis class as
+EA1EYL (2026-07-16), whose fix covered only the CQ chain and the glued DE.
+
+Candidate fix, to be MEASURED before it stays: chain the join through the
+previous accepted join (`prev_join` + `tok`, here `UA6H`+`NU`) under the
+same guards (no stop word on either side, the join must explain something
+the parts do not, tie goes to the longer call) — then repetition makes
+`UA6HNU` outscore `UA6H` and the existing clip fold retires the fragment.
+Gate: a token-level case in `skimmer-call-test` fed from the saved stream
+(`skim_callsign_extractor_feed`), plus phantom guards (a chained join must
+not mint a call out of `<call> <stop-word> <fragment>` sequences). Regression
+check: the 2026-09-11 IQ fixture (below) must keep its station table
+bit-identical with zero phantoms.
+
+### SKM-13 — A whole over keyed as ONE token (`CQCQCQDEEA5JQFEA5JQFK`) yields no candidate
+- **Type:** bug · **Severity:** medium (a calling station is missed) · **Status:** open
+- **Source:** offline replay of the fresh IQ fixture, 2026-09-11 19:05–19:08, 14040.00
+- **Detail:** fixture `/var/tmp/skimmer-iq/iq-20260911-ua6hnu-192k.cf32` (180 s, 192 k, centre 14 016 981 Hz, `.meta` written by the probe; replay outputs `replay-ua6hnu.{out,err}` beside it, decodes in `…cf32.decodes.log`); `src/engine/callsign.c` `cq_run_token` and the DE-strip fallback (~412-420)
+
+EA5JQF on 14040.00 keys the whole over with NO word gaps: the pane reads
+`CQCQCQDEEA5JQFEA5JQFK` as a single token, twice in 180 s. Neither fused-fist
+rule covers it — `cq_run_token` accepts nothing but `CQ` repeats, the
+DE-strip needs the token to START with `DE` — so the extractor emits no
+candidate at all (54 evaluations at that frequency, every score 0.00) and
+the station is absent from the replay's table (7 stations: IZ4ECE, EH1SDC,
+ON4AEO, EA6NB, 4L8A, TA5ARU, EA5JN). Same rukopis family as SKM-12, the
+opposite extreme: gaps closed instead of stretched.
+
+Candidate fix, to be measured: a lexical fallback for a long invalid token
+that begins with a CQ run and continues with `DE` — strip the run and the
+marker, then look for a valid call that repeats inside the remainder
+(`EA5JQF EA5JQF K`) — strictly a fallback where the normal path yields
+nothing, as variant C was. The fixture above is the end-to-end witness.
+
+**The fixture itself** is the first CW IQ recording since the corpus deletion
+of 2026-07-19 and doubles as the regression check for ANY extractor change:
+station table identical, zero phantoms. It does NOT contain UA6HNU (the
+operator stopped at 18:57:21, the recording started 19:05:46) — SKM-12's
+evidence is the live decode log and its saved token stream.
+
 ## Open — ideas
 
 ### SKM-3 — Evaluate DeepCW as a neural decode backend alongside the DSP one
@@ -449,10 +504,13 @@ before anything is promised, starting with what `ic7610ftdi` actually delivers
 ## Roadmap
 
 Milestones and their order live in `docs/SCOPE.md`. Nothing in this backlog
-blocks them: the bug section is closed again — SKM-1 fixed, SKM-2 explained,
-SKM-6 fixed (none noticed by the operator during 5 hours of contest
-operation across two days), and the gh#2 TCI hardening SKM-7..11 fixed on
-2026-09-11 with the `tci-client` gate at 32 checks. What remains for gh#2 is
+blocks them. Closed: SKM-1 fixed, SKM-2 explained, SKM-6 fixed (none noticed
+by the operator during 5 hours of contest operation across two days), and
+the gh#2 TCI hardening SKM-7..11 fixed on 2026-09-11 with the `tci-client`
+gate at 32 checks. Open bugs: SKM-12 and SKM-13, two extractor cases from
+the same evening's 20 m band (a callsign torn into three tokens spotted as
+its fragment; a whole over fused into one token missed) — decoder-quality
+work with a fresh IQ fixture to measure against. What remains for gh#2 is
 the first run against a real ExpertSDR3 — SM0ONR reports the skimmer works
 on his SunSDR once the device bandwidth is raised (156/312 kHz), so the
 "connected, no output" at his default settings is the open question the
