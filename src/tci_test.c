@@ -16,7 +16,13 @@
  *     codified (live-caught 2026-07-15: a client-side conjugate mirrors),
  *   - dds retune broadcasts update center_hz live,
  *   - spot() emits a well-formed spot: command with reserved chars scrubbed,
- *   - stop() sends iq_stop:0; and no IQ callback fires afterwards.
+ *   - stop() sends iq_stop:0; and no IQ callback fires afterwards,
+ *   - TCI hardening for foreign servers (gh#2, SKM-7..10): the IQ request
+ *     goes out as THREE text frames; a block for receiver 1 is never
+ *     delivered; a message with trailing bytes delivers its one block and
+ *     the stream goes on; a truncated message is dropped without desyncing
+ *     the next; and with the iq_stamp echo withheld the reserved words are
+ *     ignored (dds label, one whole-block callback).
  *
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
@@ -32,6 +38,13 @@
 #define RATE      48000
 #define TONE_HZ   12000.0
 #define BLK       2048            /* frames per Stream block                  */
+#define MARK_RATE 47999           /* h[1] of the MARKER block the mock queues right
+                                   * after every fixture: in-order delivery means
+                                   * that once the marker's callback shows, the
+                                   * fixture has been fully handled (gate timing
+                                   * trap caught 2026-09-11: three checks passed
+                                   * on the pre-fix code because the fixture was
+                                   * still queued behind regular blocks) */
 
 /* ---- mock TCI server --------------------------------------------------------- */
 
@@ -48,6 +61,9 @@ static char        s_spot[256];       /* last spot: command                    *
 static struct lws *s_wsi;
 static struct lws_context *s_ctx;
 static volatile gint s_run = 1, s_streaming, s_push_dds, s_blocks_sent, s_stamp_req;
+static volatile gint s_echo_stamp = 1;   /* mock echoes iq_stamp:1 (sdr-for-linux does; others do not) */
+static volatile gint s_text_frames;      /* complete text frames received from the client */
+static volatile gint s_marks_sent;       /* MARKER blocks queued so far (one per fixture) */
 
 static void srv_queue_text(const char *txt) {
   Msg *m = g_new0(Msg, 1);
@@ -62,14 +78,19 @@ static void srv_queue_text(const char *txt) {
  * the centre arrives at +12 kHz on the wire (true orientation — the server has
  * already conjugated its RF-inverted DDC feed on send). Blocks are 512 whole
  * cycles, so per-block phase restarts at 0. */
-/* hz0/off/hz1 = sdr-for-linux's centre stamps in the reserved words (0 = none) */
-static void srv_queue_iq_block_ex(guint32 hz0, guint32 off, guint32 hz1) {
+/* rx/rate = header words 0/1; hz0/off/hz1 = sdr-for-linux's centre stamps in
+ * the reserved words (0 = none); pad = trailing bytes after the block in the
+ * SAME WebSocket message; trunc = payload bytes cut off the end (the header
+ * still claims the full block). */
+static void srv_queue_block(guint32 rx, guint32 rate, guint32 hz0, guint32 off,
+                            guint32 hz1, gsize pad, gsize trunc) {
   Msg *m = g_new0(Msg, 1);
-  m->len    = 64 + BLK * 2 * sizeof(float);
-  m->data   = g_malloc0(m->len);
+  const gsize full = 64 + BLK * 2 * sizeof(float);
+  m->len    = full + pad - trunc;
+  m->data   = g_malloc0(full + pad);
   m->binary = 1;
   guint32 h[16] = { 0 };
-  h[1] = RATE; h[2] = 3; h[5] = BLK * 2; h[6] = 0; h[7] = 2;
+  h[0] = rx; h[1] = rate; h[2] = 3; h[5] = BLK * 2; h[6] = 0; h[7] = 2;
   h[8] = hz0; h[9] = off; h[10] = hz1;
   memcpy(m->data, h, sizeof(h));
   float *iq = (float *)(void *)(m->data + 64);
@@ -78,10 +99,14 @@ static void srv_queue_iq_block_ex(guint32 hz0, guint32 off, guint32 hz1) {
     iq[2 * i]     = 0.5f * (float)cos(a);
     iq[2 * i + 1] = 0.5f * (float)sin(a);
   }
+  memset(m->data + full, 0xA5, pad);           /* padding that is NOT a header */
   g_mutex_lock(&s_lock);
   g_queue_push_tail(&s_out, m);
   g_mutex_unlock(&s_lock);
   g_atomic_int_inc(&s_blocks_sent);
+}
+static void srv_queue_iq_block_ex(guint32 hz0, guint32 off, guint32 hz1) {
+  srv_queue_block(0, RATE, hz0, off, hz1, 0, 0);
 }
 static void srv_queue_iq_block(void) { srv_queue_iq_block_ex(0, 0, 0); }
 
@@ -103,7 +128,9 @@ static void srv_exec(char *cmd) {
     g_atomic_int_set(&s_streaming, 0);
     srv_queue_text("iq_stop:0;");
   } else if (g_str_has_prefix(cmd, "iq_stamp:")) {
-    srv_queue_text("iq_stamp:1;");             /* the family extension echo   */
+    if (g_atomic_int_get(&s_echo_stamp)) {
+      srv_queue_text("iq_stamp:1;");           /* the family extension echo   */
+    }                                          /* else: a server that never heard of it */
   } else if (g_str_has_prefix(cmd, "spot:")) {
     g_mutex_lock(&s_lock);
     g_strlcpy(s_spot, cmd, sizeof(s_spot));
@@ -130,6 +157,9 @@ static int srv_cb(struct lws *wsi, enum lws_callback_reasons reason,
     lws_callback_on_writable(wsi);
     return 0;
   case LWS_CALLBACK_RECEIVE: {
+    if (lws_is_final_fragment(wsi) && lws_remaining_packet_payload(wsi) == 0) {
+      g_atomic_int_inc(&s_text_frames);        /* one complete WS message     */
+    }
     g_string_append_len(rxbuf, (const char *)in, (gssize)len);
     char *s = rxbuf->str, *semi;
     gsize used = 0;
@@ -180,8 +210,18 @@ static gpointer server_thread(gpointer data) {
       srv_queue_text("dds:0,7030000;");
     }
     const gint sr = g_atomic_int_get(&s_stamp_req);
-    if (sr == 1) { g_atomic_int_set(&s_stamp_req, 0); srv_queue_iq_block_ex(7021000, 0, 0); }
-    if (sr == 2) { g_atomic_int_set(&s_stamp_req, 0); srv_queue_iq_block_ex(7020000, 700, 7025000); }
+    if (sr == 1) { srv_queue_iq_block_ex(7021000, 0, 0); }
+    if (sr == 2) { srv_queue_iq_block_ex(7020000, 700, 7025000); }
+    /* hardening fixtures (gh#2): a receiver-1 block at a telltale rate, a
+     * stamped block with 100 trailing bytes, a block cut 1000 bytes short */
+    if (sr == 3) { srv_queue_block(1, 96000, 0, 0, 0, 0, 0); }
+    if (sr == 4) { srv_queue_block(0, RATE, 7022000, 0, 0, 100, 0); }
+    if (sr == 5) { srv_queue_block(0, RATE, 7023000, 0, 0, 0, 1000); }
+    if (sr) {                                  /* the MARKER right behind it  */
+      g_atomic_int_set(&s_stamp_req, 0);
+      srv_queue_block(0, MARK_RATE, 0, 0, 0, 0, 0);
+      g_atomic_int_inc(&s_marks_sent);
+    }
     /* Keep a small stock of IQ blocks queued while streaming. */
     if (g_atomic_int_get(&s_streaming)) {
       g_mutex_lock(&s_lock);
@@ -209,6 +249,22 @@ static double       c_rate, c_center;
 
 #define CAP_RING 8
 static guint  c_ring_n[CAP_RING]; static double c_ring_hz[CAP_RING]; static guint c_ring_i;
+static volatile gint c_rx1_blocks;      /* callbacks at the receiver-1 telltale rate */
+static volatile gint c_marks;           /* MARKER blocks delivered (rate MARK_RATE)  */
+static volatile gint c_hz_7022000, c_hz_7023000, c_hz_7021000, c_odd_frames;
+
+static void capture_reset(void) {
+  g_mutex_lock(&c_lock);
+  memset(c_ring_n, 0, sizeof(c_ring_n)); memset(c_ring_hz, 0, sizeof(c_ring_hz)); c_ring_i = 0;
+  c_have_block = 0; c_nframes = 0; c_rate = 0; c_center = 0;
+  g_mutex_unlock(&c_lock);
+  g_atomic_int_set(&c_blocks, 0);
+  g_atomic_int_set(&c_rx1_blocks, 0);
+  g_atomic_int_set(&c_marks, 0);
+  g_atomic_int_set(&s_marks_sent, 0);          /* a new session, no marker in flight */
+  g_atomic_int_set(&c_hz_7022000, 0); g_atomic_int_set(&c_hz_7023000, 0);
+  g_atomic_int_set(&c_hz_7021000, 0); g_atomic_int_set(&c_odd_frames, 0);
+}
 
 static void iq_cb(const float *iq, guint nframes, double rate, double center,
                   gpointer user) {
@@ -224,6 +280,12 @@ static void iq_cb(const float *iq, guint nframes, double rate, double center,
   c_center  = center;
   g_mutex_unlock(&c_lock);
   g_atomic_int_inc(&c_blocks);
+  if (rate == 96000.0) { g_atomic_int_inc(&c_rx1_blocks); }
+  if (rate == (double)MARK_RATE) { g_atomic_int_inc(&c_marks); }
+  if (center == 7022000.0) { g_atomic_int_inc(&c_hz_7022000); }
+  if (center == 7023000.0) { g_atomic_int_inc(&c_hz_7023000); }
+  if (center == 7021000.0) { g_atomic_int_inc(&c_hz_7021000); }
+  if (nframes != BLK) { g_atomic_int_inc(&c_odd_frames); }
 }
 
 /* centre-stamp captures: a stamped block's own centre, and a stamped
@@ -287,6 +349,28 @@ static int cond_click(void) {
 
 static SkimTciClient *g_client;
 static int cond_dds(void) { return skim_tci_client_center_hz(g_client) == 7030000.0; }
+static int cond_stamp_asked(void) { return srv_rx_contains("iq_stamp:1;"); }
+
+/* Queue fixture `req` on the mock and wait until EVERY marker the mock has
+ * queued so far (this fixture's included — earlier stamp fixtures leave
+ * theirs in flight too) has come back: returns 1 once the fixture is fully
+ * handled AND the stream survived it, 0 on timeout (the client lost sync). */
+static int s_marks_snap;
+static int cond_marked(void) {
+  const int sent = g_atomic_int_get(&s_marks_sent);
+  return sent > s_marks_snap && g_atomic_int_get(&c_marks) >= sent;
+}
+static int fixture(int req) {
+  s_marks_snap = g_atomic_int_get(&s_marks_sent);
+  g_atomic_int_set(&s_stamp_req, req);
+  const int ok = wait_ms(cond_marked, 3000);
+  printf("       fixture %d: marker %s — blocks %d, rx1 %d, odd %d, hz 7021000×%d 7022000×%d 7023000×%d\n",
+         req, ok ? "arrived" : "MISSING", g_atomic_int_get(&c_blocks),
+         g_atomic_int_get(&c_rx1_blocks), g_atomic_int_get(&c_odd_frames),
+         g_atomic_int_get(&c_hz_7021000), g_atomic_int_get(&c_hz_7022000),
+         g_atomic_int_get(&c_hz_7023000));
+  return ok;
+}
 
 int main(void) {
   printf("=== TCI client gate (offline, mock server) ===\n");
@@ -345,6 +429,30 @@ int main(void) {
   g_atomic_int_set(&s_stamp_req, 2);
   check("stamped boundary at 700: two callbacks — 700 frames @ 7020000, 1348 @ 7025000", wait_ms(cond_stamp_pair, 3000));
 
+  /* --- TCI hardening (gh#2) --- */
+  /* SKM-10: the request is THREE WebSocket text frames, not one batched
+   * frame (srv_rx_contains cannot see framing — the frame counter can). */
+  wait_ms(cond_stamp_asked, 2000);
+  check("SKM-10: iq_samplerate, iq_start, iq_stamp arrive as three text frames",
+        g_atomic_int_get(&s_text_frames) == 3);
+  /* SKM-7: a block for receiver 1 (at a telltale 96 kHz) is never delivered;
+   * the marker behind it proves receiver-0 blocks keep flowing. */
+  int marked = fixture(3);
+  check("SKM-7: a receiver-1 block is dropped (no callback at its 96 kHz)",
+        marked && g_atomic_int_get(&c_rx1_blocks) == 0);
+  /* SKM-9: a message with 100 trailing bytes delivers its ONE block (stamp
+   * 7022000, whole 2048 frames) and the marker behind it still parses. */
+  marked = fixture(4);
+  check("SKM-9: padded message → exactly one block, stream continues",
+        marked && g_atomic_int_get(&c_hz_7022000) == 1 &&
+        g_atomic_int_get(&c_odd_frames) == 2 /* only the stamped-boundary pair */);
+  /* SKM-9: a block cut 1000 bytes short is dropped whole — no partial
+   * callback (7023000 never shows), the marker behind it is not misread. */
+  marked = fixture(5);
+  check("SKM-9: truncated message dropped, no desync of the next block",
+        marked && g_atomic_int_get(&c_hz_7023000) == 0 &&
+        g_atomic_int_get(&c_odd_frames) == 2);
+
   if (have) {
     /* Correlate the ingested block against e^{±j2π·12k·t}: ingest is
      * pass-through, so the wire +12 kHz tone must still be at +12 kHz (true
@@ -396,6 +504,30 @@ int main(void) {
 
   skim_tci_client_free(c);
 
+  /* --- second session: a server that never echoes iq_stamp (SKM-8) --- */
+  /* Thetis zeroes the reserved words, ExpertSDR3 is closed source — a
+   * server putting anything there must NOT move our centre. */
+  g_atomic_int_set(&s_echo_stamp, 0);
+  capture_reset();
+  c = g_client = skim_tci_client_new("127.0.0.1", PORT);
+  skim_tci_client_set_iq_cb(c, iq_cb, NULL);
+  check("SKM-8 session: start() completes against a server without iq_stamp",
+        skim_tci_client_start(c, RATE, &err));
+  if (err) { printf("       (%s)\n", err->message); g_clear_error(&err); }
+  check("SKM-8 session: IQ flows", wait_ms(cond_blocks, 5000));
+  marked = fixture(1);                         /* junk 7021000 in h[8]        */
+  check("SKM-8: without the echo, h[8] is ignored — callbacks carry the dds label",
+        marked && g_atomic_int_get(&c_hz_7021000) == 0);
+  marked = fixture(2);                         /* junk boundary at 700        */
+  check("SKM-8: without the echo, a junk boundary does not split the block",
+        marked && g_atomic_int_get(&c_odd_frames) == 0);
+  g_mutex_lock(&c_lock);
+  check("SKM-8: every callback of the session sits on the dds centre (7020000)",
+        c_center == 7020000.0);
+  g_mutex_unlock(&c_lock);
+  skim_tci_client_stop(c);
+  skim_tci_client_free(c);
+
   g_atomic_int_set(&s_run, 0);
   lws_cancel_service(s_ctx);
   g_thread_join(st);
@@ -409,7 +541,7 @@ int main(void) {
     printf("FAIL\n");
     return 1;
   }
-  printf("PASS — handshake, IQ reassembly, true-orientation ingest and spot "
-         "plumbing all behave.\n");
+  printf("PASS — handshake, IQ reassembly, true-orientation ingest, spot "
+         "plumbing and the foreign-server hardening all behave.\n");
   return 0;
 }

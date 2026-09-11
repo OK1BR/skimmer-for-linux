@@ -2,10 +2,18 @@
  *
  * libwebsockets client on its own service thread (the sdr-for-linux
  * tci_test.c/piHPSDR pattern): lws_service loop + lws_cancel_service wakeups,
- * outgoing text queued and flushed on WRITEABLE. Text frames are accumulated
- * and split on ';' (the server batches commands per frame); binary frames are
- * accumulated as a byte stream and drained one Stream block at a time — the
- * 64-byte header carries the payload length, so WS fragmentation is invisible.
+ * outgoing text queued and flushed on WRITEABLE, ONE command per text frame
+ * (the spec says nothing about batching; ftl/tci, written for ExpertSDR,
+ * sends one per frame — SKM-10). Incoming text is accumulated and split on
+ * ';' (sdr-for-linux batches its init block into one frame). Binary: ONE
+ * complete WebSocket message = ONE Stream block (spec 3.4 draws it as a
+ * struct) — fragments are collected until the message ends, the header is
+ * parsed once, trailing bytes are ignored and a short message is dropped
+ * with a warning (SKM-9; the old byte-stream cut read any padding as the
+ * next header). Blocks of other receivers are dropped (SKM-7: Thetis'
+ * AlwaysStreamIQ pushes every receiver to every client) and the centre
+ * stamps in the reserved words count only after the server echoed
+ * iq_stamp:1 (SKM-8: the spec promises nothing about those words).
  *
  * Wire orientation: the wire already carries the TRUE spectrum — the server
  * conjugates its RF-inverted raw DDC feed on send (the ExpertSDR convention
@@ -63,10 +71,17 @@ struct _SkimTciClient {
   char     device[64];
   char     protocol[64];
 
-  /* LWS thread only — no lock needed. */
+  guint    iq_req_rate;       /* iq_samplerate we asked for (0 = none)       */
+  gint64   iq_start_us;       /* when iq_start:0 was queued (0 = not yet)    */
+
+  /* LWS thread only — no lock needed (lws_service runs the callbacks on the
+   * service thread, and so does the no-IQ watchdog). */
   GString    *txt;            /* text command accumulator                    */
-  GByteArray *bin;            /* binary Stream byte accumulator              */
-  gboolean    warned_fmt;
+  GByteArray *bin;            /* the binary message being reassembled        */
+  gboolean    stamp_ok;       /* server echoed iq_stamp:1 — h[8..10] valid   */
+  guint       blocks;         /* IQ blocks delivered this session            */
+  gboolean    warned_fmt, warned_rx, warned_short, warned_pad, warned_bogus,
+              warned_noiq, warned_rate;
 
   volatile gint run;          /* service loop keeps going while 1            */
   gboolean      started;      /* start() succeeded (iq_start sent)           */
@@ -127,7 +142,22 @@ static void handle_command(SkimTciClient *c, char *cmd) {
     }
   } else if (strcmp(cmd, "iq_samplerate") == 0 && args) {
     long r = strtol(args, NULL, 10);
-    if (r > 0) { c->iq_rate = (guint)r; }
+    if (r > 0) {
+      c->iq_rate = (guint)r;
+      /* The echo after OUR request: the rate is device-global, a server may
+       * answer with what its device runs. The pipeline builds the bank from
+       * the blocks' own rate, so this is information, not an error — but a
+       * remote tester's log must show it (gh#2). */
+      if (c->iq_start_us && c->iq_req_rate && (guint)r != c->iq_req_rate &&
+          !c->warned_rate) {
+        c->warned_rate = TRUE;
+        g_message("tci: server runs IQ at %ld Hz (asked for %u)", r, c->iq_req_rate);
+      }
+    }
+  } else if (strcmp(cmd, "iq_stamp") == 0 && args) {
+    /* sdr-for-linux's echo of our family extension — only now do the
+     * reserved header words mean anything (SKM-8). */
+    c->stamp_ok = strtol(args, NULL, 10) == 1;
   } else if ((strcmp(cmd, "trx") == 0 || strcmp(cmd, "tune") == 0) && args) {
     /* trx:<rx>,<bool> / tune:<rx>,<bool> — rx 0. sdr-for-linux ≥ cc470af
      * reports the REAL keyed state (CW/RTTY text keying included); tune is
@@ -167,53 +197,112 @@ static void drain_text(SkimTciClient *c) {
 
 /* ---- incoming binary (Stream blocks) ---------------------------------------- */
 
-static void drain_binary(SkimTciClient *c) {
-  while (c->bin->len >= STREAM_HDR_BYTES) {
-    guint32 h[16];
-    memcpy(h, c->bin->data, sizeof(h));   /* GByteArray data may be unaligned */
-    const guint32 samples = h[5];
-    const gsize   need    = STREAM_HDR_BYTES + (gsize)samples * sizeof(float);
-    if (samples == 0 || samples > (1u << 20)) {      /* desynced — resync hard */
-      g_warning("tci: bogus Stream length %u, dropping buffer", samples);
-      g_byte_array_set_size(c->bin, 0);
+/* One complete binary WebSocket message = one Stream block (TCI spec 3.4).
+ * Called once the last fragment is in; c->bin holds the whole message. */
+static void handle_block(SkimTciClient *c) {
+  const gsize len = c->bin->len;
+  if (len < STREAM_HDR_BYTES) {
+    if (!c->warned_short) {
+      c->warned_short = TRUE;
+      g_warning("tci: binary message of %" G_GSIZE_FORMAT " bytes is shorter than a "
+                "Stream header, ignored", len);
+    }
+    return;
+  }
+  guint32 h[16];
+  memcpy(h, c->bin->data, sizeof(h));     /* GByteArray data may be unaligned */
+  const guint32 samples = h[5];
+  const gsize   need    = STREAM_HDR_BYTES + (gsize)samples * sizeof(float);
+  if (samples == 0 || samples > (1u << 20)) {
+    if (!c->warned_bogus) {
+      c->warned_bogus = TRUE;
+      g_warning("tci: bogus Stream length %u samples, message dropped", samples);
+    }
+    return;
+  }
+  if (len < need) {
+    if (!c->warned_short) {
+      c->warned_short = TRUE;
+      g_warning("tci: Stream block truncated — header says %u samples (%" G_GSIZE_FORMAT
+                " bytes), message carries %" G_GSIZE_FORMAT ", dropped", samples, need, len);
+    }
+    return;
+  }
+  if (len > need && !c->warned_pad) {
+    /* Padding (the spec's fixed data[16384]?) or a server concatenating
+     * blocks — either way the one line in the log says which. */
+    c->warned_pad = TRUE;
+    g_message("tci: binary message carries %" G_GSIZE_FORMAT " bytes past the Stream "
+              "block (%u samples) — trailing bytes ignored", len - need, samples);
+  }
+  if (h[0] != 0) {
+    /* We asked for iq_start:0 only; a server may push other receivers too
+     * (Thetis AlwaysStreamIQ, a two-receiver SunSDR). RX1 samples through
+     * the RX0 channelizer = two bands in one waterfall (SKM-7). */
+    if (!c->warned_rx) {
+      c->warned_rx = TRUE;
+      g_message("tci: Stream blocks for receiver %u ignored (we stream receiver 0)", h[0]);
+    }
+    return;
+  }
+  if (h[6] != STREAM_TYPE_IQ || h[7] != 2 || samples < 2) { return; }
+  if (h[2] != STREAM_FMT_FLOAT) {
+    if (!c->warned_fmt) {
+      c->warned_fmt = TRUE;
+      g_warning("tci: IQ Stream format %u (want float32=3), skipping", h[2]);
+    }
+    return;
+  }
+  const guint nframes = samples / 2;
+  if (c->blocks++ == 0) {
+    /* The line a remote tester's log needs (gh#2 question 1). */
+    g_message("tci: IQ stream up — receiver %u, %u Hz, float32, %u channels, "
+              "%u frames/block%s", h[0], h[1], h[7], nframes,
+              c->stamp_ok ? ", centre stamps on" : "");
+  }
+  if (!c->iq_cb) { return; }
+  float *iq = (float *)(void *)(c->bin->data + STREAM_HDR_BYTES);
+  /* The wire is already TRUE spectrum orientation — sdr-for-linux
+   * conjugates its RF-inverted raw DDC feed on send (the ExpertSDR
+   * convention SDC/CW Skimmer consume as-is). Do NOT conjugate here:
+   * that mirrors every frequency around the DDC centre (live-caught
+   * 2026-07-15, spots landed out of band). */
+  g_mutex_lock(&c->lock);
+  double center = c->center_hz;
+  g_mutex_unlock(&c->lock);
+  /* centre stamps (iq_stamp:1, see start()) — ONLY after the server echoed
+   * the command; the spec calls h[8..15] "reserved", not "zero". The
+   * block's own centre beats the label; a retune inside the block splits
+   * it at the stamped frame so both halves carry the centre of their
+   * samples. */
+  if (c->stamp_ok) {
+    const guint32 st_hz0 = h[8], st_off = h[9], st_hz1 = h[10];
+    if (st_hz0 != 0) { center = (double)st_hz0; }
+    if (st_hz0 != 0 && st_hz1 != 0 && st_off != 0 && st_off < nframes) {
+      c->iq_cb(iq, st_off, (double)h[1], center, c->iq_cb_data);
+      c->iq_cb(iq + 2 * st_off, nframes - st_off, (double)h[1], (double)st_hz1, c->iq_cb_data);
       return;
     }
-    if (c->bin->len < need) { return; }
-
-    if (h[6] == STREAM_TYPE_IQ && h[7] == 2 && samples >= 2) {
-      if (h[2] != STREAM_FMT_FLOAT) {
-        if (!c->warned_fmt) {
-          c->warned_fmt = TRUE;
-          g_warning("tci: IQ Stream format %u (want float32=3), skipping", h[2]);
-        }
-      } else {
-        float *iq = (float *)(void *)(c->bin->data + STREAM_HDR_BYTES);
-        const guint nframes = samples / 2;
-        /* The wire is already TRUE spectrum orientation — sdr-for-linux
-         * conjugates its RF-inverted raw DDC feed on send (the ExpertSDR
-         * convention SDC/CW Skimmer consume as-is). Do NOT conjugate here:
-         * that mirrors every frequency around the DDC centre (live-caught
-         * 2026-07-15, spots landed out of band). */
-        if (c->iq_cb) {
-          g_mutex_lock(&c->lock);
-          double center = c->center_hz;
-          g_mutex_unlock(&c->lock);
-          /* centre stamps (iq_stamp:1, see start()): the block's own centre
-           * beats the label; a retune inside the block splits it at the
-           * stamped frame so both halves carry the centre of their samples */
-          const guint32 st_hz0 = h[8], st_off = h[9], st_hz1 = h[10];
-          if (st_hz0 != 0) { center = (double)st_hz0; }
-          if (st_hz0 != 0 && st_hz1 != 0 && st_off != 0 && st_off < nframes) {
-            c->iq_cb(iq, st_off, (double)h[1], center, c->iq_cb_data);
-            c->iq_cb(iq + 2 * st_off, nframes - st_off, (double)h[1], (double)st_hz1, c->iq_cb_data);
-          } else {
-            c->iq_cb(iq, nframes, (double)h[1], center, c->iq_cb_data);
-          }
-        }
-      }
-    }
-    g_byte_array_remove_range(c->bin, 0, (guint)need);
   }
+  c->iq_cb(iq, nframes, (double)h[1], center, c->iq_cb_data);
+}
+
+/* No IQ within a few seconds of iq_start:0 — the "connected, no output"
+ * picture a remote tester sees (gh#2). One warning that names what the
+ * server said, so the log carries the diagnosis. LWS/service thread. */
+#define NO_IQ_WARN_US (3 * G_TIME_SPAN_SECOND)
+static void check_no_iq(SkimTciClient *c) {
+  if (c->warned_noiq || c->blocks) { return; }
+  g_mutex_lock(&c->lock);
+  const gint64 t0 = c->iq_start_us;
+  const guint  rate = c->iq_rate, req = c->iq_req_rate;
+  g_mutex_unlock(&c->lock);
+  if (!t0 || g_get_monotonic_time() - t0 < NO_IQ_WARN_US) { return; }
+  c->warned_noiq = TRUE;
+  g_warning("tci: no IQ block %d s after iq_start:0 — server announced "
+            "iq_samplerate:%u (asked for %u); check the server's IQ / receiver "
+            "settings (device bandwidth ≥ the IQ rate?)",
+            (int)(NO_IQ_WARN_US / G_TIME_SPAN_SECOND), rate, req);
 }
 
 /* ---- LWS plumbing ------------------------------------------------------------ */
@@ -234,8 +323,14 @@ static int client_cb(struct lws *wsi, enum lws_callback_reasons reason,
 
   case LWS_CALLBACK_CLIENT_RECEIVE:
     if (lws_frame_is_binary(wsi)) {
+      /* lws hands a frame over in rx-buffer-sized pieces; FIN is reported
+       * on every piece of the final frame, so the message is complete only
+       * when the frame's payload is also fully in. */
       g_byte_array_append(c->bin, (const guint8 *)in, (guint)len);
-      drain_binary(c);
+      if (lws_is_final_fragment(wsi) && lws_remaining_packet_payload(wsi) == 0) {
+        handle_block(c);
+        g_byte_array_set_size(c->bin, 0);
+      }
     } else {
       g_string_append_len(c->txt, (const char *)in, (gssize)len);
       drain_text(c);
@@ -297,6 +392,7 @@ static gpointer service_thread(gpointer data) {
     g_mutex_unlock(&c->lock);
     if (pending && wsi) { lws_callback_on_writable(wsi); }
     lws_service(c->ctx, 0);
+    check_no_iq(c);
     g_usleep(1000);
   }
   return NULL;
@@ -416,11 +512,19 @@ gboolean skim_tci_client_start(SkimTciClient *c, guint iq_samplerate, GError **e
    * inside the block, the frame offset (h[9]) + the new centre (h[10]).
    * Other servers ignore the command and leave the words zero — then the
    * dds label at block arrival is used, as before (±1 block of jitter). */
+  /* One command per text frame (SKM-10): the spec does not say a frame may
+   * carry several, and a server reading only the first would lose iq_start
+   * — "connected, no IQ" with nothing in the log. iq_stamp goes last so its
+   * echo precedes the first stamped block. */
+  g_mutex_lock(&c->lock);
+  c->iq_req_rate = iq_samplerate;
+  c->iq_start_us = g_get_monotonic_time();
+  g_mutex_unlock(&c->lock);
   if (iq_samplerate) {
-    cli_queue(c, g_strdup_printf("iq_samplerate:%u;iq_start:0;iq_stamp:1;", iq_samplerate));
-  } else {
-    cli_queue(c, g_strdup("iq_start:0;iq_stamp:1;"));
+    cli_queue(c, g_strdup_printf("iq_samplerate:%u;", iq_samplerate));
   }
+  cli_queue(c, g_strdup("iq_start:0;"));
+  cli_queue(c, g_strdup("iq_stamp:1;"));
   c->started = TRUE;
   return TRUE;
 }
@@ -448,8 +552,14 @@ void skim_tci_client_stop(SkimTciClient *c) {
   c->ctx = NULL;
   c->wsi = NULL;
   c->up = c->ready = c->failed = FALSE;
+  c->iq_req_rate = 0;
+  c->iq_start_us = 0;
   g_string_set_size(c->txt, 0);
   g_byte_array_set_size(c->bin, 0);
+  c->stamp_ok = FALSE;
+  c->blocks = 0;
+  c->warned_fmt = c->warned_rx = c->warned_short = c->warned_pad =
+      c->warned_bogus = c->warned_noiq = c->warned_rate = FALSE;
 }
 
 void skim_tci_client_spot(SkimTciClient *c, const char *call, const char *mode,
