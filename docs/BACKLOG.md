@@ -902,7 +902,10 @@ To settle before any design:
 
 1. **Source.** QRZ.com XML (subscriber) and HamQTH (free) — terms as written in log-for-linux's
    SCOPE M7, not re-checked against the providers. Bulk lists usable offline (LoTW user activity,
-   Club Log, …) — availability and terms unverified.
+   Club Log, …) — availability and terms unverified. Found on 2026-09-13 while writing SKM-20: SCP's
+   own `SCP.DB` (SQLite, 69 119 calls) carries a `verified` bitfield — regulatory database
+   (FCC/ISED/Ofcom), LoTW user list, QRZ.com, HamQTH.com — per its Developers page: an offline
+   second witness that needs no login of ours.
 2. **Who holds the credentials.** log-for-linux plans this very lookup as its M7 (QRZ.com / HamQTH
    XML, on-disk cache, credentials in the keyring; not built — no callbook code in its `src/` on
    2026-09-13). The skimmer could ask the logbook over the :2238 service it already uses (a new
@@ -917,6 +920,47 @@ To settle before any design:
 5. **What it proves.** Existence rules out calls nobody holds; it does not prove the decode right —
    a one-character mutation can land on another issued call. So a hit is a boost / highlight, never
    a verdict on its own.
+
+### SKM-20 — Keep MASTER.SCP current by itself: a background download from supercheckpartial.com
+- **Type:** idea · **Severity:** — · **Status:** open (a note only — no code today)
+- **Source:** Richard, 2026-09-13 ("chtělo by to ten master.scp pravidelně aktualizovat, pokud možno nějak automaticky samo na pozadí")
+- **Detail:** supercheckpartial.com Home, FAQ and Developers pages, read 2026-09-13 (a SvelteKit app — needs a JS-capable fetch)
+
+Today the file is copied in by hand and never refreshed. Richard's copy says "Release 2026.07.15";
+the site's current build is dated 2026-09-11 (50 013 calls, `Last-Modified: Fri, 11 Sep 2026
+00:04:52 GMT`). Per the site the list is built from contributed Cabrillo logs over the past 24 months
+and rebuilt twice a week, so a two-month-old copy misses new calls and keeps retired ones.
+
+What the site asks of software that downloads (Developers page): conditional requests
+(`If-None-Match` with the ETag, or `If-Modified-Since`) and the cached copy on 304; respect
+`Cache-Control`; never poll more than once a day; fetch only the one file needed; a `User-Agent`
+naming the software and version; let the user configure or disable automatic updates; don't
+hardcode URLs, discover them via `/api/v1/files`. Checked by hand the same day: `/api/v1/files`
+returns JSON (name, size, etag, modified) for every file; `https://www.supercheckpartial.com/MASTER.SCP`
+answers 200 with ETag + Last-Modified and `Cache-Control: max-age=21600`, and 304 to both
+conditional forms; the Developers page's own example path `/downloads/master.scp` answers 404, and
+the API gives names, not URLs — so "no hardcoded URLs" still needs an answer (or a question to them).
+
+Where it would live and what it touches:
+
+- **App, not engine.** The engine stays GLib-only and never waits on the network. The tree has no
+  HTTP client today (meson: glib, gio, gtk4, libadwaita, libwebsockets, fftw); libwebsockets' client
+  side or libsoup-3 (a new dependency) are the candidates, neither checked.
+- **Safe replace.** Download to a temp file, sanity-check it (size and call count near the previous
+  file's, lines that look like calls), then an atomic rename over
+  `~/.config/skimmer-for-linux/master.scp`; any failure keeps the old file. A bad download must
+  never empty the dictionary — it feeds the +0.15 boost and the two-token join.
+- **When it takes effect.** `skim_callsign_dict_load` runs in `skim_pipeline_new` (`pipeline.c:346`),
+  i.e. at the next connect / reconnect. A live swap needs a safe point: the load destroys the old
+  table in place (`callsign.c:156`) while the engine thread (extractor) and the GTK thread (pane
+  underline) read it, and `callsign.h` says no reload while readers run.
+- **Preferences / About.** An on/off switch (the site's own rule); last check and the loaded file's
+  release date in About, which already prints the path and the call count.
+- **Which file.** The site recommends `SCP.DB` (SQLite, 2.8 MB, all calls + metadata: `modes` CW /
+  RTTY / …, `verified` sources — see SKM-19) for new software; MASTER.SCP (351 KB) needs no new
+  parser. Taking SCP.DB means a SQLite dependency.
+- **Small find on the way.** The loader skips only empty and `#` lines, so the file's first line
+  `!!Order,1,1` loads as a "call" — harmless for matching, but About's call count is one high.
 
 ## Roadmap
 
