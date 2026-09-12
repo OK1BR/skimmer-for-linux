@@ -887,6 +887,37 @@ Questions, in order:
 5. **Proof.** An offline A/B against v2 on recorded contest IQ with the replay harness.
    July's lesson: gains on synthetic CER did not survive a live band.
 
+### SKM-19 — Check decoded callsigns against a second source (QRZ.com, HamQTH, …), not only MASTER.SCP
+- **Type:** idea · **Severity:** — · **Status:** open (a note only — Richard, 2026-09-13: "dnes nic neprogramuj")
+- **Source:** Richard, 2026-09-13 ("mohlo by se to ověřovat i třeba z qrz, nebo jiného zdroje")
+
+Today the only "does this call exist" witness is the optional MASTER.SCP dictionary:
+`skim_callsign_dict_load` reads `~/.config/skimmer-for-linux/master.scp` when the file is there (on
+Richard's machine: "Super Check Partial, Release 2026.07.15", ~50 000 calls). A hit adds +0.15 to the
+extractor score (`callsign.c`: 0.55 structure + ITU allocation, +0.25 DE, +0.10 CQ, +0.20 repeated;
+spot bar 0.70), licenses the two-token join (`dict_has(join)`, ~405) and paints the green underline
+in the decode pane (`main.c` `scp_highlight`). A real call missing from the SCP list gets no boost
+and has to reach 0.70 on markers and repetition alone. A second source would widen that witness.
+To settle before any design:
+
+1. **Source.** QRZ.com XML (subscriber) and HamQTH (free) — terms as written in log-for-linux's
+   SCOPE M7, not re-checked against the providers. Bulk lists usable offline (LoTW user activity,
+   Club Log, …) — availability and terms unverified.
+2. **Who holds the credentials.** log-for-linux plans this very lookup as its M7 (QRZ.com / HamQTH
+   XML, on-disk cache, credentials in the keyring; not built — no callbook code in its `src/` on
+   2026-09-13). The skimmer could ask the logbook over the :2238 service it already uses (a new
+   verdict, the way INV was added) instead of carrying a login of its own — the INV contract: the
+   UDP answer is the whole interface.
+3. **Never on the spot path.** The engine stays GLib-only and never waits on the network: async
+   query + cache, every failure = unknown = today's behaviour (the `dup_query.c` pattern). No
+   network (portable, contest) costs the boost, nothing else.
+4. **What gets looked up.** Not every decoded fragment — a lookup per candidate hits rate limits and
+   sends a stream of garbage tokens to a third party. Likely only candidates already near the bar,
+   or one per tracked station.
+5. **What it proves.** Existence rules out calls nobody holds; it does not prove the decode right —
+   a one-character mutation can land on another issued call. So a hit is a boost / highlight, never
+   a verdict on its own.
+
 ## Roadmap
 
 Milestones and their order live in `docs/SCOPE.md`. Nothing in this backlog
