@@ -385,8 +385,8 @@ evidence is the live decode log and its saved token stream.
 ## Open — ideas
 
 ### SKM-3 — Evaluate DeepCW as a neural decode backend alongside the DSP one
-- **Type:** idea · **Severity:** — · **Status:** open (evaluate, nothing decided)
-- **Source:** own research, 2026-08-25
+- **Type:** idea · **Severity:** — · **Status:** open — EVALUATED 2026-09-12 (model dissected, cost measured, read side by side with v2 on two real IQ fixtures; implementation proposed below), Richard's go/no-go pending
+- **Source:** own research, 2026-08-25; Richard 2026-09-12 ("zjisti, co to přesně je a jak bychom to implementovali… přepínač dekódovacího enginu")
 - **Detail:** upstream <https://github.com/e04/deepcw-engine> (model + minimal
   Python/Node example), demo front-end <https://github.com/e04/web-deep-cw-decoder>
 
@@ -437,6 +437,118 @@ Open questions, in the order they would have to be answered:
 Nothing here is committed to a milestone. The first cheap step is offline: run
 the upstream Python example over recorded contest audio and compare its output
 against the DSP backend on the same recording.
+
+**Evaluation (2026-09-12, Richard's ask: "what exactly is it and how would we
+implement it — the app wants a decoding-engine switch").** Everything below was
+measured, not read off the README; scratch (clones, a venv with onnxruntime
+1.30, the bench and replay scripts, all outputs) sits in
+`/var/tmp/deepcw-research/`.
+
+*What the published model is.* `deepcw-engine` (2 commits, 2026-06-16,
+AGPL-3.0-only) ships ONE model: `model.onnx`, 3.61 M parameters (15 MB), a
+Conformer encoder (3 Conv2d front-end layers striding only in frequency, then
+6 blocks of FFN + multi-head self-attention + depthwise conv k=17, d=192),
+CTC head over 42 classes (letters, digits, `, . / ?`, space, blank), opset 18,
+exported from torch 2.10. Input `[batch, 1, time, 65]` = `log1p |STFT|` of
+3200 Hz audio, FFT 256 / hop 48 (15 ms), the 65 bins covering 400–1200 Hz at
+12.5 Hz; output `[batch, time, 42]` log-probs, ONE frame per 15 ms, greedy CTC
+collapse. The attention is global over the whole window (no causal variant),
+which is why the author's example wants 5–20 s clips and the web app streams
+by re-inferring a sliding window and committing text only up to a word gap
+≥ 1.25 s before the tail. **The web app (`web-deep-cw-decoder`) is a different
+deployment:** 9600 Hz / FFT 768 / hop 192 / per-window CMVN, and its four
+models (`en`, `en_narrow` 5-bin pileup, `ja`, `cw_detect`) are fetched from
+deepcw.cc by UUID and are NOT published — only the standard engine model is
+usable, and the README's CER heat-map is that deployment's claim. The web repo
+carries no licence file (all rights reserved by default), so any streaming /
+stitching logic here must be our own implementation, not a port.
+
+*Synthetic checks (own keyer, SNR in 2500 Hz):* 25 WPM exact copy at 0, −6,
+−8 dB; −10 dB ≈ 6 % CER; collapse at −12 dB. Tones at 450 and 1150 Hz (band
+edges) read exact. **Noise-only input gives an EMPTY output** (six seeds at
+4 s and 12 s, also after level normalisation, also on an empty fixture
+frequency) — no phantom text on dead channels, the July reader's failure.
+Two tones 100 Hz apart in one window give plausible-looking nonsense
+(`CQ51AKCXC1BK 2KA`) — that is the phantom mechanism, so a window must hold one
+station. A 65-bin tile with everything outside ±3 bins (±37.5 Hz) zeroed reads
+exactly as the full audio; ±1 bin degrades — so our 125 Hz channelizer output
+IS a sufficient input, no audio path needed. Hard-cut 4 s windows garble their
+edges (`Q CQ DE G`) — the sliding-window commit rule is needed, and it puts
+text on the pane ~2–3 s after the keying, unlike v2's per-element draft.
+**Amplitude trap:** the model is scale-invariant only over ~×0.001–×10 of a
+full-scale WAV; real IQ from our probe sits below that (tile log1p 0.00–0.02),
+and the first `InstanceNormalization`'s epsilon then silences weak channels —
+IZ4ECE (25 dB, v2 reads it for 180 s) decoded NOTHING until each window was
+normalised to peak 0.5. Normalise per window; after that every station reads.
+
+*Cost (CPU, Core Ultra 7 265, onnxruntime CPU EP):* one thread ≈ 6 ms per
+audio-second at 1–4 s windows, 8–10 ms/s at 12–20 s (attention is O(T²)).
+Batched, 4 intra-op threads: 2.2–2.8 ms per channel-second; 20 threads is
+WORSE per channel than 4. Budget: an 8 s window re-run every 2 s ≈ 3 % of one
+core per active channel → 50 active channels ≈ 1.5 of 20 cores. All 1536 CW
+channels continuously is impossible on CPU — an energy pre-gate (a keyed line
+above the tile floor) decides which channels get inference. GPU (RTX 5070,
+CUDA 13.3 installed, `onnxruntime-cuda` in extra) unmeasured; the batch
+dimension is dynamic so all active channels can go as one batch.
+
+*Real IQ, 20 m fixture `iq-20260911-ua6hnu-192k.cf32` (12 s windows, hop 6 s,
+125 Hz tile, normalised; v2's own decode log beside it):* IZ4ECE and ON4AEO
+read with FEWER mutations than v2 (`CQ CQ DE IZ4ECE IZ4ECE K` vs v2's
+`IZ4NE`/`IGEECE`/`IZIAECE`; `CQ CQ DE ON4AEO ON4AEO PSE K` vs
+`ON4AEOWNHEOMEEAEOPSE`); EA6NB, TA5ARU, EA5JN equal; **the QSO on 14012.97,
+which v2 logged for 180 s as `CQ CQ DE EAAOY EAAOY PSE K` and never tabled,
+reads `EA6AOY`** — a station the classical path lost; EA5JQF (SKM-13) comes
+out as the SAME fused token `CQCQCQDEEA5JQFEA5JQFK` — the fused/torn fist
+classes (SKM-12/13) are lexical, a neural front-end does not remove them
+(it also tears `OL4 AB B`, `O K1 M G3 W` on 80 m). *80 m contest recording
+`iq-20260912-80m-cw-contest-192k.cf32` (300 s, 28 v2 stations, 12 busiest
+frequencies):* on every channel DeepCW reads at least as well as v2 on the
+running station (OK1FHI, OK1MDK, OK1DOL, OM5AA, OK2PGY, OK7PY, SQ100PKP…);
+it reads the QSO PARTNER where v2 gets fragments (OK1XC's callers `OK1MWW
+AHOJ 5NN T84 OL1ADZ`, `OL5AJU`, `OM7CF`, `OK2PKD` where v2 logged `MO`, `OM`,
+`MAWW`; OK1MDK 156–186 s `CQ OK1MDK OK1MDK` where v2 has `CQOKS`, `SKTESTE`);
+and it emits short low-confidence junk in QRM windows where v2 stays silent
+(3550.89 kHz 0–48 s, `M IH NW370V4UKI` at 0.3–0.8; TA5ARU 108–150 s on 20 m)
+— the per-character CTC posterior separates most of it (clean text 0.96–1.00,
+junk mostly < 0.7) but not all, so DeepCW text may reach the extractor ONLY
+through the existing validation/repetition gates plus a measured confidence
+bar, and the tone splitter's contested rule still applies. No ground truth was
+available; these are side-by-side readings, not CER.
+
+*Licence, both texts read:* AGPL-3.0 §13 second paragraph and GPL-3.0 §13
+each grant permission to "link or combine" a work under the other licence
+"into a single combined work, and to convey the resulting work"; the AGPL's
+network-interaction clause then applies to the combination. The runtime
+(ONNX Runtime) is MIT. Whether a weights file is a copyrightable "work" is
+untested law; the author's stated terms are AGPL-3.0-only and that is what we
+would honour (notice + source offer, which the public repo already gives).
+The go/no-go is Richard's.
+
+*Proposed implementation (not started):* (1) `src/engine/decode_deepcw.c`
+implementing `SkimDecodeBackend` — per-channel ring of complex baseband,
+tile builder (×4 interpolation of the 250 Hz channel to 1000 Hz, 80-sample
+Hann, hop 15 = exactly the model's 80 ms / 15 ms STFT at 12.5 Hz bins, the
+channel's bins seated at tile index 32, per-window peak normalisation,
+log1p), energy pre-gate, ONE scheduler thread batching all gated channels
+every 1–2 s over an 8–12 s window, word-gap commit (own code), per-char
+posterior → `confidence`, tile-peak centroid → `freq_offset_hz`,
+`level()`/`tone_offset_hz()` from the tile so ghost arbitration and freq
+locks keep working; text goes down the SAME extractor/station/spot path.
+(2) ONNX Runtime through its C API, `dlopen`-ed at run time (`libonnxruntime
+.so.1`, `OrtGetApiBase`) with a vendored MIT header — Debian trixie and
+Fedora ship it (`libonnxruntime1.21`, `onnxruntime` 1.26), Arch `extra` has
+1.29, Ubuntu 24.04 has NONE — so the binary must run without it and the
+engine row must say "not available" instead of failing. (3) Model + metadata
+NOT in git: resolved from `~/.local/share/skimmer-for-linux/models/deepcw/`
+with a pinned sha256 and the AGPL notice beside it (bundling into
+AppImage/deb/rpm is a separate decision). (4) App: Preferences → Decoding →
+**CW engine** combo ("Classical (v2)" / "DeepCW (neural)"), persisted
+`[decode] engine`, a change rebuilds the pipeline like a mode change;
+`SkimPipelineConfig.cw_engine`; `SKIM_CW_ENGINE=deepcw` for `skimmer-replay`.
+(5) Proof before any default flips: offline A/B on both fixtures through the
+replay harness (station tables, phantom count, CPU), a labelled subset, then
+Richard's live look. The July rule holds: gate-proven offline first, and the
+classical path stays the default until a live band says otherwise.
 
 ### SKM-4 — In-app waterfall with decodes placed by frequency, click to set TX
 - **Type:** idea · **Severity:** — · **Status:** doing — half 1 DONE 2026-09-05 (M8 in SCOPE): engine tap + view + palettes + drag-pan + absolute-frequency history + the waterfall flowing through a retune (SDR HP kick, IQ centre stamps, largest-segment rows — Richard's live verdict on 80 m) + the callsign column with click-to-tune + logbook prefill (LIVE-verified 22:05) + the column's tooltip carrying kHz / speed / dB / heard / age (a dB after the call tried and taken out on his look) — and the station list DELETED on his word (~23:30); half 2 (click sets TX) deferred to sdr-for-linux `SDR-12`; half 1 SHIPPED in v0.4.0 (2026-09-06)
@@ -611,4 +723,10 @@ work with a fresh IQ fixture to measure against. What remains for gh#2 is
 the first run against a real ExpertSDR3 — SM0ONR reports the skimmer works
 on his SunSDR once the device bandwidth is raised (156/312 kHz), so the
 "connected, no output" at his default settings is the open question the
-new log lines are meant to answer from his log.
+new log lines are meant to answer from his log. SKM-3 (DeepCW) was evaluated
+on 2026-09-12: the published Conformer/CTC model reads two real IQ fixtures
+(20 m, and a fresh 300 s 80 m contest recording,
+`/var/tmp/skimmer-iq/iq-20260912-80m-cw-contest-192k.cf32`) at least as well
+as v2 and better on weak QSO partners, at ~3 % of a core per active channel;
+an engine switch + backend design is written up there and waits for
+Richard's decision (licence: AGPL ↔ GPLv3 §13 both permit the combination).
