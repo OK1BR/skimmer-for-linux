@@ -1036,11 +1036,20 @@ the decode.h vtable (20-point DFT tiles from the 250 Hz channel, 10 s ring,
 and the fresh 80 m contest fixture: full account under SKM-3 in
 `docs/BACKLOG.md` (wins EA6AOY, OK5O, OK1CZ, DL3GAK; costs: fewer hits →
 station-table takeovers lose some S&P callers, OK1DOL parked on a spur by the
-same-call rule, mutation twins). Inference runs INLINE on the engine thread
-(1.3–1.6× realtime on these fixtures) — the async worker for live use and the
-Preferences "CW engine" row are the next steps; the classical v2 stays the
-default. Model + runtime live outside the tree (scratch
-`/var/tmp/deepcw-research/`, the venv's `libonnxruntime.so.1.30.0`).
+same-call rule, mutation twins). Replays run inference INLINE (1.3–1.6×
+realtime, `SKIM_DEEPCW_SYNC=1` set by skimmer-replay); the app runs it on
+`SKIM_DEEPCW_WORKERS` (2) threads with a per-channel mailbox, the commit rule
+staying on the engine thread. **The switch is in: Preferences → Decoding →
+"CW engine" (Classical (v2) / DeepCW (neural)), `[decode] engine`, subtitle
+= availability on this machine, About carries the resolved engine, the app
+logs `app: pipeline engine <name>`.** Headless-verified (Broadway, isolated
+config, IQ replay into the UI): DeepCW decodes through the async path; a
+missing model → warning + v2. Model at
+`~/.local/share/skimmer-for-linux/models/deepcw/` (not in git); the runtime
+is NOT installed system-wide — a live look needs `SKIM_ORT_LIB=<the venv's
+libonnxruntime.so.1.30.0>` at launch or `onnxruntime-cpu` from extra
+(Richard's call). Classical v2 stays the default; his live look is the next
+step, then the station-table QSY rule.
 
 ## Layout
 

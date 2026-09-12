@@ -258,21 +258,47 @@ int main(void) {
     return fails ? 1 : 77;
   }
   printf("  runtime %s\n", skim_decode_deepcw_runtime_info());
+  const gboolean sync_env = g_getenv("SKIM_DEEPCW_SYNC") != NULL;
   {
+    /* Inline (the replay path): a burst feed, deterministic text. */
     GArray *env = keyer("CQ CQ DE OK1BR OK1BR K CQ CQ DE OK1BR OK1BR K", 25.0, RATE, 40, 200);
     float *iq = tone_iq(env, RATE, +20.0, 0.05f, 0.004f, 5);
     gpointer st = be->channel_new(RATE);
     GString *o = g_string_new(NULL); double conf = 0;
-    const guint hits = run_state(be, st, iq, env->len, o, &conf);
-    SkimDeepcwDebug dbg; skim_decode_deepcw_debug(st, &dbg);
-    printf("      text |%s| hits %u ticks %u last conf %.2f wpm %.0f\n", o->str, hits, dbg.ticks, conf, dbg.wpm);
+    guint hits = 0;
+    SkimDeepcwDebug dbg;
+    if (sync_env) {
+      hits = run_state(be, st, iq, env->len, o, &conf);
+    } else {
+      /* Async (the app's path): pace the feed like a live channel would
+       * arrive (a 64-frame block ≈ 256 ms of audio; 2 ms wall per block
+       * is 128× realtime — the workers must keep up), then drain the
+       * mailbox until the last window has come back. */
+      SkimDecode d;
+      for (guint i = 0; i < env->len; i += 64) {
+        const guint n = MIN(64u, env->len - i);
+        if (be->process(st, iq + 2 * i, n, &d)) { hits++; g_string_append(o, d.text); conf = d.confidence; }
+        g_usleep(2000);
+      }
+      for (int k = 0; k < 500; k++) {
+        if (be->process(st, iq, 0, &d)) { hits++; g_string_append(o, d.text); conf = d.confidence; }
+        skim_decode_deepcw_debug(st, &dbg);
+        if (!dbg.inflight && o->len > 20) break;
+        g_usleep(10000);
+      }
+    }
+    skim_decode_deepcw_debug(st, &dbg);
+    printf("      %s text |%s| hits %u ticks %u last conf %.2f wpm %.0f\n",
+           sync_env ? "sync " : "async", o->str, hits, dbg.ticks, conf, dbg.wpm);
     check("model reads the call (text contains OK1BR)", strstr(o->str, "OK1BR") != NULL);
     check("commit seams carry single spaces", strstr(o->str, "  ") == NULL);
     check("model reads CQ", strstr(o->str, "CQ") != NULL);
     check("no doubled call from re-decoding committed audio", strstr(o->str, "OK1BROK1BR") == NULL &&
           strstr(o->str, "OK1BR OK1BR OK1BR") == NULL);
     check("committed text carries a confidence", conf > 0.5);
-    be->channel_free(st); g_free(iq); g_array_free(env, TRUE); g_string_free(o, TRUE);
+    check("a state freed with a window in flight does not crash (deferred free)",
+          (be->channel_free(st), TRUE));
+    g_free(iq); g_array_free(env, TRUE); g_string_free(o, TRUE);
     /* noise only, 20 s: no phantom text */
     GArray *env0 = g_array_new(FALSE, FALSE, sizeof(float)); const float z = 0.0f;
     for (guint i = 0; i < 20 * (guint)RATE; i++) g_array_append_val(env0, z);

@@ -132,7 +132,10 @@ int main(int argc, char **argv) {
   };
   /* SKIM_CW_ENGINE=v1|v2|deepcw picks the CW engine (the app's "CW engine"
    * preference takes the same config field); the pipeline resolves the
-   * DeepCW availability itself and falls back to v2 with a warning. */
+   * DeepCW availability itself and falls back to v2 with a warning. A
+   * replay runs DeepCW inference INLINE (deterministic, stream order) —
+   * the app uses the async workers. */
+  g_setenv("SKIM_DEEPCW_SYNC", "1", FALSE);
   SkimPipeline *p = skim_pipeline_new(&cfg);
   printf("=== skimmer-replay %s — %.0f Hz, centre %.0f Hz, %s, engine %s, "
          "dict %s ===\n",

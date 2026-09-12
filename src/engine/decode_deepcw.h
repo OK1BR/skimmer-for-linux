@@ -17,6 +17,11 @@
  * time (SKIM_DEEPCW_MODEL, else the user data dir); when either is missing
  * skim_decode_deepcw_available() says why and the pipeline stays on v2.
  *
+ * Inference runs on SKIM_DEEPCW_WORKERS (2) threads by default — the engine
+ * thread only snapshots a window and later commits the result — or INLINE
+ * with SKIM_DEEPCW_SYNC=1, which skimmer-replay sets so that a replay is
+ * deterministic (results land in stream order, never a wall-clock race).
+ *
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
 #ifndef SKIMMER_DECODE_DEEPCW_H
@@ -51,6 +56,7 @@ typedef struct {
   guint64  committed;        /* commit cursor (abs frame)                 */
   guint    ticks;            /* inference runs so far                     */
   gboolean dead;             /* unusable rate / no runtime                */
+  gboolean inflight;         /* async: a window is at the workers         */
 } SkimDeepcwDebug;
 void skim_decode_deepcw_debug(gpointer state, SkimDeepcwDebug *dbg);
 

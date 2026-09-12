@@ -24,6 +24,7 @@
 #include "callsign.h"
 #include "pane_log.h"
 #include "spot_out.h"
+#include "decode_deepcw.h"
 #include "pipeline.h"
 #include "wf_compose.h"
 #include "wf_view.h"
@@ -97,6 +98,9 @@ typedef struct {
   guint           dec_mode;      /* 0 = CW, 1 = RTTY (persisted [decode]) —
                                   * picks the engine backend + bank geometry;
                                   * a change reconnects the pipeline          */
+  guint           cw_engine;     /* 0 = classical v2, 1 = DeepCW (persisted
+                                  * [decode] engine); CW mode only; a change
+                                  * reconnects; DeepCW unavailable → v2     */
   SkimRbnFeed    *rbn;           /* RBN telnet server — app-owned so
                                   * aggregator sessions ride out reconnects   */
   gboolean        rbn_enabled;   /* persisted [rbn]                           */
@@ -1047,6 +1051,21 @@ static guint settings_load_mode(void) {
   return v;
 }
 
+/* [decode] engine = "v2" | "deepcw" (anything else = v2). */
+static guint settings_load_engine(void) {
+  char *path = settings_file();
+  GKeyFile *kf = g_key_file_new();
+  guint v = 0;
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
+    char *e = g_key_file_get_string(kf, "decode", "engine", NULL);
+    if (e && g_ascii_strcasecmp(e, "deepcw") == 0) { v = 1; }
+    g_free(e);
+  }
+  g_key_file_free(kf);
+  g_free(path);
+  return v;
+}
+
 static void settings_load_rbn(App *app) {
   char *path = settings_file();
   GKeyFile *kf = g_key_file_new();
@@ -1077,6 +1096,7 @@ static void settings_save(const App *app) {
   g_key_file_set_string(kf, "tci", "host", app->host);
   g_key_file_set_integer(kf, "tci", "port", app->tci_port);
   g_key_file_set_string(kf, "decode", "mode", app->dec_mode ? "rtty" : "cw");
+  g_key_file_set_string(kf, "decode", "engine", app->cw_engine ? "deepcw" : "v2");
   g_key_file_set_boolean(kf, "spots", "cq_only", app->cq_only);
   g_key_file_set_integer(kf, "spots", "round_hz", (gint)app->spot_round);
   g_key_file_set_boolean(kf, "rbn", "enabled", app->rbn_enabled);
@@ -1268,12 +1288,14 @@ static SkimPipeline *pipeline_create(App *app) {
     .port = (guint16)app->tci_port,
     .iq_rate = 192000,
     .mode = app->dec_mode ? SKIM_PIPELINE_MODE_RTTY : SKIM_PIPELINE_MODE_CW,
+    .cw_engine = app->cw_engine ? SKIM_CW_ENGINE_DEEPCW : SKIM_CW_ENGINE_V2,
     .chan_bw_hz = 0,                           /* mode default: 125/250 Hz   */
     .dict_path = g_file_test(dict, G_FILE_TEST_EXISTS) ? dict : NULL,
     .decode_log_path = dlog,
     .rbn = app->rbn,                           /* NULL when the feed is off  */
   };
   SkimPipeline *p = skim_pipeline_new(&cfg);
+  g_message("app: pipeline engine %s", skim_pipeline_cw_engine_name(p));
   g_free(dict);
   g_free(dlog);
   skim_pipeline_set_station_cb(p, pipe_station_cb, app);
@@ -1411,6 +1433,7 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   GtkWidget *row  = g_object_get_data(G_OBJECT(dlg), "host-row");
   GtkWidget *tprow = g_object_get_data(G_OBJECT(dlg), "tci-port-row");
   GtkWidget *mrow = g_object_get_data(G_OBJECT(dlg), "mode-row");
+  GtkWidget *erow = g_object_get_data(G_OBJECT(dlg), "engine-row");
   GtkWidget *sw   = g_object_get_data(G_OBJECT(dlg), "cq-row");
   GtkWidget *qrow = g_object_get_data(G_OBJECT(dlg), "round-row");
   GtkWidget *frow = g_object_get_data(G_OBJECT(dlg), "font-row");
@@ -1431,9 +1454,11 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   char *rbn_call = g_strstrip(g_strdup(gtk_editable_get_text(GTK_EDITABLE(rcall))));
   int rbn_port = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rport));
   guint dec_mode = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(mrow)), 1u);
+  guint cw_engine = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(erow)), 1u);
   gboolean host_changed = host[0] && g_strcmp0(host, app->host) != 0;
   gboolean port_changed = tci_port != app->tci_port;
   gboolean mode_changed = dec_mode != app->dec_mode;
+  gboolean engine_changed = cw_engine != app->cw_engine;
   gboolean cq_changed   = cq_only != app->cq_only;
   gboolean round_changed = spot_round != app->spot_round;
   gboolean font_changed = font_pt != app->decode_font;
@@ -1475,14 +1500,18 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   if (mode_changed) {
     app->dec_mode = dec_mode;
   }
-  if (host_changed || port_changed || mode_changed || cq_changed ||
-      round_changed || font_changed || rbn_changed) {
+  if (engine_changed) {
+    app->cw_engine = cw_engine;
+  }
+  if (host_changed || port_changed || mode_changed || engine_changed ||
+      cq_changed || round_changed || font_changed || rbn_changed) {
     settings_save(app);
   }
   /* The pipeline's config carries the feed pointer — an RBN change needs a
-   * fresh pipeline just like a host change does; a mode change swaps the
-   * backend and the bank geometry, which only a rebuild can do. */
-  if (host_changed || port_changed || mode_changed || rbn_changed) {
+   * fresh pipeline just like a host change does; a mode or engine change
+   * swaps the backend (and the bank geometry), which only a rebuild can do. */
+  if (host_changed || port_changed || mode_changed || engine_changed ||
+      rbn_changed) {
     const gboolean replaying = app->replay_thread != NULL;
     if (replaying) { replay_stop(app); }        /* feeder off BEFORE the free */
     if (app->pipeline) {
@@ -1548,6 +1577,38 @@ static void prefs_open(GtkButton *btn, gpointer user) {
                           G_LIST_MODEL(gtk_string_list_new(MODES)));
   adw_combo_row_set_selected(ADW_COMBO_ROW(mrow), app->dec_mode);
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(dgrp), mrow);
+  /* CW engine: the classical v2 Viterbi or the DeepCW neural model. The
+   * subtitle tells the truth about DeepCW on THIS machine — the runtime
+   * (ONNX Runtime, dlopen-ed) and the model file are found at run time,
+   * and without them the pipeline stays on v2 whatever the row says. */
+  GtkWidget *erow = adw_combo_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(erow), "CW engine");
+  {
+    GError *err = NULL;
+    char *model = skim_decode_deepcw_model_path();
+    char *sub;
+    if (skim_decode_deepcw_available(&err)) {
+      sub = g_strdup_printf("DeepCW (neural, ONNX Runtime %s) reads whole "
+                            "words a few seconds behind the keying; "
+                            "Classical decodes per element. CW mode only — "
+                            "a change reconnects the engine",
+                            skim_decode_deepcw_runtime_info());
+    } else {
+      sub = g_strdup_printf("DeepCW is not available on this machine "
+                            "(%s) — Classical is used. It needs the ONNX "
+                            "Runtime library and the model at %s",
+                            err ? err->message : "?", model);
+      g_clear_error(&err);
+    }
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(erow), sub);
+    g_free(sub);
+    g_free(model);
+  }
+  static const char *ENGINES[] = { "Classical (v2)", "DeepCW (neural)", NULL };
+  adw_combo_row_set_model(ADW_COMBO_ROW(erow),
+                          G_LIST_MODEL(gtk_string_list_new(ENGINES)));
+  adw_combo_row_set_selected(ADW_COMBO_ROW(erow), app->cw_engine);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(dgrp), erow);
   adw_preferences_page_add(p_dec, ADW_PREFERENCES_GROUP(dgrp));
 
   GtkWidget *sgrp = adw_preferences_group_new();
@@ -1628,6 +1689,7 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   g_object_set_data(G_OBJECT(dlg), "host-row", row);
   g_object_set_data(G_OBJECT(dlg), "tci-port-row", tprow);
   g_object_set_data(G_OBJECT(dlg), "mode-row", mrow);
+  g_object_set_data(G_OBJECT(dlg), "engine-row", erow);
   g_object_set_data(G_OBJECT(dlg), "cq-row", sw);
   g_object_set_data(G_OBJECT(dlg), "round-row", qrow);
   g_object_set_data(G_OBJECT(dlg), "font-row", frow);
@@ -1683,7 +1745,7 @@ static void act_about(GSimpleAction *action, GVariant *param, gpointer user) {
   char *dbg = g_strdup_printf(
       "GTK %u.%u.%u, libadwaita %u.%u.%u\n"
       "TCI: %s:%d\n"
-      "Mode: %s\n"
+      "Mode: %s, CW engine: %s\n"
       "Telnet feed: %s\n"
       "Settings: %s/skimmer-for-linux/settings.ini\n"
       "MASTER.SCP: %s/skimmer-for-linux/master.scp (%s)\n"
@@ -1692,7 +1754,10 @@ static void act_about(GSimpleAction *action, GVariant *param, gpointer user) {
       gtk_get_micro_version(),
       adw_get_major_version(), adw_get_minor_version(),
       adw_get_micro_version(),
-      app->host, app->tci_port, app->dec_mode ? "RTTY" : "CW", feed,
+      app->host, app->tci_port, app->dec_mode ? "RTTY" : "CW",
+      app->pipeline ? skim_pipeline_cw_engine_name(app->pipeline)
+                    : (app->cw_engine ? "deepcw (preferred)" : "cw-v2"),
+      feed,
       g_get_user_config_dir(), g_get_user_config_dir(), scp_note,
       g_get_user_data_dir());
   adw_about_dialog_set_debug_info(ad, dbg);
@@ -1912,6 +1977,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   app->host         = settings_load_host();
   app->tci_port     = settings_load_tci_port();
   app->dec_mode     = settings_load_mode();
+  app->cw_engine    = settings_load_engine();
   app->cq_only      = settings_load_cq_only();
   app->spot_round   = settings_load_spot_round();
   app->decode_font  = settings_load_decode_font();

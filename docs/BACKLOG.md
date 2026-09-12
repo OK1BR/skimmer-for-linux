@@ -385,7 +385,7 @@ evidence is the live decode log and its saved token stream.
 ## Open — ideas
 
 ### SKM-3 — Evaluate DeepCW as a neural decode backend alongside the DSP one
-- **Type:** idea · **Severity:** — · **Status:** doing — evaluated 2026-09-12, Richard's "ano" the same evening; backend + gate + replay plumbing BUILT and A/B-replayed offline (below); open: async inference worker for live use, the Preferences "CW engine" row, a station-table QSY rule
+- **Type:** idea · **Severity:** — · **Status:** doing — evaluated 2026-09-12, Richard's "ano" the same evening; backend + gate + replay A/B + async workers + the Preferences "CW engine" switch BUILT and headless-verified (below); open: Richard's live look (the runtime is not installed system-wide), a station-table QSY rule, mutation twins
 - **Source:** own research, 2026-08-25; Richard 2026-09-12 ("zjisti, co to přesně je a jak bychom to implementovali… přepínač dekódovacího enginu")
 - **Detail:** upstream <https://github.com/e04/deepcw-engine> (model + minimal
   Python/Node example), demo front-end <https://github.com/e04/web-deep-cw-decoder>
@@ -621,9 +621,42 @@ station. Cost: 20 m 135 s wall for 180 s (1.3×), 80 m 190 s for 300 s
 the engine thread, RSS ~400 MB — so **live needs the async worker** (the
 engine thread must not block; jobs snapshot the window, results land in a
 per-channel mailbox, the commit rule stays on the engine thread), and the
-replay keeps the inline path for determinism. Not yet built: that worker,
-the Preferences → Decoding → "CW engine" row (`[decode] engine`), the model
-download/placement under `~/.local/share/skimmer-for-linux/models/deepcw/`.
+replay keeps the inline path for determinism.
+
+**Built later the same night: the worker and the switch.** Inference runs
+on `SKIM_DEEPCW_WORKERS` (2) threads: a tick snapshots the window into a
+job, a worker runs the model and leaves `logp` in the channel's mailbox,
+`process()` on the engine thread applies the commit rule (text order stays
+deterministic, no lock on the text path); one job per channel in flight,
+a queue > 256 jobs skips ticks with one warning; a channel freed with a job
+in flight is freed by the worker (refcount). `skimmer-replay` sets
+`SKIM_DEEPCW_SYNC=1` so replays stay inline and bit-stable. Gate: the
+model section now runs the async path with a paced feed (2 ms per 256 ms
+block, then drains the mailbox) and the deferred free; 28 checks; **13
+gates green** (`meson test` with the runtime env runs the model part).
+App: Preferences → Decoding → **CW engine** ("Classical (v2)" / "DeepCW
+(neural)"), persisted `[decode] engine` = `v2|deepcw`, a change rebuilds
+the pipeline like a mode change; the row's subtitle says whether DeepCW
+is available on this machine and, if not, why and where the model must be
+(`skim_decode_deepcw_available`, `..._model_path`); About's debug_info
+carries "CW engine: <resolved name>"; the app logs `app: pipeline engine
+<name>` at every pipeline build. The model sits at
+`~/.local/share/skimmer-for-linux/models/deepcw/model.onnx` (sha256
+`ef120799…fe02`, `NOTICE` + the AGPL text beside it; not in git). Headless
+check (isolated config on Broadway, private D-Bus, `.invalid` TCI host,
+`SKIM_IQ_FILE` = the 20 m fixture): with `engine=deepcw` + the runtime
+via `SKIM_ORT_LIB` the app logs `pipeline engine deepcw` and its decode
+log fills with word hits (IZ4ECE, EA6NB, ON4AEO…) through the async
+path, zero criticals over 70 s; with the model unreachable it warns
+`DeepCW engine not available (model file not found: …) — falling back to
+the classical v2 decoder`, logs `pipeline engine cw-v2` and decodes per
+character as before; `[decode] engine=deepcw` survives the save. The
+combo round trip itself was not clicked headless (the settings-file path
+was). **For a live look the runtime must be reachable:** no system
+`onnxruntime` is installed (Arch `extra/onnxruntime-cpu` 1.29 would be
+Richard's call), so today the launch is
+`SKIM_ORT_LIB=/var/tmp/deepcw-research/.venv/lib/python3.14/site-packages/onnxruntime/capi/libonnxruntime.so.1.30.0 builddir/skimmer-for-linux`
++ Preferences → CW engine → DeepCW. Classical v2 stays the default.
 
 ### SKM-4 — In-app waterfall with decodes placed by frequency, click to set TX
 - **Type:** idea · **Severity:** — · **Status:** doing — half 1 DONE 2026-09-05 (M8 in SCOPE): engine tap + view + palettes + drag-pan + absolute-frequency history + the waterfall flowing through a retune (SDR HP kick, IQ centre stamps, largest-segment rows — Richard's live verdict on 80 m) + the callsign column with click-to-tune + logbook prefill (LIVE-verified 22:05) + the column's tooltip carrying kHz / speed / dB / heard / age (a dB after the call tried and taken out on his look) — and the station list DELETED on his word (~23:30); half 2 (click sets TX) deferred to sdr-for-linux `SDR-12`; half 1 SHIPPED in v0.4.0 (2026-09-06)

@@ -41,6 +41,8 @@ typedef struct {
   double gate_db;    /* line over floor to run inference        (6)      */
   int    threads;    /* ONNX Runtime intra-op threads           (4)      */
   double space_p;    /* min posterior for a word gap to count   (0 = off)*/
+  gboolean sync;     /* SKIM_DEEPCW_SYNC=1: inference inline (replays)   */
+  int    workers;    /* async inference threads                 (2)      */
   int    debug;      /* SKIM_DEEPCW_DEBUG: 1 = ticks, 2 = + frames      */
 } DcwTune;
 
@@ -61,6 +63,8 @@ static void tune_init(void) {
     g_tune.gate_db   = env_d("SKIM_DEEPCW_GATE_DB", 6.0);
     g_tune.threads   = (int)env_d("SKIM_DEEPCW_THREADS", 4);
     g_tune.space_p   = env_d("SKIM_DEEPCW_SPACE_P", 0.8);
+    g_tune.sync      = env_d("SKIM_DEEPCW_SYNC", 0) != 0;
+    g_tune.workers   = CLAMP((int)env_d("SKIM_DEEPCW_WORKERS", 2), 1, 8);
     g_tune.debug     = (int)env_d("SKIM_DEEPCW_DEBUG", 0);
     g_once_init_leave(&g_tune_once, 1);
   }
@@ -245,7 +249,78 @@ typedef struct {
   gboolean dead;
   gboolean nomodel;
   float  *tile;                 /* scratch [ring_frames][DCW_BINS]         */
+  /* async: one job in flight per channel; the result waits in the mailbox
+   * for the engine thread, which runs the commit rule (deterministic order,
+   * no locking around the text path). refs keeps the state alive while a
+   * job references it; channel_free of a referenced state defers. */
+  gint    refs;
+  gboolean dying;
+  gboolean inflight;
+  float  *res_logp;             /* mailbox: logp[To][42] or NULL           */
+  guint   res_T;
+  guint64 res_w0;
+  gboolean res_force;
 } DcwState;
+
+typedef struct {
+  DcwState *st;
+  float    *tile;               /* [T][DCW_BINS]                           */
+  guint     T;
+  guint64   w0;
+  gboolean  force;
+} DcwJob;
+
+static GAsyncQueue *g_jobs;     /* DcwJob*                                 */
+static GMutex       g_res_lock; /* guards every state's mailbox            */
+static gsize        g_workers_once;
+static gboolean     g_behind_warned;
+
+static void state_unref(DcwState *st);
+
+static void dcw_infer(const float *tile, guint T, float **logp, guint *To) {
+  const int64_t dims[4] = { 1, 1, (int64_t)T, DCW_BINS };
+  int64_t od[8]; int ond = 0;
+  GError *err = NULL;
+  *logp = NULL; *To = 0;
+  if (!skim_ort_run(g_sess, tile, dims, 4, logp, od, &ond, &err)) {
+    static gboolean warned;
+    if (!warned) { warned = TRUE; g_warning("deepcw: inference failed: %s", err->message); }
+    g_clear_error(&err);
+    return;
+  }
+  *To = (ond == 3 && od[2] == DCW_CLASSES) ? (guint)MIN((int64_t)T, od[1]) : 0;
+}
+
+static gpointer worker_main(gpointer data) {
+  (void)data;
+  for (;;) {
+    DcwJob *job = g_async_queue_pop(g_jobs);
+    DcwState *st = job->st;
+    if (!g_atomic_int_get(&st->dying)) {
+      float *logp = NULL; guint To = 0;
+      dcw_infer(job->tile, job->T, &logp, &To);
+      g_mutex_lock(&g_res_lock);
+      g_free(st->res_logp);
+      st->res_logp = logp; st->res_T = To; st->res_w0 = job->w0;
+      st->res_force = job->force;
+      g_mutex_unlock(&g_res_lock);
+    }
+    g_free(job->tile);
+    g_free(job);
+    state_unref(st);
+  }
+  return NULL;
+}
+
+static void workers_ensure(void) {
+  if (g_once_init_enter(&g_workers_once)) {
+    g_jobs = g_async_queue_new();
+    for (int i = 0; i < g_tune.workers; i++) {
+      g_thread_new("deepcw-infer", worker_main, NULL);
+    }
+    g_once_init_leave(&g_workers_once, 1);
+  }
+}
 
 static guint g_reg;                     /* channel registration counter   */
 /* Band-wide noise floor: an EMA over EVERY channel's per-frame inner-bin
@@ -261,6 +336,7 @@ static gpointer dcw_channel_new(double rate) {
   DcwState *st = g_new0(DcwState, 1);
   st->rate = rate;
   st->out = g_string_new(NULL);
+  st->refs = 1;
   const double nf = rate / DCW_BIN_HZ;
   const guint N = (guint)llround(nf);
   if (fabs(nf - N) > 1e-6 || N < 8) {
@@ -312,13 +388,20 @@ static gpointer dcw_channel_new(double rate) {
   return st;
 }
 
+static void state_unref(DcwState *st) {
+  if (!g_atomic_int_dec_and_test(&st->refs)) return;
+  g_free(st->win); g_free(st->tw_re); g_free(st->tw_im);
+  g_free(st->sring); g_free(st->ring); g_free(st->tile);
+  g_free(st->res_logp);
+  g_string_free(st->out, TRUE);
+  g_free(st);
+}
+
 static void dcw_channel_free(gpointer state) {
   DcwState *st = state;
   if (!st) return;
-  g_free(st->win); g_free(st->tw_re); g_free(st->tw_im);
-  g_free(st->sring); g_free(st->ring); g_free(st->tile);
-  g_string_free(st->out, TRUE);
-  g_free(st);
+  g_atomic_int_set(&st->dying, TRUE);
+  state_unref(st);                 /* a job in flight drops the last ref  */
 }
 
 static inline float *ring_row(DcwState *st, guint64 abs_frame) {
@@ -400,7 +483,41 @@ static void window_stats(DcwState *st, guint64 w0, guint64 w1) {
                             MAX(MIN(st->env_lo, g_band_floor), 1e-12)) - 10.0;
 }
 
+/* Commit a finished inference (engine thread only): the rule, then the
+ * confidence and WPM bookkeeping of the newly pending text. */
+static void dcw_apply(DcwState *st, const float *logp, guint To, guint64 w0,
+                      gboolean force) {
+  double conf = 0;
+  const gsize before = st->out->len;
+  const guint64 cursor0 = MAX(st->committed, w0);
+  const guint n = skim_deepcw_commit(logp, To, w0, &st->committed, st->tail_f,
+                                     st->minconf_f, force, st->out, &conf);
+  if (n) {
+    /* Confidence of the pending emission: length-weighted merge. */
+    const gsize tot = st->out->len;
+    st->out_conf = tot ? (st->out_conf * before + conf * n) / tot : conf;
+    /* WPM from the character rate of the committed span (PARIS: 10 dit
+     * units per character incl. its gap → WPM ≈ 12 × chars/s) — the
+     * on-run histogram read dah-heavy fists (OK1XC) at a third of their
+     * speed; the model's own segmentation is fist-shape independent. */
+    const guint64 span = st->committed > cursor0 ? st->committed - cursor0 : 0;
+    guint letters = 0;
+    for (gsize i = before; i < tot; i++) if (st->out->str[i] != ' ') letters++;
+    if (letters >= 6 && span >= 2 * st->rate / st->hop) {
+      const double wpm = 12.0 * letters / ((double)span * st->hop / st->rate);
+      if (wpm >= 5.0 && wpm <= 60.0) st->wpm = wpm;
+    }
+  }
+  if (g_tune.debug) {
+    g_printerr("deepcw: %.2f kHz T=%u ratio %.1f dB duty %.2f wpm %.0f "
+               "commit %u |%s| cursor %" G_GUINT64_FORMAT "%s\n",
+               st->freq_hz / 1000.0, To, st->ratio_db, st->duty, st->wpm, n,
+               st->out->str + before, st->committed, force ? " FORCE" : "");
+  }
+}
+
 static void dcw_tick(DcwState *st) {
+  if (st->inflight) return;          /* async: one window at a time         */
   const guint64 w1 = st->frames_abs;
   const guint64 oldest = w1 > st->ring_frames ? w1 - st->ring_frames : 0;
   const guint64 w0 = MAX(oldest, st->committed);
@@ -430,47 +547,36 @@ static void dcw_tick(DcwState *st) {
     float *row = st->tile + (gsize)t * DCW_BINS + (DCW_CENTRE - DCW_HALF);
     for (guint b = 0; b < DCW_KEEP; b++) row[b] = log1pf(r[b] * g);
   }
-  const int64_t dims[4] = { 1, 1, (int64_t)T, DCW_BINS };
-  float *logp = NULL; int64_t od[8]; int ond = 0;
-  GError *err = NULL;
-  if (!skim_ort_run(g_sess, st->tile, dims, 4, &logp, od, &ond, &err)) {
-    static gboolean warned;
-    if (!warned) { warned = TRUE; g_warning("deepcw: inference failed: %s", err->message); }
-    g_clear_error(&err);
+  const gboolean force = (w1 - w0) >= st->ring_frames - st->tick_frames;
+  if (g_tune.sync) {
+    float *logp = NULL; guint To = 0;
+    dcw_infer(st->tile, T, &logp, &To);
+    if (To) { dcw_apply(st, logp, To, w0, force); }
+    g_free(logp);
     return;
   }
-  const guint To = (ond == 3 && od[2] == DCW_CLASSES) ? (guint)MIN((int64_t)T, od[1]) : 0;
-  if (To) {
-    const gboolean force = (w1 - w0) >= st->ring_frames - st->tick_frames;
-    double conf = 0;
-    const gsize before = st->out->len;
-    const guint64 cursor0 = MAX(st->committed, w0);
-    const guint n = skim_deepcw_commit(logp, To, w0, &st->committed, st->tail_f,
-                                       st->minconf_f, force, st->out, &conf);
-    if (n) {
-      /* Confidence of the pending emission: length-weighted merge. */
-      const gsize tot = st->out->len;
-      st->out_conf = tot ? (st->out_conf * before + conf * n) / tot : conf;
-      /* WPM from the character rate of the committed span (PARIS: 10 dit
-       * units per character incl. its gap → WPM ≈ 12 × chars/s) — the
-       * on-run histogram read dah-heavy fists (OK1XC) at a third of their
-       * speed; the model's own segmentation is fist-shape independent. */
-      const guint64 span = st->committed > cursor0 ? st->committed - cursor0 : 0;
-      guint letters = 0;
-      for (gsize i = before; i < tot; i++) if (st->out->str[i] != ' ') letters++;
-      if (letters >= 6 && span >= 2 * st->rate / st->hop) {
-        const double wpm = 12.0 * letters / ((double)span * st->hop / st->rate);
-        if (wpm >= 5.0 && wpm <= 60.0) st->wpm = wpm;
-      }
+  /* Async: hand the window to a worker; the mailbox comes back through
+   * dcw_process on the engine thread. One job per channel in flight; a
+   * queue that keeps growing means the workers cannot keep up — skip the
+   * tick (the channel retries next tick) and say so once. */
+  workers_ensure();
+  if (g_async_queue_length(g_jobs) > 256) {
+    if (!g_behind_warned) {
+      g_behind_warned = TRUE;
+      g_warning("deepcw: inference queue > 256 jobs — workers fall behind, "
+                "ticks skipped (SKIM_DEEPCW_WORKERS=%d)", g_tune.workers);
     }
-    if (g_tune.debug) {
-      g_printerr("deepcw: %.2f kHz T=%u ratio %.1f dB duty %.2f wpm %.0f "
-                 "commit %u |%s| cursor %" G_GUINT64_FORMAT "%s\n",
-                 st->freq_hz / 1000.0, T, st->ratio_db, st->duty, st->wpm, n,
-                 st->out->str + before, st->committed, force ? " FORCE" : "");
-    }
+    return;
   }
-  g_free(logp);
+  DcwJob *job = g_new0(DcwJob, 1);
+  job->st = st;
+  job->T = T;
+  job->w0 = w0;
+  job->force = force;
+  job->tile = g_memdup2(st->tile, (gsize)T * DCW_BINS * sizeof(float));
+  g_atomic_int_inc(&st->refs);
+  st->inflight = TRUE;
+  g_async_queue_push(g_jobs, job);
 }
 
 static void dcw_frame(DcwState *st) {
@@ -549,6 +655,20 @@ static gboolean dcw_process(gpointer state, const float *iq, guint nframes,
   DcwState *st = state;
   memset(out, 0, sizeof(*out));
   if (st->dead) return FALSE;
+  if (st->inflight) {
+    float *logp = NULL; guint To = 0; guint64 w0 = 0; gboolean force = FALSE;
+    g_mutex_lock(&g_res_lock);
+    if (st->res_logp) {
+      logp = st->res_logp; To = st->res_T; w0 = st->res_w0; force = st->res_force;
+      st->res_logp = NULL;
+    }
+    g_mutex_unlock(&g_res_lock);
+    if (logp) {
+      st->inflight = FALSE;
+      if (To) { dcw_apply(st, logp, To, w0, force); }
+      g_free(logp);
+    }
+  }
   for (guint i = 0; i < nframes; i++) {
     /* write position = oldest slot once the ring is full */
     const guint w = (st->spos + st->sfill) % st->N;
@@ -602,6 +722,7 @@ void skim_decode_deepcw_debug(gpointer state, SkimDeepcwDebug *dbg) {
   dbg->gate = st->gate; dbg->ratio_db = st->ratio_db; dbg->duty = st->duty;
   dbg->wpm = st->wpm; dbg->frames_abs = st->frames_abs;
   dbg->committed = st->committed; dbg->ticks = st->ticks; dbg->dead = st->dead;
+  dbg->inflight = st->inflight;
 }
 
 const SkimDecodeBackend *skim_decode_deepcw(void) {
