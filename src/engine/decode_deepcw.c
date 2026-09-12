@@ -58,8 +58,8 @@ static double env_d(const char *name, double dflt) {
 static void tune_init(void) {
   if (g_once_init_enter(&g_tune_once)) {
     g_tune.win_s     = env_d("SKIM_DEEPCW_WIN", 10.0);
-    g_tune.tick_s    = env_d("SKIM_DEEPCW_TICK", 1.6);
-    g_tune.tail_s    = env_d("SKIM_DEEPCW_TAIL", 1.5);
+    g_tune.tick_s    = env_d("SKIM_DEEPCW_TICK", 0.0);   /* 0 = by device */
+    g_tune.tail_s    = env_d("SKIM_DEEPCW_TAIL", 1.0);
     g_tune.minconf_s = env_d("SKIM_DEEPCW_MINCONF", 2.0);
     g_tune.gate_db   = env_d("SKIM_DEEPCW_GATE_DB", 6.0);
     g_tune.threads   = (int)env_d("SKIM_DEEPCW_THREADS", 4);
@@ -220,52 +220,38 @@ static void drop_weak_tears(GArray *sp, double bar) {
 }
 
 guint skim_deepcw_commit(const float *logp, guint T, guint64 w0,
-                         guint64 *committed, guint tail, guint minconf,
-                         gboolean force, GString *out, double *conf) {
+                         guint64 *cursor, guint tail, guint margin,
+                         gboolean *last_space, GString *out, double *conf) {
   const guint64 w1 = w0 + T;
   tune_init();
   GArray *sp = ctc_collapse(logp, T, w0);
   drop_weak_tears(sp, g_tune.space_p);
   guint n = 0;
   double psum = 0.0;
-  /* Nothing at all: the window is silence (or the model is unsure) —
-   * advance the cursor to the tail guard so a quiet channel never grows
-   * a long pending span (the next over then starts ≤ tail before it). */
-  if (sp->len == 0) {
-    if (w1 > *committed + tail) { *committed = w1 - tail; }
-    g_array_free(sp, TRUE);
-    if (conf) { *conf = 0.0; }
-    return 0;
-  }
-  guint64 upto = 0;                    /* commit chars with t ≤ upto       */
-  gboolean have = FALSE;
-  if (w1 > tail && w0 + minconf <= w1 - tail) {
-    for (gint i = (gint)sp->len - 1; i >= 0; i--) {
-      const Spike *s = &g_array_index(sp, Spike, i);
-      if (s->cls == DCW_SPACE && s->t >= w0 + minconf && s->t <= w1 - tail) {
-        upto = s->t;
-        have = TRUE;
-        break;
-      }
+  /* Sliding window: the whole ring is re-read every tick, so the model
+   * always has its full left context (dropping committed audio from the
+   * window tore words and lost stations on the 80 m fixture: 34 → 27).
+   * A character is final once it sits ≥ tail before the window end (its
+   * right context is in); the cursor is the frame of the last committed
+   * spike and a re-placed copy of it lands within ±2 frames — a margin of
+   * a few frames rejects it, while the next real character is a
+   * character gap (≥ 9 frames at 25 WPM) further on. Spaces are placed
+   * loosely by the model, so a space passes on frame order alone and
+   * consecutive spaces are squeezed. */
+  for (guint i = 0; i < sp->len; i++) {
+    const Spike *sk = &g_array_index(sp, Spike, i);
+    if (w1 < tail || sk->t > w1 - tail) break;
+    if (sk->cls == DCW_SPACE) {
+      if (sk->t <= *cursor || *last_space) continue;
+      *last_space = TRUE;
+    } else {
+      if (sk->t <= *cursor + margin) continue;
+      *last_space = FALSE;
     }
-  }
-  if (!have && force && w1 > tail) {
-    upto = w1 - tail;
-    have = TRUE;
-  }
-  if (have) {
-    for (guint i = 0; i < sp->len; i++) {
-      const Spike *s = &g_array_index(sp, Spike, i);
-      if (s->t > upto || s->t < *committed) continue;
-      /* A commit ends at a word gap and the next window starts after it:
-       * the model then tends to open with another space — squeeze runs. */
-      if (s->cls == DCW_SPACE && (out->len == 0 || out->str[out->len - 1] == ' '))
-        continue;
-      g_string_append_c(out, DCW_CHARS[s->cls]);
-      psum += s->p;
-      n++;
-    }
-    *committed = upto + 1;
+    g_string_append_c(out, DCW_CHARS[sk->cls]);
+    psum += sk->p;
+    n++;
+    *cursor = sk->t;
   }
   g_array_free(sp, TRUE);
   if (conf) { *conf = n ? psum / n : 0.0; }
@@ -284,7 +270,8 @@ typedef struct {
   guint   ring_frames;
   guint64 frames_abs;
   guint64 committed;
-  guint   tick_frames, tick_phase, tail_f, minconf_f;
+  guint   tick_frames, tick_phase, tail_f, minconf_f, margin_f;
+  gboolean last_space;          /* the last committed spike was a space   */
   double  lvl_ema, off_ema;
   double  env_lo;               /* channel noise floor (inner bins, EMA)   */
   double  win_peak;             /* strongest line magnitude in the window  */
@@ -308,7 +295,6 @@ typedef struct {
   float  *res_logp;             /* mailbox: logp[To][42] or NULL           */
   guint   res_T;
   guint64 res_w0;
-  gboolean res_force;
 } DcwState;
 
 typedef struct {
@@ -316,7 +302,6 @@ typedef struct {
   float    *tile;               /* [T][DCW_BINS]                           */
   guint     T;
   guint64   w0;
-  gboolean  force;
 } DcwJob;
 
 static GAsyncQueue *g_jobs;     /* DcwJob*                                 */
@@ -350,7 +335,6 @@ static void job_deliver(DcwJob *job, float *logp, guint To) {
   g_mutex_lock(&g_res_lock);
   g_free(st->res_logp);
   st->res_logp = logp; st->res_T = To; st->res_w0 = job->w0;
-  st->res_force = job->force;
   g_mutex_unlock(&g_res_lock);
 }
 
@@ -498,7 +482,16 @@ static gpointer dcw_channel_new(double rate) {
   st->ring_frames = MAX((guint)llround(g_tune.win_s * fps), 16u);
   st->ring = g_new0(float, (gsize)st->ring_frames * DCW_KEEP);
   st->tile = g_new0(float, (gsize)st->ring_frames * DCW_BINS);
-  st->tick_frames = MAX((guint)llround(g_tune.tick_s * fps), 1u);
+  /* Tick: 0.5 s on a GPU session, 1.0 s on the CPU (the whole ring is
+   * re-read every tick — 20 audio-seconds per channel-second at 0.5 s on
+   * a 10 s ring); SKIM_DEEPCW_TICK overrides. */
+  double tick_s = g_tune.tick_s;
+  if (tick_s <= 0.0) {
+    const char *info = g_rt_info;
+    tick_s = (info && strstr(info, "CUDA:")) ? 0.5 : 1.0;
+  }
+  st->tick_frames = MAX((guint)llround(tick_s * fps), 1u);
+  st->margin_f    = 4;                               /* 64 ms at 62.5 fps  */
   st->tick_phase  = (g_reg++ * 7u) % st->tick_frames;
   st->tail_f      = (guint)llround(g_tune.tail_s * fps);
   st->minconf_f   = (guint)llround(g_tune.minconf_s * fps);
@@ -602,13 +595,13 @@ static void window_stats(DcwState *st, guint64 w0, guint64 w1) {
 
 /* Commit a finished inference (engine thread only): the rule, then the
  * confidence and WPM bookkeeping of the newly pending text. */
-static void dcw_apply(DcwState *st, const float *logp, guint To, guint64 w0,
-                      gboolean force) {
+static void dcw_apply(DcwState *st, const float *logp, guint To, guint64 w0) {
   double conf = 0;
   const gsize before = st->out->len;
   const guint64 cursor0 = MAX(st->committed, w0);
   const guint n = skim_deepcw_commit(logp, To, w0, &st->committed, st->tail_f,
-                                     st->minconf_f, force, st->out, &conf);
+                                     st->margin_f, &st->last_space, st->out,
+                                     &conf);
   if (n) {
     /* Confidence of the pending emission: length-weighted merge. */
     const gsize tot = st->out->len;
@@ -627,24 +620,22 @@ static void dcw_apply(DcwState *st, const float *logp, guint To, guint64 w0,
   }
   if (g_tune.debug) {
     g_printerr("deepcw: %.2f kHz T=%u ratio %.1f dB duty %.2f wpm %.0f "
-               "commit %u |%s| cursor %" G_GUINT64_FORMAT "%s\n",
+               "commit %u |%s| cursor %" G_GUINT64_FORMAT "\n",
                st->freq_hz / 1000.0, To, st->ratio_db, st->duty, st->wpm, n,
-               st->out->str + before, st->committed, force ? " FORCE" : "");
+               st->out->str + before, st->committed);
   }
 }
 
 static void dcw_tick(DcwState *st) {
   if (st->inflight) return;          /* async: one window at a time         */
   const guint64 w1 = st->frames_abs;
-  const guint64 oldest = w1 > st->ring_frames ? w1 - st->ring_frames : 0;
-  const guint64 w0 = MAX(oldest, st->committed);
+  const guint64 w0 = w1 > st->ring_frames ? w1 - st->ring_frames : 0;
   if (w1 <= w0) return;
   const guint T = (guint)(w1 - w0);
   if (T < st->minconf_f) return;
   window_stats(st, w0, w1);
   st->ticks++;
   if (!st->gate || st->nomodel) {
-    if (w1 > st->committed + st->tail_f) st->committed = w1 - st->tail_f;
     if (g_tune.debug) {
       g_printerr("deepcw: %.2f kHz T=%u closed ratio %.1f dB duty %.2f\n",
                  st->freq_hz / 1000.0, T, st->ratio_db, st->duty);
@@ -664,11 +655,10 @@ static void dcw_tick(DcwState *st) {
     float *row = st->tile + (gsize)t * DCW_BINS + (DCW_CENTRE - DCW_HALF);
     for (guint b = 0; b < DCW_KEEP; b++) row[b] = log1pf(r[b] * g);
   }
-  const gboolean force = (w1 - w0) >= st->ring_frames - st->tick_frames;
   if (g_tune.sync) {
     float *logp = NULL; guint To = 0;
     dcw_infer(st->tile, T, &logp, &To);
-    if (To) { dcw_apply(st, logp, To, w0, force); }
+    if (To) { dcw_apply(st, logp, To, w0); }
     g_free(logp);
     return;
   }
@@ -689,7 +679,6 @@ static void dcw_tick(DcwState *st) {
   job->st = st;
   job->T = T;
   job->w0 = w0;
-  job->force = force;
   job->tile = g_memdup2(st->tile, (gsize)T * DCW_BINS * sizeof(float));
   g_atomic_int_inc(&st->refs);
   st->inflight = TRUE;
@@ -773,16 +762,16 @@ static gboolean dcw_process(gpointer state, const float *iq, guint nframes,
   memset(out, 0, sizeof(*out));
   if (st->dead) return FALSE;
   if (st->inflight) {
-    float *logp = NULL; guint To = 0; guint64 w0 = 0; gboolean force = FALSE;
+    float *logp = NULL; guint To = 0; guint64 w0 = 0;
     g_mutex_lock(&g_res_lock);
     if (st->res_logp) {
-      logp = st->res_logp; To = st->res_T; w0 = st->res_w0; force = st->res_force;
+      logp = st->res_logp; To = st->res_T; w0 = st->res_w0;
       st->res_logp = NULL;
     }
     g_mutex_unlock(&g_res_lock);
     if (logp) {
       st->inflight = FALSE;
-      if (To) { dcw_apply(st, logp, To, w0, force); }
+      if (To) { dcw_apply(st, logp, To, w0); }
       g_free(logp);
     }
   }
@@ -831,6 +820,7 @@ static void dcw_resync(gpointer state) {
   if (st->dead) return;
   st->sfill = 0; st->spos = 0; st->since = 0;
   st->committed = st->frames_abs;
+  st->last_space = TRUE;
 }
 
 void skim_decode_deepcw_debug(gpointer state, SkimDeepcwDebug *dbg) {

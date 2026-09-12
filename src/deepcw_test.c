@@ -128,70 +128,72 @@ int main(void) {
   printf("=== skimmer-deepcw-test ===\n");
 
   /* ---- (A) commit rule ------------------------------------------------- */
-  printf("[A] commit rule\n");
+  printf("[A] commit rule (sliding window, frame cursor)\n");
   {
+    const int E = cls_of('E');
     guint T = 400; float *m = logp_new(T);
     spikes_text(m, 10, 10, "CQ");        /* C@10 Q@20                     */
     spike(m, 100, SPACE, 0.95f);
     spikes_text(m, 150, 10, "TEST");     /* 150..180                      */
-    GString *out = g_string_new(NULL); guint64 cur = 0; double conf = 0;
-    guint n = skim_deepcw_commit(m, T, 0, &cur, 50, 125, FALSE, out, &conf);
-    check("no word gap inside [minconf, T-tail] → nothing committed", n == 0 && cur == 0 && out->len == 0);
-    n = skim_deepcw_commit(m, T, 0, &cur, 50, 50, FALSE, out, &conf);
-    check("gap at 100 qualifies → 'CQ ' committed, cursor 101",
-          n == 3 && strcmp(out->str, "CQ ") == 0 && cur == 101);
+    spike(m, 200, SPACE, 0.95f);
+    spikes_text(m, 340, 10, "DE");       /* 340, 350: inside the tail     */
+    GString *out = g_string_new(NULL); guint64 cur = 0; gboolean lsp = TRUE; double conf = 0;
+    guint n = skim_deepcw_commit(m, T, 0, &cur, 70, 4, &lsp, out, &conf);
+    check("commits every spike ≥ tail before the end, nothing inside the tail",
+          n == 8 && strcmp(out->str, "CQ TEST ") == 0 && cur == 200);
     check("confidence = spike posterior", fabs(conf - 0.95) < 0.02);
     g_free(m);
-    /* next window starts at the cursor: chars at abs 150..180 + gap 300 */
-    T = 299; m = logp_new(T);
-    spikes_text(m, 150 - 101, 10, "TEST");
-    spike(m, 300 - 101, SPACE, 0.9f);
-    n = skim_deepcw_commit(m, T, 101, &cur, 50, 50, FALSE, out, &conf);
-    check("second window commits 'TEST ' up to the gap at 300",
-          n == 5 && strcmp(out->str, "CQ TEST ") == 0 && cur == 301);
+    /* the same window re-read with every spike jittered +2 frames */
+    m = logp_new(T);
+    spikes_text(m, 12, 10, "CQ"); spike(m, 102, SPACE, 0.95f);
+    spikes_text(m, 152, 10, "TEST"); spike(m, 201, SPACE, 0.95f);
+    spikes_text(m, 342, 10, "DE");
+    n = skim_deepcw_commit(m, T, 0, &cur, 70, 4, &lsp, out, &conf);
+    check("a re-read with spikes jittered +2 frames re-emits nothing",
+          n == 0 && strcmp(out->str, "CQ TEST ") == 0 && cur == 200);
     g_free(m);
-    /* force: no gap at all, pending span at the ring limit */
-    T = 300; m = logp_new(T);
-    spikes_text(m, 20, 10, "DE0K1BR");   /* 20..80                        */
-    spikes_text(m, 270, 10, "K");        /* inside the tail               */
-    g_string_truncate(out, 0); cur = 0;
-    n = skim_deepcw_commit(m, T, 0, &cur, 50, 50, FALSE, out, &conf);
-    check("no gap, no force → nothing", n == 0 && cur == 0);
-    n = skim_deepcw_commit(m, T, 0, &cur, 50, 50, TRUE, out, &conf);
-    check("force → chars before the tail guard, tail char kept pending",
-          n == 7 && strcmp(out->str, "DE0K1BR") == 0 && cur == 251);
+    /* the window slid by 100 frames: DE is now clear of the tail, OK1BR new */
+    m = logp_new(T);
+    spikes_text(m, 340 - 100, 10, "DE"); spike(m, 360 - 100, SPACE, 0.9f);
+    spikes_text(m, 380 - 100, 10, "OK1BR");            /* abs 380..420     */
+    n = skim_deepcw_commit(m, T, 100, &cur, 70, 4, &lsp, out, &conf);
+    check("next tick commits the characters beyond the cursor",
+          n == 8 && strcmp(out->str, "CQ TEST DE OK1BR") == 0 && cur == 420);
     g_free(m);
-    /* silence advances the cursor to the tail guard */
-    T = 200; m = logp_new(T); cur = 0; g_string_truncate(out, 0);
-    n = skim_deepcw_commit(m, T, 0, &cur, 50, 50, FALSE, out, &conf);
-    check("silence → cursor = T - tail, nothing emitted", n == 0 && cur == 150 && out->len == 0);
+    /* a word gap two frames after the last character passes on frame
+     * order (no margin for spaces); its double is squeezed */
+    m = logp_new(T);
+    spikes_text(m, 340 - 100, 10, "DE"); spike(m, 360 - 100, SPACE, 0.9f);
+    spikes_text(m, 380 - 100, 10, "OK1BR");
+    spike(m, 422 - 100, SPACE, 0.9f); spike(m, 424 - 100, SPACE, 0.9f);
+    n = skim_deepcw_commit(m, T, 100, &cur, 70, 4, &lsp, out, &conf);
+    check("a gap right after the last character passes once, its double is squeezed",
+          n == 1 && strcmp(out->str, "CQ TEST DE OK1BR ") == 0 && cur == 422);
     g_free(m);
-    /* CTC collapse: E E E in a run = one E; E blank E = two */
-    T = 100; m = logp_new(T); cur = 0; g_string_truncate(out, 0);
-    spike(m, 10, cls_of('E'), 0.9f); spike(m, 11, cls_of('E'), 0.9f); spike(m, 12, cls_of('E'), 0.9f);
-    spike(m, 20, cls_of('E'), 0.9f); spike(m, 22, cls_of('E'), 0.9f);
-    spike(m, 30, SPACE, 0.9f);
-    n = skim_deepcw_commit(m, T, 0, &cur, 10, 5, FALSE, out, &conf);
-    check("CTC collapse: run = one char, blank-separated = two", n == 4 && strcmp(out->str, "EEE ") == 0);
-    check("a second gap right after a committed one is squeezed",
-          (g_string_truncate(out, 0), cur = 0,
-           skim_deepcw_commit(m, T, 0, &cur, 10, 5, FALSE, out, &conf),
-           spike(m, 31, SPACE, 0.9f), spike(m, 32, SPACE, 0.9f),
-           skim_deepcw_commit(m, T, 0, &cur, 10, 5, FALSE, out, &conf),
-           strcmp(out->str, "EEE ") == 0));
-    check("committed chars never re-emitted below the cursor",
-          skim_deepcw_commit(m, T, 0, &cur, 10, 5, TRUE, out, &conf) == 0);
+    /* silence */
+    m = logp_new(200); g_string_truncate(out, 0); cur = 0; lsp = TRUE;
+    n = skim_deepcw_commit(m, 200, 0, &cur, 50, 4, &lsp, out, &conf);
+    check("silence → nothing emitted, cursor untouched", n == 0 && cur == 0 && out->len == 0);
+    g_free(m);
+    /* CTC collapse: E E E in a run = one E; separated by blanks = more */
+    m = logp_new(100); g_string_truncate(out, 0); cur = 0; lsp = TRUE;
+    spike(m, 10, E, 0.9f); spike(m, 11, E, 0.9f); spike(m, 12, E, 0.9f);
+    spike(m, 20, E, 0.9f); spike(m, 30, E, 0.9f); spike(m, 40, SPACE, 0.9f);
+    n = skim_deepcw_commit(m, 100, 0, &cur, 10, 4, &lsp, out, &conf);
+    check("CTC collapse: run = one char, blank-separated = more", n == 4 && strcmp(out->str, "EEE ") == 0);
+    check("nothing below the cursor is re-emitted",
+          skim_deepcw_commit(m, 100, 0, &cur, 10, 4, &lsp, out, &conf) == 0);
     g_free(m);
     /* weak word gaps: torn short piece is glued, a weak gap between two
      * real words stays (default bar 0.8, SKIM_DEEPCW_SPACE_P unset) */
-    T = 400; m = logp_new(T); cur = 0; g_string_truncate(out, 0);
-    guint tt = spikes_text(m, 10, 10, "OK2B");     /* 10..40                */
-    spike(m, tt, SPACE, 0.55f);                     /* weak gap             */
-    tt = spikes_text(m, tt + 10, 10, "TK");         /* short piece          */
-    spike(m, tt, SPACE, 0.55f);                     /* weak gap             */
+    T = 400; m = logp_new(T); cur = 0; lsp = TRUE; g_string_truncate(out, 0);
+    guint tt = spikes_text(m, 10, 10, "OK2B");
+    spike(m, tt, SPACE, 0.55f);
+    tt = spikes_text(m, tt + 10, 10, "TK");
+    spike(m, tt, SPACE, 0.55f);
     tt = spikes_text(m, tt + 10, 10, "TEST");
-    spike(m, tt, SPACE, 0.97f);                     /* strong gap → split   */
-    n = skim_deepcw_commit(m, T, 0, &cur, 50, 50, FALSE, out, &conf);
+    spike(m, tt, SPACE, 0.97f);
+    n = skim_deepcw_commit(m, T, 0, &cur, 50, 4, &lsp, out, &conf);
     check("weak gap before a 2-char piece is glued (OK2B TK → OK2BTK), weak gap between words kept",
           strcmp(out->str, "OK2BTK TEST ") == 0);
     g_free(m); g_string_free(out, TRUE);
@@ -241,7 +243,7 @@ int main(void) {
     skim_decode_deepcw_debug(sn, &dbg);
     printf("      noise: ticks %u gate %d ratio %.1f dB duty %.2f\n", dbg.ticks, dbg.gate, dbg.ratio_db, dbg.duty);
     check("noise only: gate CLOSED", dbg.ticks > 0 && !dbg.gate);
-    check("noise only: cursor keeps up (pending ≤ tail + tick)", dbg.frames_abs - dbg.committed <= 200);
+    check("noise only: nothing ever committed (cursor never moved)", dbg.committed == 0);
     be->channel_free(sn); g_free(iq_n); g_array_free(env0, TRUE);
     check("no model → no text emitted from the DSP half alone", o->len == 0 || skim_decode_deepcw_available(NULL));
     g_string_free(o, TRUE); g_array_free(env, TRUE);

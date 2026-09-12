@@ -1054,8 +1054,15 @@ workers batch all queued windows into one run, Preferences → Decoding →
 **Device** (CPU / GPU (CUDA), shown only for DeepCW, `[decode] device`),
 gate 35 checks. 80 m replay: 103 s on CUDA:0 vs 190 s CPU, same table ±1
 marginal station. NPU needs an OpenVINO runtime path (no Arch ORT package
-has that provider). Classical v2 stays the default; Richard's live look is
-the next step, then the station-table QSY rule.
+has that provider). **Latency (2026-09-13): the commit rule is a SLIDING
+window** — the whole 10 s ring re-read every tick (0.5 s on CUDA, 1.0 s
+CPU), a character final once ≥ 1.0 s before the window end, a frame cursor
+against double emission; the old drop-committed-audio rule tore words when
+sped up (34 → 27 stations), this one keeps 33 with v2-like report depth and
+puts OK1DOL/OK1MDK on their real frequencies. Latency ≈ 1.5 s on the GPU.
+Classical v2 stays the default; Richard runs DeepCW on CUDA live (live27);
+next: gray draft text in the pane via the phase-B ops, the station-table
+QSY rule, OL1B/OK1C-class tears.
 
 ## Layout
 

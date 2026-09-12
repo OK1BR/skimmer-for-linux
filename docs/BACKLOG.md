@@ -698,6 +698,35 @@ own C API (openvino 2026.3.1 + intel-npu-plugin are in extra, the driver
 and `/dev/accel0` are on the machine; an earlier measurement found the NPU
 no faster than the iGPU, its value is watts).
 
+**Latency — the sliding window (2026-09-13 ~00:15, Richard: "dekódování je
+dost pomalé, má několik vteřin rezervu… potřeboval bych se dostat k téměř
+realtime překladu"; GPU sat at 8 %).** The lag was the commit rule, not
+compute: a 1.6 s tick, a 1.5 s tail guard, a wait for a word gap and the
+one-word-per-call trickle added up to 3–5 s. Simply speeding the old rule
+up (tick 0.5 s, tail 1.0/0.75 s) LOST stations (34 → 27/28) and tore
+calls (OL1BI, K2BVX, TU5NN), because every commit dropped the committed
+audio from the window and the Conformer was left with 2–3 s of left
+context. New rule: the WHOLE ring (10 s) is re-read every tick, a
+character is final once it sits ≥ tail (1.0 s) before the window end, a
+frame cursor (+ 4-frame margin for characters; spaces on frame order,
+doubles squeezed) keeps anything from being emitted twice; no word-gap
+wait, no force commit, the cursor never moves on silence. Tick by device:
+0.5 s on CUDA, 1.0 s on the CPU (`SKIM_DEEPCW_TICK` overrides) — 20
+audio-seconds per channel-second on the GPU, which is what the idle GPU
+was for. 80 m fixture, CUDA, inline: 33 stations in 96 s wall (3.1×);
+against the old rule the table is v2-like in depth (OK1FHI 294 reports,
+OK1MDK 302, DK1WI 109; 9449 fragments vs 2240), OK1DOL and OK1MDK sit on
+their REAL frequencies (3532.45 / 3541.00 — the spur race is decided by
+report count now, as for v2), OK1MWW and OK2BVX read whole (were OC1MWW /
+OK2B), SP2NBV, SQ100PKP, OM5AA 50, OL0CHC, PA2M appear; costs: OL1B →
+OL1BIC (the tear rule glues the 2-char "IC" that follows the call, 128
+reports at 0.75), OK1C again (a confident gap before the "Z"), OK5O gone
+(takeover on the 3540.01 pileup channel). Gate rewritten for the rule
+(33/29 checks async/inline), 13 gates green. Expected latency now ≈ tick +
+tail ≈ 1.5 s on the GPU. Next lever if he wants the pane to feel live: the
+model's uncommitted tail as gray DRAFT text through the phase-B pane ops
+(`take_pane_op`), firming up at commit — the extractor path unchanged.
+
 ### SKM-4 — In-app waterfall with decodes placed by frequency, click to set TX
 - **Type:** idea · **Severity:** — · **Status:** doing — half 1 DONE 2026-09-05 (M8 in SCOPE): engine tap + view + palettes + drag-pan + absolute-frequency history + the waterfall flowing through a retune (SDR HP kick, IQ centre stamps, largest-segment rows — Richard's live verdict on 80 m) + the callsign column with click-to-tune + logbook prefill (LIVE-verified 22:05) + the column's tooltip carrying kHz / speed / dB / heard / age (a dB after the call tried and taken out on his look) — and the station list DELETED on his word (~23:30); half 2 (click sets TX) deferred to sdr-for-linux `SDR-12`; half 1 SHIPPED in v0.4.0 (2026-09-06)
 - **Source:** e-mail from Roy Andre Løntjern, LB0EI, 2026-08-29; answered 2026-08-30

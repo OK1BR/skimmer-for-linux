@@ -10,8 +10,9 @@
  * range real IQ falls below). Inference runs on the ENGINE thread, on the
  * channel's own frame clock (replays stay deterministic), only on channels
  * whose window shows a keyed line above the floor, and text is committed
- * up to the last word gap ≥ tail seconds before the window end — the
- * committed audio leaves the window, so nothing is decoded twice.
+ * as soon as a character sits ≥ tail seconds before the window end; the
+ * whole ring is re-read every tick (full left context) and a frame cursor
+ * keeps anything from being emitted twice.
  *
  * ONNX Runtime is dlopen-ed (ort_shim.c) and the model file resolved at run
  * time (SKIM_DEEPCW_MODEL, else the user data dir); when either is missing
@@ -70,14 +71,16 @@ typedef struct {
 void skim_decode_deepcw_debug(gpointer state, SkimDeepcwDebug *dbg);
 
 /* The commit rule on a raw CTC log-prob matrix (logp[T][42], window =
- * abs frames [w0, w0+T)): greedy collapse, commit up to the last word gap
- * inside [w0+minconf, w0+T−tail], or up to w0+T−tail when force is set,
- * or advance the cursor over silence. Appends the committed text to out,
- * moves *committed, returns the number of committed characters; *conf =
- * mean posterior of the committed characters. Pure — no state, no model. */
+ * abs frames [w0, w0+T)): greedy collapse; every spike that sits ≥ tail
+ * frames before the window end and beyond the cursor (+ margin frames for
+ * characters — a re-placed copy of the last committed character lands
+ * within ±2 frames) is appended to out; *cursor moves to the last
+ * committed spike, *last_space squeezes consecutive spaces. Returns the
+ * number of committed characters; *conf = their mean posterior. Pure —
+ * no state, no model. */
 guint skim_deepcw_commit(const float *logp, guint T, guint64 w0,
-                         guint64 *committed, guint tail, guint minconf,
-                         gboolean force, GString *out, double *conf);
+                         guint64 *cursor, guint tail, guint margin,
+                         gboolean *last_space, GString *out, double *conf);
 
 G_END_DECLS
 
