@@ -512,16 +512,25 @@ and it emits short low-confidence junk in QRM windows where v2 stays silent
 — the per-character CTC posterior separates most of it (clean text 0.96–1.00,
 junk mostly < 0.7) but not all, so DeepCW text may reach the extractor ONLY
 through the existing validation/repetition gates plus a measured confidence
-bar, and the tone splitter's contested rule still applies. No ground truth was
-available; these are side-by-side readings, not CER.
+bar, and the tone splitter's contested rule still applies. Counter-cases,
+same tables: 3529.95 kHz 12–36 s v2 read `K1KN AHOJ 5NN 9 … ML2BIL` where
+DeepCW gave `H9 N` / `?5H?` at 0.5 confidence. Caveat on the rendering: the
+comparison script joined v2's log characters after stripping each entry, so
+the v2 strings quoted here LOST their word gaps (the 80 m log holds 1455
+word-gap entries) — v2 does segment words; the mutations are the real
+difference. No ground truth was available; these are side-by-side readings
+of 12 s hindsight windows, not CER, and a streaming build commits only up to
+a word gap, so it reads window edges worse than these tables and lands text
+2–3 s after the keying.
 
 *Licence, both texts read:* AGPL-3.0 §13 second paragraph and GPL-3.0 §13
 each grant permission to "link or combine" a work under the other licence
 "into a single combined work, and to convey the resulting work"; the AGPL's
 network-interaction clause then applies to the combination. The runtime
-(ONNX Runtime) is MIT. Whether a weights file is a copyrightable "work" is
-untested law; the author's stated terms are AGPL-3.0-only and that is what we
-would honour (notice + source offer, which the public repo already gives).
+(ONNX Runtime) is MIT. Whether a weights file is a copyrightable "work" at
+all was NOT verified here (an open question by reputation, unchecked); the
+author's stated terms are AGPL-3.0-only and that is what we would honour
+(notice + source offer, which the public repo already gives).
 The go/no-go is Richard's.
 
 *Proposed implementation (not started):* (1) `src/engine/decode_deepcw.c`
