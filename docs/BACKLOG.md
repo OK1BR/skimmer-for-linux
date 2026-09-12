@@ -385,7 +385,7 @@ evidence is the live decode log and its saved token stream.
 ## Open — ideas
 
 ### SKM-3 — Evaluate DeepCW as a neural decode backend alongside the DSP one
-- **Type:** idea · **Severity:** — · **Status:** open — EVALUATED 2026-09-12 (model dissected, cost measured, read side by side with v2 on two real IQ fixtures; implementation proposed below), Richard's go/no-go pending
+- **Type:** idea · **Severity:** — · **Status:** doing — evaluated 2026-09-12, Richard's "ano" the same evening; backend + gate + replay plumbing BUILT and A/B-replayed offline (below); open: async inference worker for live use, the Preferences "CW engine" row, a station-table QSY rule
 - **Source:** own research, 2026-08-25; Richard 2026-09-12 ("zjisti, co to přesně je a jak bychom to implementovali… přepínač dekódovacího enginu")
 - **Detail:** upstream <https://github.com/e04/deepcw-engine> (model + minimal
   Python/Node example), demo front-end <https://github.com/e04/web-deep-cw-decoder>
@@ -558,6 +558,72 @@ AppImage/deb/rpm is a separate decision). (4) App: Preferences → Decoding →
 replay harness (station tables, phantom count, CPU), a labelled subset, then
 Richard's live look. The July rule holds: gate-proven offline first, and the
 classical path stays the default until a live band says otherwise.
+
+**Built 2026-09-12 night (Richard's "ano"), offline-proven.** In the tree:
+`vendor/onnxruntime/` (the MIT C API header, v1.21 = `ORT_API_VERSION 21`,
+`VENDOR.md`), `src/engine/ort_shim.c` (dlopen of `libonnxruntime.so.1` or
+`SKIM_ORT_LIB`, `GetApi(21)` — verified against the 1.30.0 library: same
+API table, `CreateEnv` OK), `src/engine/decode_deepcw.c` behind the
+`SkimDecodeBackend` vtable, `SkimCwEngine` in `SkimPipelineConfig` +
+`SKIM_CW_ENGINE=v1|v2|deepcw` (the pipeline falls back to v2 with a
+warning when the runtime or the model is missing; `skimmer-replay` prints
+the engine in its header), gate `skimmer-deepcw-test` (27 checks: the pure
+commit rule, the tile builder through the vtable — +30/−30 Hz offset sign,
+level, gate keyed vs noise, dit estimate — and, when `SKIM_ORT_LIB` +
+`SKIM_DEEPCW_MODEL` resolve, the model on a synthetic keyed tone and on
+noise; exit 77 = SKIP otherwise). **13 gates.** Design as built: 20-point
+Hann DFT per 4 samples on the 250 Hz channel (80 ms window, 16 ms hop —
+6.7 % time stretch, inside the model's speed range), bins −5..+5 kept per
+frame, 10 s ring, a tick every 1.6 s per channel (staggered), gate = line
+≥ 6 dB over the inner-bin floor with a keyed duty in 3–97 %, window
+peak-normalised, inference INLINE on the engine thread (replays stay
+deterministic), greedy CTC, commit up to the last word gap ≥ 1.5 s before
+the window end (≥ 2 s in), committed audio leaves the window, one WORD per
+`process()` so the extractor/station table see v2's hit cadence. Found and
+fixed by the fixtures, each a measurement: (a) a fast level EMA decayed to
+noise in every word gap → peak hold, 2 s; (b) offset updates on noise frames
+dragged +30 Hz to 14 → mark frames only (≥ 4× floor and ≥ ½ peak);
+(c) SNR from the line bin's own minima saturated (an 80 ms window never
+reaches the noise inside a 48 ms gap) and from the outer bins was inflated
+(they sit on the filter roll-off) — now window peak over the inner-bin floor
+against a BAND-WIDE floor EMA, −10 dB (bin → 125 Hz), which lands on v2's
+scale (20 m: IZ4ECE 28 vs v2 25, EH1SDC 66 vs 64, TA5ARU 15 vs 15);
+(d) **weak word gaps tear callsigns** — the model splits `OK2B TK`,
+`OK1C Z`, both halves validate and the extractor keeps the valid short
+part (OK2B 13 reports at 0.95 on 80 m): a gap with posterior < 0.8
+(`SKIM_DEEPCW_SPACE_P`) is dropped ONLY where it would tear a ≤ 2-char piece
+off a token (dropping every weak gap fused weak stations' text and lost
+TA5ARU on 20 m) — OK1CZ then reads right, OK2B falls to 3 reports;
+(e) WPM from the on-run histogram read dah-heavy fists at a third (OK1XC
+10) → character rate of the committed span (PARIS: 12 × chars/s) with the
+histogram as fallback — still crude (OK1XC 10, OK1JAX 12 vs v2 29, 23).
+
+*A/B numbers, final build (`/var/tmp/skimmer-iq/ab/*-H.out`, v2 tables in
+`replay-*.v2.out`, logs `*.v2.decodes.log` / `*.deepcw.decodes.log`).*
+20 m (180 s): v2 7 stations; DeepCW 10 = all seven + **EA6AOY** (45
+reports, CQ — the station v2 logged as EAAOY and never tabled) + EA6ROY
+(3 reports, a mutation twin of it, 0.90) + II6IGTO (11 reports, 0.90,
+unverified); EA5JQF stays untabled (SKM-13 is lexical, as predicted).
+80 m contest (300 s): v2 28; DeepCW 33 — 22 in common, new OK5O (36, CQ),
+OK1CZ (12), DL3GAK (18), OL6A (13), OE3MM (2), HB9T (5) and singles OK1KN /
+DH3Z / TC1MGW (a mutation of OK1MGW); lost SP2NBV, OL2BHZ, OL5A, OL5BOO,
+OK1MGW (all read in the side-by-side but out-reported in the station
+table's takeovers — DeepCW emits ~5× fewer hits than v2's per-character
+stream); OK2B 3 reports (was 13). **OK1DOL sits on its spur** (3537.00,
+a +4.57 kHz image 12.5 dB down in the IQ, same for OK1MDK ↔ 3536.44/3541.01):
+the table's same-call rule moves a station to whichever report reads
+stronger, and an intermittent spur peaks within 1–3 dB of the real signal
+for a few seconds at the end of the recording — v2 wins that race only by
+report count (258 vs 35). Filed as a station-table item: a same-call report
+> merge distance away needs sustained evidence before it re-positions the
+station. Cost: 20 m 135 s wall for 180 s (1.3×), 80 m 190 s for 300 s
+(1.6×), one inference per gated channel per tick at 4 intra-op threads on
+the engine thread, RSS ~400 MB — so **live needs the async worker** (the
+engine thread must not block; jobs snapshot the window, results land in a
+per-channel mailbox, the commit rule stays on the engine thread), and the
+replay keeps the inline path for determinism. Not yet built: that worker,
+the Preferences → Decoding → "CW engine" row (`[decode] engine`), the model
+download/placement under `~/.local/share/skimmer-for-linux/models/deepcw/`.
 
 ### SKM-4 — In-app waterfall with decodes placed by frequency, click to set TX
 - **Type:** idea · **Severity:** — · **Status:** doing — half 1 DONE 2026-09-05 (M8 in SCOPE): engine tap + view + palettes + drag-pan + absolute-frequency history + the waterfall flowing through a retune (SDR HP kick, IQ centre stamps, largest-segment rows — Richard's live verdict on 80 m) + the callsign column with click-to-tune + logbook prefill (LIVE-verified 22:05) + the column's tooltip carrying kHz / speed / dB / heard / age (a dB after the call tried and taken out on his look) — and the station list DELETED on his word (~23:30); half 2 (click sets TX) deferred to sdr-for-linux `SDR-12`; half 1 SHIPPED in v0.4.0 (2026-09-06)

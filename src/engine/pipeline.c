@@ -25,6 +25,7 @@
 #include "callsign.h"
 #include "channelizer.h"
 #include "decode_cw.h"
+#include "decode_deepcw.h"
 #include "decode_rtty.h"
 #include "spot_out.h"
 #include "tci_client.h"
@@ -127,6 +128,7 @@ static void hit_free_ops(GArray *ops) {
 
 struct _SkimPipeline {
   SkimPipelineConfig cfg;
+  SkimCwEngine       cw_engine;        /* resolved once (config + env)     */
   char              *host;
 
   SkimTciClient    *tci;
@@ -233,19 +235,57 @@ static void pipe_log_stamp(const SkimPipeline *p, const IqBlock *b,
 
 /* CW decoder pick: the soft-decision Viterbi v2 is the DEFAULT since
  * 2026-08-04 (Richard's call after the 2026-08-01 contest session ran it
- * live all day). v1 stays in the tree as the classical fallback, one env
- * var away: SKIM_CW_V1=1. SKIM_CW_V2 is still accepted so old command
- * lines and replay scripts keep meaning what they said. One process =
- * one backend (per-channel states are not mixable). */
-static const SkimDecodeBackend *cw_backend(void) {
-  return g_getenv("SKIM_CW_V1") ? skim_decode_cw() : skim_decode_cw_v2();
+ * live all day). v1 stays in the tree as the classical fallback; DeepCW
+ * (2026-09-12) is the neural engine behind the app's "CW engine" switch.
+ * The config carries the choice; SKIM_CW_ENGINE=v1|v2|deepcw overrides it
+ * for replays and probes, and the old SKIM_CW_V1=1 / SKIM_CW_V2 spellings
+ * keep meaning what they said. One process = one backend (per-channel
+ * states are not mixable), so the pick is made ONCE at pipeline_new. */
+static SkimCwEngine cw_engine_pick(const SkimPipelineConfig *cfg) {
+  SkimCwEngine e = cfg->cw_engine;
+  const char *env = g_getenv("SKIM_CW_ENGINE");
+  if (env && env[0]) {
+    if (g_ascii_strcasecmp(env, "v1") == 0)          { e = SKIM_CW_ENGINE_V1; }
+    else if (g_ascii_strcasecmp(env, "v2") == 0)     { e = SKIM_CW_ENGINE_V2; }
+    else if (g_ascii_strcasecmp(env, "deepcw") == 0) { e = SKIM_CW_ENGINE_DEEPCW; }
+    else { g_warning("SKIM_CW_ENGINE=%s: unknown (v1|v2|deepcw) — ignored", env); }
+  } else if (g_getenv("SKIM_CW_V1")) {
+    e = SKIM_CW_ENGINE_V1;
+  }
+  if (e == SKIM_CW_ENGINE_DEEPCW) {
+    GError *err = NULL;
+    if (!skim_decode_deepcw_available(&err)) {
+      g_warning("DeepCW engine not available (%s) — falling back to the "
+                "classical v2 decoder", err ? err->message : "?");
+      g_clear_error(&err);
+      e = SKIM_CW_ENGINE_V2;
+    }
+  }
+  return e;
+}
+
+static const SkimDecodeBackend *cw_backend(const SkimPipeline *p) {
+  switch (p->cw_engine) {
+    case SKIM_CW_ENGINE_V1:     return skim_decode_cw();
+    case SKIM_CW_ENGINE_DEEPCW: return skim_decode_deepcw();
+    default:                    return skim_decode_cw_v2();
+  }
 }
 
 /* The pipeline's backend follows its configured mode. One process = one
  * backend per pipeline (per-channel states are not mixable). */
 static const SkimDecodeBackend *pipe_backend(const SkimPipeline *p) {
   return p->cfg.mode == SKIM_PIPELINE_MODE_RTTY ? skim_decode_rtty()
-                                                : cw_backend();
+                                                : cw_backend(p);
+}
+
+const char *skim_pipeline_cw_engine_name(const SkimPipeline *p) {
+  if (p->cfg.mode == SKIM_PIPELINE_MODE_RTTY) { return "rtty"; }
+  switch (p->cw_engine) {
+    case SKIM_CW_ENGINE_V1:     return "cw-v1";
+    case SKIM_CW_ENGINE_DEEPCW: return "deepcw";
+    default:                    return "cw-v2";
+  }
 }
 
 static const char *pipe_mode_str(const SkimPipeline *p) {
@@ -263,6 +303,7 @@ static void rbn_sink_fwd(const char *call, const char *mode, double freq_hz,
 SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg) {
   SkimPipeline *p = g_new0(SkimPipeline, 1);
   p->cfg = *cfg;
+  p->cw_engine = cw_engine_pick(cfg);
   p->host = g_strdup(cfg->host ? cfg->host : "127.0.0.1");
   p->cfg.host = p->host;
   p->dlog_path = g_strdup(cfg->decode_log_path);

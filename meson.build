@@ -33,7 +33,10 @@ threads_dep = dependency('threads')
 # records provenance and the subset rationale.
 subdir('vendor/wdsp')
 
-engine_inc = include_directories('src/engine')
+engine_inc = include_directories('src/engine', 'vendor/onnxruntime')
+# ONNX Runtime is NEVER linked: decode_deepcw dlopen()s it at run time
+# (vendor/onnxruntime/VENDOR.md) — only dlopen/dlsym are needed.
+dl_dep = cc.find_library('dl', required : false)
 
 # --- Engine (headless, GLib-only) -------------------------------------------
 # Grows milestone by milestone (docs/SCOPE.md). M0: skeleton modules that build
@@ -44,6 +47,8 @@ engine_sources = [
   'src/engine/decode_cw.c',    # M3: CW backend (implements decode.h)
   'src/engine/decode_cw_v2.c', # CW v2: semi-Markov Viterbi (QSB-proof)
   'src/engine/decode_rtty.c',  # M7: RTTY backend (Baudot FSK)
+  'src/engine/ort_shim.c',     # ONNX Runtime C API behind dlopen (optional)
+  'src/engine/decode_deepcw.c',# DeepCW neural CW backend (Conformer + CTC)
   'src/engine/cw_reader.c',    # neural over re-reader (TCN+CTC, pane-only)
   'src/engine/pane_log.c',     # phase B: pane text + live over region (ops)
   'src/engine/tone_split.c',   # per-channel carrier splitter (multi-signal)
@@ -55,7 +60,7 @@ engine_sources = [
   'src/engine/spectrum.c',     # M8: band spectrum rows for the waterfall
   'src/engine/pipeline.c',     # M5: the engine assembled end to end
 ]
-engine_deps = [glib_dep, gio_dep, lws_dep, wdsp_dep, fftw3f_dep, m_dep]
+engine_deps = [glib_dep, gio_dep, lws_dep, wdsp_dep, fftw3f_dep, m_dep, dl_dep]
 
 engine_lib = static_library('skimmer-engine',
   engine_sources,
@@ -142,6 +147,18 @@ skimmer_rtty_test = executable('skimmer-rtty-test',
   link_with : engine_lib,
 )
 test('rtty-decode', skimmer_rtty_test, timeout : 120)
+
+# DeepCW: offline gate — tile builder (bin seating, +30 Hz offset sign,
+# level, gate on keyed vs noise), the pure commit rule on synthetic CTC
+# matrices, and — only when SKIM_ORT_LIB / SKIM_DEEPCW_MODEL resolve — the
+# real model on a synthetic keyed tone (exit 77 = SKIP otherwise).
+skimmer_deepcw_test = executable('skimmer-deepcw-test',
+  ['src/deepcw_test.c'],
+  include_directories : include_directories('src'),
+  dependencies : engine_deps,
+  link_with : engine_lib,
+)
+test('deepcw-decode', skimmer_deepcw_test, timeout : 300)
 
 # Tone splitter: offline gate — sideband immunity, Δf 50/30 Hz splits with
 # both texts copied, Δf 15 Hz contested, slot TTL collapse/re-engage, and the

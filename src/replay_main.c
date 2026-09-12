@@ -130,11 +130,14 @@ int main(int argc, char **argv) {
     .dict_path = g_file_test(dict, G_FILE_TEST_EXISTS) ? dict : NULL,
     .decode_log_path = dlog,
   };
-  printf("=== skimmer-replay %s — %.0f Hz, centre %.0f Hz, %s, dict %s ===\n",
-         path, rate, center, rtty ? "RTTY" : "CW",
-         cfg.dict_path ? "yes" : "NO");
-
+  /* SKIM_CW_ENGINE=v1|v2|deepcw picks the CW engine (the app's "CW engine"
+   * preference takes the same config field); the pipeline resolves the
+   * DeepCW availability itself and falls back to v2 with a warning. */
   SkimPipeline *p = skim_pipeline_new(&cfg);
+  printf("=== skimmer-replay %s — %.0f Hz, centre %.0f Hz, %s, engine %s, "
+         "dict %s ===\n",
+         path, rate, center, rtty ? "RTTY" : "CW",
+         skim_pipeline_cw_engine_name(p), cfg.dict_path ? "yes" : "NO");
   g_free(dict);
   g_stations = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
   skim_pipeline_set_text_cb(p, text_cb, NULL);

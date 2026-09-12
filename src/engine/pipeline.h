@@ -30,11 +30,24 @@ typedef enum {
   SKIM_PIPELINE_MODE_RTTY,
 } SkimPipelineMode;
 
+/* CW decode ENGINE (CW mode only; RTTY has one backend). The classical
+ * v2 Viterbi is the default; v1 is the historical fallback; DeepCW is the
+ * neural Conformer/CTC backend (decode_deepcw.c) that needs ONNX Runtime
+ * and a model file at run time — when either is missing the pipeline
+ * falls back to v2 and says so. Env override for replays and probes:
+ * SKIM_CW_ENGINE=v1|v2|deepcw (SKIM_CW_V1=1 still means v1). */
+typedef enum {
+  SKIM_CW_ENGINE_V2 = 0,
+  SKIM_CW_ENGINE_V1,
+  SKIM_CW_ENGINE_DEEPCW,
+} SkimCwEngine;
+
 typedef struct {
   const char *host;           /* TCI server (default 127.0.0.1)              */
   guint16     port;           /* default 40001                               */
   guint       iq_rate;        /* 48/96/192/384 kHz; 0 = keep device rate     */
   SkimPipelineMode mode;      /* decoded mode (default CW)                   */
+  SkimCwEngine cw_engine;     /* CW engine (default v2; see SkimCwEngine)    */
   double      chan_bw_hz;     /* channel spacing (default 125 Hz CW,
                                * 250 Hz RTTY)                                */
   const char *dict_path;      /* optional MASTER.SCP; NULL = none            */
@@ -97,6 +110,11 @@ void     skim_pipeline_stop(SkimPipeline *p);
  * the caller feeds IQ synchronously and callbacks fire on the caller's
  * thread. The decode log is stamped with STREAM time (deterministic across
  * runs). host/port/iq_rate in the config are ignored. */
+/* The decode engine actually in use ("cw-v2", "cw-v1", "deepcw", "rtty") —
+ * resolved at skim_pipeline_new from the config, the env override and the
+ * DeepCW availability check (About, replay header, logs). */
+const char *skim_pipeline_cw_engine_name(const SkimPipeline *p);
+
 gboolean skim_pipeline_start_offline(SkimPipeline *p, GError **error);
 void     skim_pipeline_feed(SkimPipeline *p, const float *iq, guint nframes,
                             double rate, double center_hz);

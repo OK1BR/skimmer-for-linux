@@ -1,0 +1,287 @@
+/*
+ * skimmer-deepcw-test — offline gate for the DeepCW backend.
+ *
+ * Sections: (A) the pure commit rule on synthetic CTC matrices; (B) the
+ * tile builder through the public vtable on synthetic complex baseband —
+ * offset sign (+30 / −30 Hz), level scaling, gate keyed vs noise, dit
+ * estimate, rate rejection; (C) the real model on a synthetic keyed tone
+ * and on noise — ONLY when SKIM_ORT_LIB / SKIM_DEEPCW_MODEL resolve
+ * (exit 77 = meson SKIP otherwise, reason printed).
+ *
+ * Part of skimmer-for-linux. GPL-3.0-or-later.
+ */
+#include <glib.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "engine/decode.h"
+#include "engine/decode_deepcw.h"
+
+static int fails, checks;
+static void check(const char *what, int ok) {
+  checks++;
+  if (!ok) { fails++; }
+  printf("  %s %s\n", ok ? "ok  " : "FAIL", what);
+}
+
+#define NC 42
+#define BLANK 41
+#define SPACE 40
+static int cls_of(char c) {
+  static const char CH[NC] = ",./0123456789?ABCDEFGHIJKLMNOPQRSTUVWXYZ ";
+  for (int i = 0; i < NC - 1; i++) if (CH[i] == c) return i;
+  return -1;
+}
+static float *logp_new(guint T) {
+  float *m = g_new(float, (gsize)T * NC);
+  for (guint t = 0; t < T; t++) {
+    for (int c = 0; c < NC; c++) m[t * NC + c] = logf(0.1f / 41.0f);
+    m[t * NC + BLANK] = logf(0.9f);
+  }
+  return m;
+}
+static void spike(float *m, guint t, int cls, float p) {
+  for (int c = 0; c < NC; c++) m[t * NC + c] = logf((1.0f - p) / 41.0f);
+  m[t * NC + cls] = logf(p);
+}
+/* Write "text" as spikes: chars every `step` frames from t0; ' ' is a
+ * SPACE spike. Returns the frame after the last spike. */
+static guint spikes_text(float *m, guint t0, guint step, const char *text) {
+  guint t = t0;
+  for (const char *s = text; *s; s++, t += step) spike(m, t, cls_of(*s), 0.95f);
+  return t;
+}
+
+/* ---- synthetic complex baseband --------------------------------------- */
+static const char *morse(char c) {
+  static const char *M[] = { "A.-", "B-...", "C-.-.", "D-..", "E.", "F..-.", "G--.",
+    "H....", "I..", "J.---", "K-.-", "L.-..", "M--", "N-.", "O---", "P.--.", "Q--.-",
+    "R.-.", "S...", "T-", "U..-", "V...-", "W.--", "X-..-", "Y-.--", "Z--..",
+    "0-----", "1.----", "2..---", "3...--", "4....-", "5.....", "6-....", "7--...",
+    "8---..", "9----.", NULL };
+  for (int i = 0; M[i]; i++) if (M[i][0] == c) return M[i] + 1;
+  return "";
+}
+/* Keyed envelope for text at wpm, rate Hz; leading/trailing quiet in dits. */
+static GArray *keyer(const char *text, double wpm, double rate, int lead, int trail) {
+  GArray *e = g_array_new(FALSE, FALSE, sizeof(float));
+  const double dit = 1.2 / wpm;
+  const float one = 1.0f, zero = 0.0f;
+#define ON(n)  for (int _i = 0; _i < (int)llround((n) * dit * rate); _i++) g_array_append_val(e, one)
+#define OFF(n) for (int _i = 0; _i < (int)llround((n) * dit * rate); _i++) g_array_append_val(e, zero)
+  OFF(lead);
+  for (const char *s = text; *s; s++) {
+    if (*s == ' ') { OFF(4); continue; }
+    const char *m = morse(*s);
+    for (; *m; m++) { ON(*m == '.' ? 1 : 3); OFF(1); }
+    OFF(2);
+  }
+  OFF(trail);
+#undef ON
+#undef OFF
+  return e;
+}
+/* Complex tone at off_hz with the keyed envelope (5 ms raised-cosine edges
+ * via a 1-pole smoother), amplitude amp, plus white noise sigma. */
+static float *tone_iq(GArray *env, double rate, double off_hz, float amp,
+                      float sigma, guint seed) {
+  GRand *r = g_rand_new_with_seed(seed);
+  float *iq = g_new(float, 2 * env->len);
+  double e = 0, a = exp(-1.0 / (0.005 * rate));
+  for (guint n = 0; n < env->len; n++) {
+    e = a * e + (1 - a) * g_array_index(env, float, n);
+    const double ph = 2.0 * G_PI * off_hz * n / rate;
+    double ni = 0, nq = 0;
+    if (sigma > 0) {
+      /* Box–Muller */
+      const double u1 = MAX(g_rand_double(r), 1e-12), u2 = g_rand_double(r);
+      const double m = sqrt(-2.0 * log(u1));
+      ni = sigma * m * cos(2 * G_PI * u2); nq = sigma * m * sin(2 * G_PI * u2);
+    }
+    iq[2 * n] = (float)(amp * e * cos(ph) + ni);
+    iq[2 * n + 1] = (float)(amp * e * sin(ph) + nq);
+  }
+  g_rand_free(r);
+  return iq;
+}
+/* Run a backend state over iq in 64-frame blocks (the pipeline's drain);
+ * collect emitted text into out, return number of hits. */
+static guint run_state(const SkimDecodeBackend *be, gpointer st, const float *iq,
+                       guint nframes, GString *out, double *last_conf) {
+  guint hits = 0;
+  SkimDecode d;
+  for (guint i = 0; i < nframes; i += 64) {
+    const guint n = MIN(64u, nframes - i);
+    if (be->process(st, iq + 2 * i, n, &d)) {
+      hits++;
+      g_string_append(out, d.text);
+      if (last_conf) *last_conf = d.confidence;
+    }
+  }
+  return hits;
+}
+
+int main(void) {
+  const double RATE = 250.0;
+  printf("=== skimmer-deepcw-test ===\n");
+
+  /* ---- (A) commit rule ------------------------------------------------- */
+  printf("[A] commit rule\n");
+  {
+    guint T = 400; float *m = logp_new(T);
+    spikes_text(m, 10, 10, "CQ");        /* C@10 Q@20                     */
+    spike(m, 100, SPACE, 0.95f);
+    spikes_text(m, 150, 10, "TEST");     /* 150..180                      */
+    GString *out = g_string_new(NULL); guint64 cur = 0; double conf = 0;
+    guint n = skim_deepcw_commit(m, T, 0, &cur, 50, 125, FALSE, out, &conf);
+    check("no word gap inside [minconf, T-tail] → nothing committed", n == 0 && cur == 0 && out->len == 0);
+    n = skim_deepcw_commit(m, T, 0, &cur, 50, 50, FALSE, out, &conf);
+    check("gap at 100 qualifies → 'CQ ' committed, cursor 101",
+          n == 3 && strcmp(out->str, "CQ ") == 0 && cur == 101);
+    check("confidence = spike posterior", fabs(conf - 0.95) < 0.02);
+    g_free(m);
+    /* next window starts at the cursor: chars at abs 150..180 + gap 300 */
+    T = 299; m = logp_new(T);
+    spikes_text(m, 150 - 101, 10, "TEST");
+    spike(m, 300 - 101, SPACE, 0.9f);
+    n = skim_deepcw_commit(m, T, 101, &cur, 50, 50, FALSE, out, &conf);
+    check("second window commits 'TEST ' up to the gap at 300",
+          n == 5 && strcmp(out->str, "CQ TEST ") == 0 && cur == 301);
+    g_free(m);
+    /* force: no gap at all, pending span at the ring limit */
+    T = 300; m = logp_new(T);
+    spikes_text(m, 20, 10, "DE0K1BR");   /* 20..80                        */
+    spikes_text(m, 270, 10, "K");        /* inside the tail               */
+    g_string_truncate(out, 0); cur = 0;
+    n = skim_deepcw_commit(m, T, 0, &cur, 50, 50, FALSE, out, &conf);
+    check("no gap, no force → nothing", n == 0 && cur == 0);
+    n = skim_deepcw_commit(m, T, 0, &cur, 50, 50, TRUE, out, &conf);
+    check("force → chars before the tail guard, tail char kept pending",
+          n == 7 && strcmp(out->str, "DE0K1BR") == 0 && cur == 251);
+    g_free(m);
+    /* silence advances the cursor to the tail guard */
+    T = 200; m = logp_new(T); cur = 0; g_string_truncate(out, 0);
+    n = skim_deepcw_commit(m, T, 0, &cur, 50, 50, FALSE, out, &conf);
+    check("silence → cursor = T - tail, nothing emitted", n == 0 && cur == 150 && out->len == 0);
+    g_free(m);
+    /* CTC collapse: E E E in a run = one E; E blank E = two */
+    T = 100; m = logp_new(T); cur = 0; g_string_truncate(out, 0);
+    spike(m, 10, cls_of('E'), 0.9f); spike(m, 11, cls_of('E'), 0.9f); spike(m, 12, cls_of('E'), 0.9f);
+    spike(m, 20, cls_of('E'), 0.9f); spike(m, 22, cls_of('E'), 0.9f);
+    spike(m, 30, SPACE, 0.9f);
+    n = skim_deepcw_commit(m, T, 0, &cur, 10, 5, FALSE, out, &conf);
+    check("CTC collapse: run = one char, blank-separated = two", n == 4 && strcmp(out->str, "EEE ") == 0);
+    check("a second gap right after a committed one is squeezed",
+          (g_string_truncate(out, 0), cur = 0,
+           skim_deepcw_commit(m, T, 0, &cur, 10, 5, FALSE, out, &conf),
+           spike(m, 31, SPACE, 0.9f), spike(m, 32, SPACE, 0.9f),
+           skim_deepcw_commit(m, T, 0, &cur, 10, 5, FALSE, out, &conf),
+           strcmp(out->str, "EEE ") == 0));
+    check("committed chars never re-emitted below the cursor",
+          skim_deepcw_commit(m, T, 0, &cur, 10, 5, TRUE, out, &conf) == 0);
+    g_free(m);
+    /* weak word gaps: torn short piece is glued, a weak gap between two
+     * real words stays (default bar 0.8, SKIM_DEEPCW_SPACE_P unset) */
+    T = 400; m = logp_new(T); cur = 0; g_string_truncate(out, 0);
+    guint tt = spikes_text(m, 10, 10, "OK2B");     /* 10..40                */
+    spike(m, tt, SPACE, 0.55f);                     /* weak gap             */
+    tt = spikes_text(m, tt + 10, 10, "TK");         /* short piece          */
+    spike(m, tt, SPACE, 0.55f);                     /* weak gap             */
+    tt = spikes_text(m, tt + 10, 10, "TEST");
+    spike(m, tt, SPACE, 0.97f);                     /* strong gap → split   */
+    n = skim_deepcw_commit(m, T, 0, &cur, 50, 50, FALSE, out, &conf);
+    check("weak gap before a 2-char piece is glued (OK2B TK → OK2BTK), weak gap between words kept",
+          strcmp(out->str, "OK2BTK TEST ") == 0);
+    g_free(m); g_string_free(out, TRUE);
+  }
+
+  /* ---- (B) tile builder / vtable ---------------------------------------- */
+  printf("[B] tile builder + gate (no model needed)\n");
+  const SkimDecodeBackend *be = skim_decode_deepcw();
+  {
+    gpointer bad = be->channel_new(333.0);
+    SkimDeepcwDebug dbg; skim_decode_deepcw_debug(bad, &dbg);
+    check("rate 333 Hz (no integer 12.5 Hz DFT) → dead state", dbg.dead);
+    be->channel_free(bad);
+
+    GArray *env = keyer("CQ CQ DE OK1BR K", 25.0, RATE, 8, 8);
+    const guint nf = env->len;
+    float *iq_p = tone_iq(env, RATE, +30.0, 0.1f, 0.003f, 1);
+    float *iq_m = tone_iq(env, RATE, -30.0, 0.1f, 0.003f, 2);
+    float *iq_2 = tone_iq(env, RATE, +30.0, 0.2f, 0.003f, 3);
+    gpointer sp = be->channel_new(RATE), sm = be->channel_new(RATE), s2 = be->channel_new(RATE);
+    GString *o = g_string_new(NULL);
+    run_state(be, sp, iq_p, nf, o, NULL);
+    run_state(be, sm, iq_m, nf, o, NULL);
+    run_state(be, s2, iq_2, nf, o, NULL);
+    const double op = be->tone_offset_hz(sp), om = be->tone_offset_hz(sm);
+    printf("      offsets: +30 → %.1f Hz, −30 → %.1f Hz; levels %.3f / %.3f\n",
+           op, om, be->level(sp), be->level(s2));
+    check("+30 Hz tone → offset +30 ± 4 Hz (sign = v2's, above centre positive)", fabs(op - 30.0) < 4.0);
+    check("−30 Hz tone → offset −30 ± 4 Hz", fabs(om + 30.0) < 4.0);
+    const double lr = be->level(s2) / MAX(be->level(sp), 1e-9);
+    check("level scales with amplitude (×2 → 1.7..2.3)", lr > 1.7 && lr < 2.3);
+    skim_decode_deepcw_debug(sp, &dbg);
+    printf("      keyed: ticks %u gate %d ratio %.1f dB duty %.2f wpm %.1f\n",
+           dbg.ticks, dbg.gate, dbg.ratio_db, dbg.duty, dbg.wpm);
+    check("keyed tone: gate OPEN at the last tick", dbg.ticks > 0 && dbg.gate);
+    check("keyed tone: line ≥ 6 dB over the floor", dbg.ratio_db >= 6.0);
+    check("dit estimate lands within ±35 % of 25 WPM", dbg.wpm > 16.0 && dbg.wpm < 34.0);
+    be->channel_free(sp); be->channel_free(sm); be->channel_free(s2);
+    g_free(iq_p); g_free(iq_m); g_free(iq_2);
+    /* noise only */
+    GArray *env0 = g_array_new(FALSE, FALSE, sizeof(float));
+    const float z = 0.0f;
+    for (guint i = 0; i < 8 * (guint)RATE; i++) g_array_append_val(env0, z);
+    float *iq_n = tone_iq(env0, RATE, 0.0, 0.0f, 0.01f, 4);
+    gpointer sn = be->channel_new(RATE);
+    run_state(be, sn, iq_n, env0->len, o, NULL);
+    skim_decode_deepcw_debug(sn, &dbg);
+    printf("      noise: ticks %u gate %d ratio %.1f dB duty %.2f\n", dbg.ticks, dbg.gate, dbg.ratio_db, dbg.duty);
+    check("noise only: gate CLOSED", dbg.ticks > 0 && !dbg.gate);
+    check("noise only: cursor keeps up (pending ≤ tail + tick)", dbg.frames_abs - dbg.committed <= 200);
+    be->channel_free(sn); g_free(iq_n); g_array_free(env0, TRUE);
+    check("no model → no text emitted from the DSP half alone", o->len == 0 || skim_decode_deepcw_available(NULL));
+    g_string_free(o, TRUE); g_array_free(env, TRUE);
+  }
+
+  /* ---- (C) the model ---------------------------------------------------- */
+  printf("[C] model\n");
+  GError *err = NULL;
+  if (!skim_decode_deepcw_available(&err)) {
+    printf("  SKIP — %s\n  (set SKIM_ORT_LIB and SKIM_DEEPCW_MODEL to run this section)\n",
+           err ? err->message : "?");
+    g_clear_error(&err);
+    printf("=== %d checks, %d failed (model section skipped) ===\n", checks, fails);
+    return fails ? 1 : 77;
+  }
+  printf("  runtime %s\n", skim_decode_deepcw_runtime_info());
+  {
+    GArray *env = keyer("CQ CQ DE OK1BR OK1BR K CQ CQ DE OK1BR OK1BR K", 25.0, RATE, 40, 200);
+    float *iq = tone_iq(env, RATE, +20.0, 0.05f, 0.004f, 5);
+    gpointer st = be->channel_new(RATE);
+    GString *o = g_string_new(NULL); double conf = 0;
+    const guint hits = run_state(be, st, iq, env->len, o, &conf);
+    SkimDeepcwDebug dbg; skim_decode_deepcw_debug(st, &dbg);
+    printf("      text |%s| hits %u ticks %u last conf %.2f wpm %.0f\n", o->str, hits, dbg.ticks, conf, dbg.wpm);
+    check("model reads the call (text contains OK1BR)", strstr(o->str, "OK1BR") != NULL);
+    check("commit seams carry single spaces", strstr(o->str, "  ") == NULL);
+    check("model reads CQ", strstr(o->str, "CQ") != NULL);
+    check("no doubled call from re-decoding committed audio", strstr(o->str, "OK1BROK1BR") == NULL &&
+          strstr(o->str, "OK1BR OK1BR OK1BR") == NULL);
+    check("committed text carries a confidence", conf > 0.5);
+    be->channel_free(st); g_free(iq); g_array_free(env, TRUE); g_string_free(o, TRUE);
+    /* noise only, 20 s: no phantom text */
+    GArray *env0 = g_array_new(FALSE, FALSE, sizeof(float)); const float z = 0.0f;
+    for (guint i = 0; i < 20 * (guint)RATE; i++) g_array_append_val(env0, z);
+    float *iq_n = tone_iq(env0, RATE, 0.0, 0.0f, 0.01f, 6);
+    gpointer sn = be->channel_new(RATE); o = g_string_new(NULL);
+    run_state(be, sn, iq_n, env0->len, o, NULL);
+    check("noise only through the model: no text", o->len == 0);
+    be->channel_free(sn); g_free(iq_n); g_array_free(env0, TRUE); g_string_free(o, TRUE);
+  }
+  printf("=== %d checks, %d failed ===\n", checks, fails);
+  return fails ? 1 : 0;
+}

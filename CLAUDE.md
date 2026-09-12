@@ -1020,6 +1020,28 @@ feed and the panadapter verified). Next: the gh#2 reply (draft en + cs in
 `/var/tmp/skimmer-v041/reply-tomas-*.md`, waiting for Richard's "ano"),
 then SKM-12.
 
+**DeepCW neural CW engine — evaluated + BUILT offline (2026-09-12, Richard's
+"ano" after the evaluation).** The published DeepCW model (e04, AGPL-3.0-only:
+a 3.6 M-parameter Conformer + CTC over a 65-bin × 15 ms log1p spectrogram)
+read two real IQ fixtures at least as well as v2 and found EA6AOY, which v2
+logged as EAAOY for 180 s; GPLv3 §13 ↔ AGPL §13 permit the combination
+(both texts read). Built: `vendor/onnxruntime/` (MIT C API header v1.21),
+`ort_shim.c` (dlopen — the app never links the runtime; missing runtime or
+model = "not available", pipeline falls back to v2), `decode_deepcw.c` behind
+the decode.h vtable (20-point DFT tiles from the 250 Hz channel, 10 s ring,
+1.6 s ticks, energy gate, word-gap commit, one word per process()),
+`SkimCwEngine` in the pipeline config + `SKIM_CW_ENGINE=v1|v2|deepcw`, gate
+`skimmer-deepcw-test` (27 checks, model part SKIPs without
+`SKIM_ORT_LIB`/`SKIM_DEEPCW_MODEL`) — **13 gates.** Offline A/B on the 20 m
+and the fresh 80 m contest fixture: full account under SKM-3 in
+`docs/BACKLOG.md` (wins EA6AOY, OK5O, OK1CZ, DL3GAK; costs: fewer hits →
+station-table takeovers lose some S&P callers, OK1DOL parked on a spur by the
+same-call rule, mutation twins). Inference runs INLINE on the engine thread
+(1.3–1.6× realtime on these fixtures) — the async worker for live use and the
+Preferences "CW engine" row are the next steps; the classical v2 stays the
+default. Model + runtime live outside the tree (scratch
+`/var/tmp/deepcw-research/`, the venv's `libonnxruntime.so.1.30.0`).
+
 ## Layout
 
 ```
@@ -1029,11 +1051,13 @@ src/engine/   headless, GLib-only:
   decode.h     backend interface: channel → { text, confidence, freq, wpm/baud }
   decode_cw    CW backend (phase 1: v1 classical + v2 Viterbi)
   decode_rtty  RTTY backend (M7: Baudot FSK 45.45 Bd); later decode_psk
+  decode_deepcw  DeepCW neural CW backend (Conformer + CTC via ort_shim/dlopen)
   station      per-frequency station tracker
   callsign     extraction + validation (RBN-grade)
   spot_out     TCI SPOT feed + RBN telnet feed
 src/app/      GTK4/libadwaita: main.c (window: waterfall + callsign column over the
               decode pane), wf_view.c (widget), wf_compose.c (GLib-only pixels + layout)
 vendor/wdsp/  in-tree WDSP copy (FFT + resampler)
+vendor/onnxruntime/  ONNX Runtime C API header only (MIT) — dlopen at run time
 docs/SCOPE.md the plan
 ```
