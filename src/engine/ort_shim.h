@@ -31,10 +31,17 @@ const char *skim_ort_version(const SkimOrt *ort);
 const char *skim_ort_library(const SkimOrt *ort);
 
 /* Load a model. intra_threads = ONNX Runtime intra-op threads (0 = its
- * default). Input/output names are read from the model (index 0 each). */
+ * default). device = "cpu" (default) or "cuda" (device 0 through the CUDA
+ * execution provider — libonnxruntime_providers_cuda.so, which the runtime
+ * loads itself). A device that cannot be appended is NOT an error: the
+ * session falls back to the CPU and skim_ort_session_device() tells what
+ * runs and why. Input/output names are read from the model (index 0 each). */
 SkimOrtSession *skim_ort_session_new(SkimOrt *ort, const char *model_path,
-                                     int intra_threads, GError **error);
+                                     int intra_threads, const char *device,
+                                     GError **error);
 void            skim_ort_session_free(SkimOrtSession *s);
+/* "CPU", "CUDA:0", or "CPU (cuda unavailable: <reason>)". */
+const char     *skim_ort_session_device(const SkimOrtSession *s);
 const char     *skim_ort_session_input_name(const SkimOrtSession *s);
 const char     *skim_ort_session_output_name(const SkimOrtSession *s);
 

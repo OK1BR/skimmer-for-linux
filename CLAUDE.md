@@ -1045,11 +1045,17 @@ staying on the engine thread. **The switch is in: Preferences → Decoding →
 logs `app: pipeline engine <name>`.** Headless-verified (Broadway, isolated
 config, IQ replay into the UI): DeepCW decodes through the async path; a
 missing model → warning + v2. Model at
-`~/.local/share/skimmer-for-linux/models/deepcw/` (not in git); the runtime
-is NOT installed system-wide — a live look needs `SKIM_ORT_LIB=<the venv's
-libonnxruntime.so.1.30.0>` at launch or `onnxruntime-cpu` from extra
-(Richard's call). Classical v2 stays the default; his live look is the next
-step, then the station-table QSY rule.
+`~/.local/share/skimmer-for-linux/models/deepcw/` (not in git).
+**GPU (same night, Richard's ok):** `onnxruntime-cuda` 1.29 installed from
+extra (system-wide `libonnxruntime.so.1` — no `SKIM_ORT_LIB` needed), the
+shim appends the CUDA provider with a CPU fallback + reason (Arch quirk: the
+provider lacks a NEEDED on libcudnn — the shim preloads it RTLD_GLOBAL),
+workers batch all queued windows into one run, Preferences → Decoding →
+**Device** (CPU / GPU (CUDA), shown only for DeepCW, `[decode] device`),
+gate 35 checks. 80 m replay: 103 s on CUDA:0 vs 190 s CPU, same table ±1
+marginal station. NPU needs an OpenVINO runtime path (no Arch ORT package
+has that provider). Classical v2 stays the default; Richard's live look is
+the next step, then the station-table QSY rule.
 
 ## Layout
 

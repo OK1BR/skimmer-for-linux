@@ -385,7 +385,7 @@ evidence is the live decode log and its saved token stream.
 ## Open — ideas
 
 ### SKM-3 — Evaluate DeepCW as a neural decode backend alongside the DSP one
-- **Type:** idea · **Severity:** — · **Status:** doing — evaluated 2026-09-12, Richard's "ano" the same evening; backend + gate + replay A/B + async workers + the Preferences "CW engine" switch BUILT and headless-verified (below); open: Richard's live look (the runtime is not installed system-wide), a station-table QSY rule, mutation twins
+- **Type:** idea · **Severity:** — · **Status:** doing — evaluated 2026-09-12, Richard's "ano" the same evening; backend + gate + replay A/B + async batched workers + the Preferences "CW engine" and "Device" (CPU / GPU CUDA) rows BUILT, headless-verified, GPU measured (below); open: Richard's live look, a station-table QSY rule, mutation twins, NPU (needs an OpenVINO runtime path)
 - **Source:** own research, 2026-08-25; Richard 2026-09-12 ("zjisti, co to přesně je a jak bychom to implementovali… přepínač dekódovacího enginu")
 - **Detail:** upstream <https://github.com/e04/deepcw-engine> (model + minimal
   Python/Node example), demo front-end <https://github.com/e04/web-deep-cw-decoder>
@@ -657,6 +657,46 @@ was). **For a live look the runtime must be reachable:** no system
 Richard's call), so today the launch is
 `SKIM_ORT_LIB=/var/tmp/deepcw-research/.venv/lib/python3.14/site-packages/onnxruntime/capi/libonnxruntime.so.1.30.0 builddir/skimmer-for-linux`
 + Preferences → CW engine → DeepCW. Classical v2 stays the default.
+
+**GPU (later the same night, Richard: "zkus napřed přidat GPU… uživatel by
+měl mít ty možnosti v nastavení").** `onnxruntime-cuda` 1.29.0-3 installed
+from extra with Richard's ok (+ cpuinfo, cudnn-frontend, nccl, onednn;
+714 MiB download, 1.05 GiB installed) — it provides `libonnxruntime.so.1`
+system-wide, so `SKIM_ORT_LIB` is no longer needed for a launch. Shim:
+`skim_ort_session_new(…, device)` appends the CUDA execution provider
+(`CreateCUDAProviderOptions` / `UpdateCUDAProviderOptions` device_id 0 /
+`SessionOptionsAppendExecutionProvider_CUDA_V2`) and on ANY failure builds
+the CPU session instead; `skim_ort_session_device()` reports "CUDA:0" or
+"CPU (cuda unavailable: <reason>)" and runtime_info carries it. **Arch
+packaging quirk, worked around:** the provider library references cuDNN
+symbols but does not list `libcudnn.so.9` as NEEDED (only cudart/cublas 13),
+so its load failed with "undefined symbol:
+cudnnGetConvolutionBackwardDataAlgorithm_v7" although cuDNN 9.26 exports
+it (nm-checked) — the shim `dlopen`s `libcudnn.so.9` with `RTLD_GLOBAL`
+before appending the provider; harmless elsewhere. Backend: the session is
+refcounted so `skim_decode_deepcw_reset()` (device change) can drop it while
+workers finish; `skim_decode_deepcw_set_device("cpu"|"cuda")`,
+`SKIM_DEEPCW_DEVICE` for replays; **workers now BATCH**: every queued
+window goes in one run, zero-padded at the end to the longest
+(`SKIM_DEEPCW_BATCH` 32) — one launch for N channels, what a GPU wants.
+App: Preferences → Decoding → **Device** ("CPU" / "GPU (CUDA)"), shown only
+while the engine row says DeepCW, persisted `[decode] device = cpu|cuda`;
+a change resets the session and rebuilds a DeepCW pipeline; the subtitle
+carries what actually runs. Gate 35 checks: device=cuda requested → either
+"CUDA:0" or the fallback wording (the CPU-only venv runtime answers "CUDA
+execution provider is not enabled in this build"), reset back to CPU, three
+channels fed in lockstep through the batched worker read their own text
+with no cross-talk. **Measured:** 80 m contest replay (inline, batch 1)
+103 s wall on CUDA:0 vs 190 s CPU (2.9× vs 1.6× realtime); the station
+table is the CPU one plus SP3HLM (2 reports) — GPU float paths are not
+bit-identical, a marginal weak window flipped. Headless app check with
+`engine=deepcw device=cuda` and the IQ replay: `deepcw: ONNX Runtime 1.29.0
+via libonnxruntime.so.1, CUDA:0`, decodes flow. NPU stays open: no Arch
+ONNX Runtime package carries the OpenVINO provider (checked), so it needs
+either Intel's onnxruntime-openvino build or a second shim on OpenVINO's
+own C API (openvino 2026.3.1 + intel-npu-plugin are in extra, the driver
+and `/dev/accel0` are on the machine; an earlier measurement found the NPU
+no faster than the iGPU, its value is watts).
 
 ### SKM-4 — In-app waterfall with decodes placed by frequency, click to set TX
 - **Type:** idea · **Severity:** — · **Status:** doing — half 1 DONE 2026-09-05 (M8 in SCOPE): engine tap + view + palettes + drag-pan + absolute-frequency history + the waterfall flowing through a retune (SDR HP kick, IQ centre stamps, largest-segment rows — Richard's live verdict on 80 m) + the callsign column with click-to-tune + logbook prefill (LIVE-verified 22:05) + the column's tooltip carrying kHz / speed / dB / heard / age (a dB after the call tried and taken out on his look) — and the station list DELETED on his word (~23:30); half 2 (click sets TX) deferred to sdr-for-linux `SDR-12`; half 1 SHIPPED in v0.4.0 (2026-09-06)

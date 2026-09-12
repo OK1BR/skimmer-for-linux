@@ -43,6 +43,7 @@ typedef struct {
   double space_p;    /* min posterior for a word gap to count   (0 = off)*/
   gboolean sync;     /* SKIM_DEEPCW_SYNC=1: inference inline (replays)   */
   int    workers;    /* async inference threads                 (2)      */
+  int    batch;      /* windows per model run on a worker      (32)      */
   int    debug;      /* SKIM_DEEPCW_DEBUG: 1 = ticks, 2 = + frames      */
 } DcwTune;
 
@@ -65,18 +66,58 @@ static void tune_init(void) {
     g_tune.space_p   = env_d("SKIM_DEEPCW_SPACE_P", 0.8);
     g_tune.sync      = env_d("SKIM_DEEPCW_SYNC", 0) != 0;
     g_tune.workers   = CLAMP((int)env_d("SKIM_DEEPCW_WORKERS", 2), 1, 8);
+    g_tune.batch     = CLAMP((int)env_d("SKIM_DEEPCW_BATCH", 32), 1, 256);
     g_tune.debug     = (int)env_d("SKIM_DEEPCW_DEBUG", 0);
     g_once_init_leave(&g_tune_once, 1);
   }
 }
 
 /* ---- runtime + model: one session per process --------------------------- */
+/* The session is refcounted: workers hold a ref for the duration of a
+ * model run, so a reset (device change) can drop the global ref at any
+ * time and the last user frees it. */
+typedef struct { SkimOrtSession *s; gint refs; } DcwSess;
+
 static GMutex          g_lock;
 static SkimOrt        *g_ort;
-static SkimOrtSession *g_sess;
+static DcwSess        *g_cur;           /* under g_lock                   */
 static GError         *g_load_err;
 static gboolean        g_tried;
 static char           *g_rt_info;
+static char           *g_device;        /* set_device(); NULL = env/cpu   */
+
+static DcwSess *sess_acquire(void) {
+  g_mutex_lock(&g_lock);
+  DcwSess *c = g_cur;
+  if (c) { g_atomic_int_inc(&c->refs); }
+  g_mutex_unlock(&g_lock);
+  return c;
+}
+
+static void sess_release(DcwSess *c) {
+  if (c && g_atomic_int_dec_and_test(&c->refs)) {
+    skim_ort_session_free(c->s);
+    g_free(c);
+  }
+}
+
+void skim_decode_deepcw_set_device(const char *device) {
+  g_mutex_lock(&g_lock);
+  g_free(g_device);
+  g_device = device && device[0] ? g_ascii_strdown(device, -1) : NULL;
+  g_mutex_unlock(&g_lock);
+}
+
+void skim_decode_deepcw_reset(void) {
+  g_mutex_lock(&g_lock);
+  DcwSess *old = g_cur;
+  g_cur = NULL;
+  g_tried = FALSE;
+  g_clear_error(&g_load_err);
+  g_clear_pointer(&g_rt_info, g_free);
+  g_mutex_unlock(&g_lock);
+  sess_release(old);
+}
 
 char *skim_decode_deepcw_model_path(void) {
   const char *env = g_getenv("SKIM_DEEPCW_MODEL");
@@ -95,23 +136,31 @@ static gboolean ensure_session(GError **error) {
       g_set_error(&g_load_err, SKIM_ORT_ERROR, 10,
                   "model file not found: %s", model);
     } else {
-      g_ort = skim_ort_open(NULL, &g_load_err);
+      if (!g_ort) { g_ort = skim_ort_open(NULL, &g_load_err); }
       if (g_ort) {
-        g_sess = skim_ort_session_new(g_ort, model, g_tune.threads,
-                                      &g_load_err);
-        if (g_sess) {
-          g_rt_info = g_strdup_printf("%s via %s", skim_ort_version(g_ort),
-                                      skim_ort_library(g_ort));
+        const char *envdev = g_getenv("SKIM_DEEPCW_DEVICE");
+        const char *dev = g_device ? g_device
+                        : (envdev && envdev[0] ? envdev : "cpu");
+        SkimOrtSession *ss = skim_ort_session_new(g_ort, model, g_tune.threads,
+                                                  dev, &g_load_err);
+        if (ss) {
+          g_cur = g_new0(DcwSess, 1);
+          g_cur->s = ss;
+          g_cur->refs = 1;
+          g_rt_info = g_strdup_printf("%s via %s, %s", skim_ort_version(g_ort),
+                                      skim_ort_library(g_ort),
+                                      skim_ort_session_device(ss));
           g_message("deepcw: ONNX Runtime %s, model %s, in '%s' out '%s', "
-                    "%d threads", g_rt_info, model,
-                    skim_ort_session_input_name(g_sess),
-                    skim_ort_session_output_name(g_sess), g_tune.threads);
+                    "%d threads, batch %d", g_rt_info, model,
+                    skim_ort_session_input_name(ss),
+                    skim_ort_session_output_name(ss), g_tune.threads,
+                    g_tune.batch);
         }
       }
     }
     g_free(model);
   }
-  const gboolean ok = g_sess != NULL;
+  const gboolean ok = g_cur != NULL;
   if (!ok && error && g_load_err) { *error = g_error_copy(g_load_err); }
   g_mutex_unlock(&g_lock);
   return ok;
@@ -277,37 +326,105 @@ static gboolean     g_behind_warned;
 
 static void state_unref(DcwState *st);
 
+/* One window through the model (inline path). */
 static void dcw_infer(const float *tile, guint T, float **logp, guint *To) {
   const int64_t dims[4] = { 1, 1, (int64_t)T, DCW_BINS };
   int64_t od[8]; int ond = 0;
   GError *err = NULL;
   *logp = NULL; *To = 0;
-  if (!skim_ort_run(g_sess, tile, dims, 4, logp, od, &ond, &err)) {
+  DcwSess *c = sess_acquire();
+  if (!c) return;
+  if (!skim_ort_run(c->s, tile, dims, 4, logp, od, &ond, &err)) {
     static gboolean warned;
     if (!warned) { warned = TRUE; g_warning("deepcw: inference failed: %s", err->message); }
     g_clear_error(&err);
+    sess_release(c);
     return;
   }
+  sess_release(c);
   *To = (ond == 3 && od[2] == DCW_CLASSES) ? (guint)MIN((int64_t)T, od[1]) : 0;
+}
+
+static void job_deliver(DcwJob *job, float *logp, guint To) {
+  DcwState *st = job->st;
+  g_mutex_lock(&g_res_lock);
+  g_free(st->res_logp);
+  st->res_logp = logp; st->res_T = To; st->res_w0 = job->w0;
+  st->res_force = job->force;
+  g_mutex_unlock(&g_res_lock);
+}
+
+static void job_free(DcwJob *job) {
+  state_unref(job->st);
+  g_free(job->tile);
+  g_free(job);
+}
+
+/* A batch of windows through the model: every queued job that is ready
+ * goes in ONE run, zero-padded at the end to the longest window (padding
+ * is dead air after the over — the commit rule reads only each window's
+ * own frames). One launch for N channels is what a GPU wants; on the CPU
+ * it costs the same per channel as N single runs. */
+static void worker_batch(GPtrArray *jobs) {
+  guint Tmax = 0;
+  for (guint i = 0; i < jobs->len; i++) {
+    const DcwJob *j = g_ptr_array_index(jobs, i);
+    Tmax = MAX(Tmax, j->T);
+  }
+  const guint N = jobs->len;
+  float *in = g_new0(float, (gsize)N * Tmax * DCW_BINS);
+  for (guint i = 0; i < N; i++) {
+    const DcwJob *j = g_ptr_array_index(jobs, i);
+    memcpy(in + (gsize)i * Tmax * DCW_BINS, j->tile,
+           (gsize)j->T * DCW_BINS * sizeof(float));
+  }
+  const int64_t dims[4] = { (int64_t)N, 1, (int64_t)Tmax, DCW_BINS };
+  int64_t od[8]; int ond = 0;
+  float *out = NULL;
+  GError *err = NULL;
+  DcwSess *c = sess_acquire();
+  gboolean ok = c && skim_ort_run(c->s, in, dims, 4, &out, od, &ond, &err);
+  sess_release(c);
+  g_free(in);
+  if (!ok) {
+    static gboolean warned;
+    if (!warned && err) { warned = TRUE; g_warning("deepcw: inference failed: %s", err->message); }
+    g_clear_error(&err);
+    return;
+  }
+  const gboolean shape_ok = ond == 3 && od[0] == (int64_t)N &&
+                            od[2] == DCW_CLASSES;
+  for (guint i = 0; i < N; i++) {
+    DcwJob *j = g_ptr_array_index(jobs, i);
+    if (!shape_ok || g_atomic_int_get(&j->st->dying)) continue;
+    const guint To = (guint)MIN((int64_t)j->T, od[1]);
+    float *logp = g_memdup2(out + (gsize)i * od[1] * DCW_CLASSES,
+                            (gsize)To * DCW_CLASSES * sizeof(float));
+    job_deliver(j, logp, To);
+  }
+  g_free(out);
 }
 
 static gpointer worker_main(gpointer data) {
   (void)data;
+  GPtrArray *batch = g_ptr_array_new();
   for (;;) {
-    DcwJob *job = g_async_queue_pop(g_jobs);
-    DcwState *st = job->st;
-    if (!g_atomic_int_get(&st->dying)) {
-      float *logp = NULL; guint To = 0;
-      dcw_infer(job->tile, job->T, &logp, &To);
-      g_mutex_lock(&g_res_lock);
-      g_free(st->res_logp);
-      st->res_logp = logp; st->res_T = To; st->res_w0 = job->w0;
-      st->res_force = job->force;
-      g_mutex_unlock(&g_res_lock);
+    DcwJob *first = g_async_queue_pop(g_jobs);
+    g_ptr_array_set_size(batch, 0);
+    g_ptr_array_add(batch, first);
+    DcwJob *more;
+    while (batch->len < (guint)g_tune.batch &&
+           (more = g_async_queue_try_pop(g_jobs)) != NULL) {
+      g_ptr_array_add(batch, more);
     }
-    g_free(job->tile);
-    g_free(job);
-    state_unref(st);
+    /* drop windows whose channel died meanwhile */
+    for (guint i = 0; i < batch->len; ) {
+      DcwJob *j = g_ptr_array_index(batch, i);
+      if (g_atomic_int_get(&j->st->dying)) { job_free(j); g_ptr_array_remove_index_fast(batch, i); }
+      else { i++; }
+    }
+    if (batch->len) { worker_batch(batch); }
+    for (guint i = 0; i < batch->len; i++) { job_free(g_ptr_array_index(batch, i)); }
   }
   return NULL;
 }

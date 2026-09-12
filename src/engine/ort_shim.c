@@ -25,7 +25,53 @@ struct _SkimOrtSession {
   OrtMemoryInfo  *mem;
   char           *in_name;
   char           *out_name;
+  char           *device;       /* what actually runs (see header)         */
 };
+
+/* Append the CUDA execution provider (device 0). FALSE + *why on failure —
+ * typically the provider library is not installed (onnxruntime-cpu) or
+ * the driver is missing; the caller then stays on the CPU. */
+static gboolean append_cuda(const OrtApi *api, OrtSessionOptions *opt,
+                            char **why) {
+  /* Arch's onnxruntime-cuda 1.29 provider library references cuDNN
+   * symbols but does not list libcudnn.so.9 as NEEDED (only cudart and
+   * cublas), so its load fails with "undefined symbol:
+   * cudnnGetConvolutionBackwardDataAlgorithm_v7" although the installed
+   * cuDNN 9.26 exports it (checked with nm). Bringing cuDNN into the
+   * process first, with global symbol visibility, lets the provider
+   * resolve; harmless where the provider is linked correctly, and a
+   * missing cuDNN is reported by the provider load itself below. */
+  static gsize cudnn_once;
+  if (g_once_init_enter(&cudnn_once)) {
+    void *h = dlopen("libcudnn.so.9", RTLD_NOW | RTLD_GLOBAL);
+    if (!h) { g_message("ort: libcudnn.so.9 not preloadable (%s)", dlerror()); }
+    g_once_init_leave(&cudnn_once, 1);
+  }
+  OrtCUDAProviderOptionsV2 *co = NULL;
+  OrtStatus *st = api->CreateCUDAProviderOptions(&co);
+  if (st) {
+    *why = g_strdup(api->GetErrorMessage(st));
+    api->ReleaseStatus(st);
+    return FALSE;
+  }
+  const char *keys[] = { "device_id" };
+  const char *vals[] = { "0" };
+  st = api->UpdateCUDAProviderOptions(co, keys, vals, 1);
+  if (st) {
+    *why = g_strdup(api->GetErrorMessage(st));
+    api->ReleaseStatus(st);
+    api->ReleaseCUDAProviderOptions(co);
+    return FALSE;
+  }
+  st = api->SessionOptionsAppendExecutionProvider_CUDA_V2(opt, co);
+  api->ReleaseCUDAProviderOptions(co);
+  if (st) {
+    *why = g_strdup(api->GetErrorMessage(st));
+    api->ReleaseStatus(st);
+    return FALSE;
+  }
+  return TRUE;
+}
 
 /* Turn an OrtStatus into a GError (and release it). TRUE = there was one. */
 static gboolean take_status(const OrtApi *api, OrtStatus *st, GError **error,
@@ -109,27 +155,43 @@ const char *skim_ort_version(const SkimOrt *o) { return o ? o->version : NULL; }
 const char *skim_ort_library(const SkimOrt *o) { return o ? o->library : NULL; }
 
 SkimOrtSession *skim_ort_session_new(SkimOrt *o, const char *model_path,
-                                     int intra_threads, GError **error) {
+                                     int intra_threads, const char *device,
+                                     GError **error) {
   g_return_val_if_fail(o != NULL && model_path != NULL, NULL);
   const OrtApi *api = o->api;
   OrtSessionOptions *opt = NULL;
   OrtStatus *st = api->CreateSessionOptions(&opt);
   if (take_status(api, st, error, "CreateSessionOptions")) { return NULL; }
+  char *dev_label = NULL;
+  if (device && g_ascii_strcasecmp(device, "cuda") == 0) {
+    char *why = NULL;
+    if (append_cuda(api, opt, &why)) {
+      dev_label = g_strdup("CUDA:0");
+    } else {
+      dev_label = g_strdup_printf("CPU (cuda unavailable: %s)", why);
+      g_free(why);
+    }
+  } else {
+    dev_label = g_strdup("CPU");
+  }
   if (intra_threads > 0) {
     st = api->SetIntraOpNumThreads(opt, intra_threads);
     if (take_status(api, st, error, "SetIntraOpNumThreads")) {
       api->ReleaseSessionOptions(opt);
+      g_free(dev_label);
       return NULL;
     }
   }
   st = api->SetInterOpNumThreads(opt, 1);
   if (take_status(api, st, error, "SetInterOpNumThreads")) {
     api->ReleaseSessionOptions(opt);
+    g_free(dev_label);
     return NULL;
   }
   st = api->SetSessionGraphOptimizationLevel(opt, ORT_ENABLE_ALL);
   if (take_status(api, st, error, "SetSessionGraphOptimizationLevel")) {
     api->ReleaseSessionOptions(opt);
+    g_free(dev_label);
     return NULL;
   }
   st = api->SetSessionLogSeverityLevel(opt, 3);      /* errors only        */
@@ -138,24 +200,44 @@ SkimOrtSession *skim_ort_session_new(SkimOrt *o, const char *model_path,
   OrtSession *sess = NULL;
   st = api->CreateSession(o->env, model_path, opt, &sess);
   api->ReleaseSessionOptions(opt);
-  if (take_status(api, st, error, "CreateSession")) { return NULL; }
+  if (st && g_str_has_prefix(dev_label, "CUDA")) {
+    /* The provider appended but the session refused (no usable GPU, a
+     * driver/library mismatch): say so and build the CPU session. */
+    char *why = g_strdup(api->GetErrorMessage(st));
+    api->ReleaseStatus(st);
+    g_free(dev_label);
+    dev_label = g_strdup_printf("CPU (cuda unavailable: %s)", why);
+    g_free(why);
+    st = api->CreateSessionOptions(&opt);
+    if (take_status(api, st, error, "CreateSessionOptions")) { g_free(dev_label); return NULL; }
+    if (intra_threads > 0) { OrtStatus *s2 = api->SetIntraOpNumThreads(opt, intra_threads); if (s2) api->ReleaseStatus(s2); }
+    { OrtStatus *s2 = api->SetInterOpNumThreads(opt, 1); if (s2) api->ReleaseStatus(s2); }
+    { OrtStatus *s2 = api->SetSessionGraphOptimizationLevel(opt, ORT_ENABLE_ALL); if (s2) api->ReleaseStatus(s2); }
+    { OrtStatus *s2 = api->SetSessionLogSeverityLevel(opt, 3); if (s2) api->ReleaseStatus(s2); }
+    st = api->CreateSession(o->env, model_path, opt, &sess);
+    api->ReleaseSessionOptions(opt);
+  }
+  if (take_status(api, st, error, "CreateSession")) { g_free(dev_label); return NULL; }
 
   OrtAllocator *alloc = NULL;
   st = api->GetAllocatorWithDefaultOptions(&alloc);
   if (take_status(api, st, error, "GetAllocatorWithDefaultOptions")) {
     api->ReleaseSession(sess);
+    g_free(dev_label);
     return NULL;
   }
   char *in_name = NULL, *out_name = NULL;
   st = api->SessionGetInputName(sess, 0, alloc, &in_name);
   if (take_status(api, st, error, "SessionGetInputName")) {
     api->ReleaseSession(sess);
+    g_free(dev_label);
     return NULL;
   }
   st = api->SessionGetOutputName(sess, 0, alloc, &out_name);
   if (take_status(api, st, error, "SessionGetOutputName")) {
     alloc->Free(alloc, in_name);
     api->ReleaseSession(sess);
+    g_free(dev_label);
     return NULL;
   }
   OrtMemoryInfo *mem = NULL;
@@ -164,6 +246,7 @@ SkimOrtSession *skim_ort_session_new(SkimOrt *o, const char *model_path,
     alloc->Free(alloc, in_name);
     alloc->Free(alloc, out_name);
     api->ReleaseSession(sess);
+    g_free(dev_label);
     return NULL;
   }
   SkimOrtSession *s = g_new0(SkimOrtSession, 1);
@@ -172,6 +255,7 @@ SkimOrtSession *skim_ort_session_new(SkimOrt *o, const char *model_path,
   s->mem = mem;
   s->in_name = g_strdup(in_name);
   s->out_name = g_strdup(out_name);
+  s->device = dev_label;
   alloc->Free(alloc, in_name);
   alloc->Free(alloc, out_name);
   return s;
@@ -184,7 +268,12 @@ void skim_ort_session_free(SkimOrtSession *s) {
   if (s->mem) { api->ReleaseMemoryInfo(s->mem); }
   g_free(s->in_name);
   g_free(s->out_name);
+  g_free(s->device);
   g_free(s);
+}
+
+const char *skim_ort_session_device(const SkimOrtSession *s) {
+  return s ? s->device : NULL;
 }
 
 const char *skim_ort_session_input_name(const SkimOrtSession *s) {
@@ -225,10 +314,19 @@ gboolean skim_ort_run(SkimOrtSession *s, const float *in,
     return FALSE;
   }
   size_t ond = 0;
-  api->GetDimensionsCount(info, &ond);
+  st = api->GetDimensionsCount(info, &ond);
+  if (take_status(api, st, error, "GetDimensionsCount")) {
+    api->ReleaseTensorTypeAndShapeInfo(info);
+    api->ReleaseValue(ov);
+    return FALSE;
+  }
   if (ond > 8) { ond = 8; }
-  api->GetDimensions(info, out_dims, ond);
+  st = api->GetDimensions(info, out_dims, ond);
   api->ReleaseTensorTypeAndShapeInfo(info);
+  if (take_status(api, st, error, "GetDimensions")) {
+    api->ReleaseValue(ov);
+    return FALSE;
+  }
   size_t ocount = 1;
   for (size_t i = 0; i < ond; i++) { ocount *= (size_t)out_dims[i]; }
   float *data = NULL;

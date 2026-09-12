@@ -43,8 +43,17 @@ gboolean skim_decode_deepcw_available(GError **error);
  * data dir) — informational, not necessarily existing. Caller frees. */
 char *skim_decode_deepcw_model_path(void);
 
-/* "1.30.0 via libonnxruntime.so.1" once loaded, NULL before. */
+/* "1.30.0 via libonnxruntime.so.1, CUDA:0" once loaded, NULL before. */
 const char *skim_decode_deepcw_runtime_info(void);
+
+/* Inference device for the NEXT session: "cpu" (default) or "cuda"
+ * (SKIM_DEEPCW_DEVICE is the env spelling for replays). A device that is
+ * not usable falls back to the CPU — runtime_info says so. */
+void skim_decode_deepcw_set_device(const char *device);
+/* Drop the loaded session so the next use reloads it (device change,
+ * model change). Safe while the pipeline is stopped; workers still
+ * finishing a window keep the old session alive until they are done. */
+void skim_decode_deepcw_reset(void);
 
 /* --- test hooks (skimmer-deepcw-test) ------------------------------------ */
 typedef struct {

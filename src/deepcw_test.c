@@ -260,6 +260,26 @@ int main(void) {
   printf("  runtime %s\n", skim_decode_deepcw_runtime_info());
   const gboolean sync_env = g_getenv("SKIM_DEEPCW_SYNC") != NULL;
   {
+    /* Device selection: ask for CUDA. With the CPU-only runtime (or no
+     * GPU) the session must fall back and SAY so; with onnxruntime-cuda
+     * it runs on CUDA:0. Either way the model must still read. Then back
+     * to the CPU through reset — the way the Preferences row switches. */
+    skim_decode_deepcw_reset();
+    skim_decode_deepcw_set_device("cuda");
+    GError *e2 = NULL;
+    check("session reloads after reset with device=cuda requested", skim_decode_deepcw_available(&e2));
+    const char *info = skim_decode_deepcw_runtime_info();
+    printf("      device=cuda → %s\n", info ? info : "(none)");
+    check("runtime_info names CUDA:0 or the fallback reason",
+          info && (strstr(info, "CUDA:0") || strstr(info, "cuda unavailable")));
+    g_clear_error(&e2);
+    skim_decode_deepcw_reset();
+    skim_decode_deepcw_set_device("cpu");
+    check("reset + device=cpu reloads on the CPU",
+          skim_decode_deepcw_available(NULL) &&
+          skim_decode_deepcw_runtime_info() && strstr(skim_decode_deepcw_runtime_info(), ", CPU"));
+  }
+  {
     /* Inline (the replay path): a burst feed, deterministic text. */
     GArray *env = keyer("CQ CQ DE OK1BR OK1BR K CQ CQ DE OK1BR OK1BR K", 25.0, RATE, 40, 200);
     float *iq = tone_iq(env, RATE, +20.0, 0.05f, 0.004f, 5);
@@ -299,6 +319,46 @@ int main(void) {
     check("a state freed with a window in flight does not crash (deferred free)",
           (be->channel_free(st), TRUE));
     g_free(iq); g_array_free(env, TRUE); g_string_free(o, TRUE);
+    /* three channels fed in lockstep through the async path: the worker
+     * batches whatever is queued, zero-padding to the longest window —
+     * each channel must still read ITS OWN text. */
+    if (!sync_env) {
+      const char *texts[3] = { "CQ CQ DE OK1BR OK1BR K", "TEST DL1ABC DL1ABC 5NN", "VVV DE SP9XYZ SP9XYZ K" };
+      const double offs[3] = { +20.0, -25.0, +40.0 };
+      const double wpms[3] = { 25.0, 30.0, 20.0 };
+      GArray *envs[3]; float *iqs[3]; gpointer sts[3]; GString *os[3]; guint len = 0;
+      for (int k = 0; k < 3; k++) {
+        envs[k] = keyer(texts[k], wpms[k], RATE, 40, 200);
+        iqs[k] = tone_iq(envs[k], RATE, offs[k], 0.05f, 0.004f, 10 + k);
+        sts[k] = be->channel_new(RATE); os[k] = g_string_new(NULL);
+        len = MAX(len, envs[k]->len);
+      }
+      SkimDecode d;
+      for (guint i = 0; i < len; i += 64) {
+        for (int k = 0; k < 3; k++) {
+          if (i >= envs[k]->len) continue;
+          const guint n = MIN(64u, envs[k]->len - i);
+          if (be->process(sts[k], iqs[k] + 2 * i, n, &d)) g_string_append(os[k], d.text);
+        }
+        g_usleep(2000);
+      }
+      for (int r = 0; r < 300; r++) {
+        gboolean busy = FALSE;
+        for (int k = 0; k < 3; k++) {
+          if (be->process(sts[k], iqs[k], 0, &d)) g_string_append(os[k], d.text);
+          SkimDeepcwDebug dg; skim_decode_deepcw_debug(sts[k], &dg); busy |= dg.inflight;
+        }
+        if (!busy && os[0]->len > 20 && os[1]->len > 10 && os[2]->len > 10) break;
+        g_usleep(10000);
+      }
+      for (int k = 0; k < 3; k++) printf("      batch ch%d |%s|\n", k, os[k]->str);
+      check("batched channel 0 reads OK1BR", strstr(os[0]->str, "OK1BR") != NULL);
+      check("batched channel 1 reads DL1ABC", strstr(os[1]->str, "DL1ABC") != NULL);
+      check("batched channel 2 reads SP9XYZ", strstr(os[2]->str, "SP9XYZ") != NULL);
+      check("no cross-talk between batched channels",
+            !strstr(os[0]->str, "DL1ABC") && !strstr(os[1]->str, "OK1BR") && !strstr(os[2]->str, "OK1BR"));
+      for (int k = 0; k < 3; k++) { be->channel_free(sts[k]); g_free(iqs[k]); g_array_free(envs[k], TRUE); g_string_free(os[k], TRUE); }
+    }
     /* noise only, 20 s: no phantom text */
     GArray *env0 = g_array_new(FALSE, FALSE, sizeof(float)); const float z = 0.0f;
     for (guint i = 0; i < 20 * (guint)RATE; i++) g_array_append_val(env0, z);

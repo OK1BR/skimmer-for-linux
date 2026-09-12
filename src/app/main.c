@@ -101,6 +101,9 @@ typedef struct {
   guint           cw_engine;     /* 0 = classical v2, 1 = DeepCW (persisted
                                   * [decode] engine); CW mode only; a change
                                   * reconnects; DeepCW unavailable → v2     */
+  guint           dcw_device;    /* DeepCW inference device: 0 = CPU,
+                                  * 1 = GPU (CUDA) (persisted [decode]
+                                  * device); unusable → CPU with a reason   */
   SkimRbnFeed    *rbn;           /* RBN telnet server — app-owned so
                                   * aggregator sessions ride out reconnects   */
   gboolean        rbn_enabled;   /* persisted [rbn]                           */
@@ -1066,6 +1069,21 @@ static guint settings_load_engine(void) {
   return v;
 }
 
+/* [decode] device = "cpu" | "cuda" (anything else = cpu). */
+static guint settings_load_device(void) {
+  char *path = settings_file();
+  GKeyFile *kf = g_key_file_new();
+  guint v = 0;
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
+    char *e = g_key_file_get_string(kf, "decode", "device", NULL);
+    if (e && g_ascii_strcasecmp(e, "cuda") == 0) { v = 1; }
+    g_free(e);
+  }
+  g_key_file_free(kf);
+  g_free(path);
+  return v;
+}
+
 static void settings_load_rbn(App *app) {
   char *path = settings_file();
   GKeyFile *kf = g_key_file_new();
@@ -1097,6 +1115,7 @@ static void settings_save(const App *app) {
   g_key_file_set_integer(kf, "tci", "port", app->tci_port);
   g_key_file_set_string(kf, "decode", "mode", app->dec_mode ? "rtty" : "cw");
   g_key_file_set_string(kf, "decode", "engine", app->cw_engine ? "deepcw" : "v2");
+  g_key_file_set_string(kf, "decode", "device", app->dcw_device ? "cuda" : "cpu");
   g_key_file_set_boolean(kf, "spots", "cq_only", app->cq_only);
   g_key_file_set_integer(kf, "spots", "round_hz", (gint)app->spot_round);
   g_key_file_set_boolean(kf, "rbn", "enabled", app->rbn_enabled);
@@ -1428,12 +1447,19 @@ static void on_pref_palette(AdwComboRow *r, GParamSpec *ps, gpointer user) {
   settings_save(app);
 }
 
+/* Engine row → the Device row shows only for DeepCW. */
+static void on_pref_engine(AdwComboRow *r, GParamSpec *ps, gpointer user) {
+  (void)ps;
+  gtk_widget_set_visible(GTK_WIDGET(user), adw_combo_row_get_selected(r) == 1);
+}
+
 static void prefs_closed(AdwDialog *dlg, gpointer user) {
   App *app = user;
   GtkWidget *row  = g_object_get_data(G_OBJECT(dlg), "host-row");
   GtkWidget *tprow = g_object_get_data(G_OBJECT(dlg), "tci-port-row");
   GtkWidget *mrow = g_object_get_data(G_OBJECT(dlg), "mode-row");
   GtkWidget *erow = g_object_get_data(G_OBJECT(dlg), "engine-row");
+  GtkWidget *drow = g_object_get_data(G_OBJECT(dlg), "device-row");
   GtkWidget *sw   = g_object_get_data(G_OBJECT(dlg), "cq-row");
   GtkWidget *qrow = g_object_get_data(G_OBJECT(dlg), "round-row");
   GtkWidget *frow = g_object_get_data(G_OBJECT(dlg), "font-row");
@@ -1455,10 +1481,12 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   int rbn_port = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rport));
   guint dec_mode = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(mrow)), 1u);
   guint cw_engine = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(erow)), 1u);
+  guint dcw_device = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(drow)), 1u);
   gboolean host_changed = host[0] && g_strcmp0(host, app->host) != 0;
   gboolean port_changed = tci_port != app->tci_port;
   gboolean mode_changed = dec_mode != app->dec_mode;
   gboolean engine_changed = cw_engine != app->cw_engine;
+  gboolean device_changed = dcw_device != app->dcw_device;
   gboolean cq_changed   = cq_only != app->cq_only;
   gboolean round_changed = spot_round != app->spot_round;
   gboolean font_changed = font_pt != app->decode_font;
@@ -1503,15 +1531,27 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   if (engine_changed) {
     app->cw_engine = cw_engine;
   }
+  if (device_changed) {
+    app->dcw_device = dcw_device;
+  }
   if (host_changed || port_changed || mode_changed || engine_changed ||
-      cq_changed || round_changed || font_changed || rbn_changed) {
+      device_changed || cq_changed || round_changed || font_changed ||
+      rbn_changed) {
     settings_save(app);
+  }
+  /* A device change only matters to a DeepCW pipeline: the loaded session
+   * is dropped (workers finishing a window keep it alive) and the rebuild
+   * below reloads it on the new device. */
+  const gboolean device_rebuild = device_changed && app->cw_engine;
+  if (device_changed) {
+    skim_decode_deepcw_set_device(app->dcw_device ? "cuda" : "cpu");
+    skim_decode_deepcw_reset();
   }
   /* The pipeline's config carries the feed pointer — an RBN change needs a
    * fresh pipeline just like a host change does; a mode or engine change
    * swaps the backend (and the bank geometry), which only a rebuild can do. */
   if (host_changed || port_changed || mode_changed || engine_changed ||
-      rbn_changed) {
+      device_rebuild || rbn_changed) {
     const gboolean replaying = app->replay_thread != NULL;
     if (replaying) { replay_stop(app); }        /* feeder off BEFORE the free */
     if (app->pipeline) {
@@ -1609,6 +1649,28 @@ static void prefs_open(GtkButton *btn, gpointer user) {
                           G_LIST_MODEL(gtk_string_list_new(ENGINES)));
   adw_combo_row_set_selected(ADW_COMBO_ROW(erow), app->cw_engine);
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(dgrp), erow);
+  /* Device: only meaningful for DeepCW — the row shows while the engine
+   * row says DeepCW. CUDA needs onnxruntime-cuda; an unusable device
+   * falls back to the CPU and the subtitle carries the reason. */
+  GtkWidget *drow = adw_combo_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(drow), "Device");
+  {
+    const char *info = skim_decode_deepcw_runtime_info();
+    char *sub = g_strdup_printf("Where the DeepCW model runs. GPU needs "
+                                "the CUDA build of ONNX Runtime "
+                                "(onnxruntime-cuda); when unusable the "
+                                "CPU is used.%s%s",
+                                info ? " Now: " : "", info ? info : "");
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(drow), sub);
+    g_free(sub);
+  }
+  static const char *DEVICES[] = { "CPU", "GPU (CUDA)", NULL };
+  adw_combo_row_set_model(ADW_COMBO_ROW(drow),
+                          G_LIST_MODEL(gtk_string_list_new(DEVICES)));
+  adw_combo_row_set_selected(ADW_COMBO_ROW(drow), app->dcw_device);
+  gtk_widget_set_visible(drow, app->cw_engine == 1);
+  g_signal_connect(erow, "notify::selected", G_CALLBACK(on_pref_engine), drow);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(dgrp), drow);
   adw_preferences_page_add(p_dec, ADW_PREFERENCES_GROUP(dgrp));
 
   GtkWidget *sgrp = adw_preferences_group_new();
@@ -1690,6 +1752,7 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   g_object_set_data(G_OBJECT(dlg), "tci-port-row", tprow);
   g_object_set_data(G_OBJECT(dlg), "mode-row", mrow);
   g_object_set_data(G_OBJECT(dlg), "engine-row", erow);
+  g_object_set_data(G_OBJECT(dlg), "device-row", drow);
   g_object_set_data(G_OBJECT(dlg), "cq-row", sw);
   g_object_set_data(G_OBJECT(dlg), "round-row", qrow);
   g_object_set_data(G_OBJECT(dlg), "font-row", frow);
@@ -1978,6 +2041,8 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   app->tci_port     = settings_load_tci_port();
   app->dec_mode     = settings_load_mode();
   app->cw_engine    = settings_load_engine();
+  app->dcw_device   = settings_load_device();
+  skim_decode_deepcw_set_device(app->dcw_device ? "cuda" : "cpu");
   app->cq_only      = settings_load_cq_only();
   app->spot_round   = settings_load_spot_round();
   app->decode_font  = settings_load_decode_font();
