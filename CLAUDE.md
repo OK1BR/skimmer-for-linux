@@ -32,6 +32,11 @@ back to the radio panadapter and to the RBN. The full plan is in
   activates a station row (added 2026-07-15 at Richard's request).
 - **RBN feed must never emit unvalidated callsigns** — M4 (validation) gates M6
   (RBN).
+- **Every commit and tag is GPG-signed** (`commit.gpgsign=true`, key
+  35AE58A8…B33931; gpg signs without a prompt). Never override with
+  `-c commit.gpgsign=false` / `--no-gpg-sign`; verify `git log --format=%G? -1`
+  = `G` after each commit. Richard, 2026-09-13, after one unsigned commit
+  (60fe31f) slipped in — that one stays as is, on his word.
 
 ## TCI facts that matter (from sdr-for-linux `docs/TCI-SCOPE.md`)
 
@@ -1100,12 +1105,13 @@ commit (live32, DeepCW on CUDA, draft on) against the installed
 sdr-for-linux 0.5.1. His "slyším CW, ale nic nepřekládá" was a QSO's weak
 side (CT1BMW) under G4BPJ, not the channel — and it surfaced a KEYED copy
 of strong stations at the DDS centre in the IQ stream (~20 dB down), to be
-filed in sdr-for-linux. `SKIM_FLOCK_DEBUG` added. Open, in order: (1) the
-unsigned commit 60fe31f (re-sign = amend + force-push of two commits, only
-on his "ano"); (2) file the DC keyed-copy finding in sdr-for-linux's
-BACKLOG and measure it there; (3) his verdict on the draft + word gaps
-after more testing; (4) the model's omitted gaps after long pauses (needs a
-real keyed detector); (5) latency verdict waits for a CW contest.
+filed in sdr-for-linux. `SKIM_FLOCK_DEBUG` added. The unsigned commit
+60fe31f stays (Richard: do not rewrite it; every commit from now on is
+signed — ground rule above). Open, in order: (1) file the DC keyed-copy
+finding in sdr-for-linux's BACKLOG and measure it there; (2) his verdict on
+the draft + word gaps after more testing; (3) the model's omitted gaps
+after long pauses (needs a real keyed detector); (4) latency verdict waits
+for a CW contest.
 
 ## Layout
 
