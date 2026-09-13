@@ -586,6 +586,9 @@ static void apply_text(App *app, double freq_hz, const char *text,
         fl->log, skim_pane_log_len(fl->log) - FREQLOG_CAP_CHARS + 2000);
   }
   if (pane_routed(app, freq_hz)) {
+    if (g_getenv("SKIM_PANE_DEBUG")) {
+      g_printerr("pane: text %.2f over %zu |%s|\n", freq_hz, app->pane_over, text);
+    }
     if (app->pane_over > 0) {
       pane_flush(app, pane);
       GtkTextIter it;
@@ -597,6 +600,23 @@ static void apply_text(App *app, double freq_hz, const char *text,
       g_string_append(pane, text);
     }
   }
+}
+
+/* SKIM_PANE_DEBUG: the widget's tail beside the slot's own text — the two
+ * mirrors must agree (the widget is the one the operator reads). */
+static void pane_debug_tails(App *app, const FreqLog *fl, const char *what) {
+  if (!g_getenv("SKIM_PANE_DEBUG")) return;
+  GtkTextIter s, e;
+  gtk_text_buffer_get_end_iter(app->tuned, &e);
+  s = e;
+  gtk_text_iter_backward_chars(&s, 60);
+  char *wt = gtk_text_buffer_get_text(app->tuned, &s, &e, FALSE);
+  const char *lt = skim_pane_log_text(fl->log);
+  const gsize ll = skim_pane_log_len(fl->log);
+  g_printerr("pane: %s widget |%s| log |%s| over %zu/%zu\n", what, wt,
+             lt + (ll > 60 ? ll - 60 : 0), app->pane_over,
+             skim_pane_log_over_len(fl->log));
+  g_free(wt);
 }
 
 /* Phase B hybrid over op (OPEN/SET/CLOSE): the frequency's history slot
@@ -649,6 +669,7 @@ static void apply_over(App *app, double freq_hz, SkimPaneOpKind kind,
   }
   buffer_trim_scroll(app->tuned_view, app->tuned);
   app->pane_over = kind == SKIM_PANE_OP_CLOSE ? 0 : tlen;
+  pane_debug_tails(app, fl, "after-over");
 }
 
 static void apply_vfo(App *app, double vfo_hz) {

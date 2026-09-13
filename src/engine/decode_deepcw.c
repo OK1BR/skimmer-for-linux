@@ -13,6 +13,7 @@
 #include "decode_deepcw.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -46,10 +47,21 @@ typedef struct {
   int    batch;      /* windows per model run on a worker      (32)      */
   int    debug;      /* SKIM_DEEPCW_DEBUG: 1 = ticks, 2 = + frames      */
   gboolean draft;    /* SKIM_DEEPCW_DRAFT (1): gray draft tail in the pane */
+  double draft_min_s;/* SKIM_DEEPCW_DRAFT_MIN (0.384): no draft closer to the
+                      * window end — the model's reading there is mostly
+                      * wrong (80 m fixture: 11–44 % right under 384 ms,
+                      * 71 % at 384–512, ≥ 85 % beyond)                    */
+  double draft_p;    /* SKIM_DEEPCW_DRAFT_P (0.9): min posterior of a draft
+                      * spike; with the distance bar → 98 % right         */
+  char **gap_words;  /* SKIM_DEEPCW_GAP_WORDS: short words/prosigns that
+                      * keep a weak gap before them (a 1–2 char RIGHT piece
+                      * that is one of these is a word, not a torn tail)  */
 } DcwTune;
 
 static DcwTune g_tune;
 static gsize   g_tune_once;
+static FILE   *g_taildump;   /* SKIM_DEEPCW_TAILDUMP=<file>: measurement */
+static double  g_dump_hz;    /* channel label for the tail dump           */
 
 static double env_d(const char *name, double dflt) {
   const char *v = g_getenv(name);
@@ -70,6 +82,17 @@ static void tune_init(void) {
     g_tune.batch     = CLAMP((int)env_d("SKIM_DEEPCW_BATCH", 32), 1, 256);
     g_tune.debug     = (int)env_d("SKIM_DEEPCW_DEBUG", 0);
     g_tune.draft     = env_d("SKIM_DEEPCW_DRAFT", 1) != 0;
+    g_tune.draft_min_s = env_d("SKIM_DEEPCW_DRAFT_MIN", 0.384);
+    g_tune.draft_p   = env_d("SKIM_DEEPCW_DRAFT_P", 0.9);
+    {
+      const char *gw = g_getenv("SKIM_DEEPCW_GAP_WORDS");
+      g_tune.gap_words = g_strsplit(gw && gw[0] ? gw
+          : "K R CQ DE TU 73 88 GL GM GA GE GN KN SK AR BK UR ES DX RR", " ", -1);
+    }
+    {
+      const char *td = g_getenv("SKIM_DEEPCW_TAILDUMP");
+      if (td && td[0]) { g_taildump = fopen(td, "w"); }
+    }
     g_once_init_leave(&g_tune_once, 1);
   }
 }
@@ -200,12 +223,16 @@ static GArray *ctc_collapse(const float *logp, guint T, guint64 w0) {
 }
 
 /* A word gap the model is unsure about (posterior < space_p) is more often
- * a torn fist than a gap — but only where it would tear a SHORT piece off
+ * a torn fist than a gap — but only where it would tear a SHORT TAIL off
  * a token: "OK2B TK" → OK2BTK, "OK1C Z" → OK1CZ (80 m fixture: both
  * halves validated as calls and the panadapter would have shown OK2B),
  * while "TEST TA5ARU" with a weak gap stays two words — dropping every
- * weak gap fused weak stations' text and lost TA5ARU on 20 m. Such a
- * space is neither a split point nor emitted. */
+ * weak gap fused weak stations' text and lost TA5ARU on 20 m. The left
+ * piece must be a token body (≥ 3 chars): a short LEFT piece is a word —
+ * DE, CQ, TU, K, R, 73 — and gluing it ate a third of the real word gaps
+ * on the 80 m fixture ("DEOK1FHI", "CQOL", 1488 gaps dropped per replay;
+ * Richard 2026-09-13: "nedělá mezery mezi slovy"). Such a space is
+ * neither a split point nor emitted. */
 static void drop_weak_tears(GArray *sp, double bar) {
   if (bar <= 0.0) return;
   for (guint i = 0; i < sp->len; i++) {
@@ -214,7 +241,21 @@ static void drop_weak_tears(GArray *sp, double bar) {
     guint left = 0, right = 0;
     for (gint j = (gint)i - 1; j >= 0 && g_array_index(sp, Spike, j).cls != DCW_SPACE; j--) left++;
     for (guint j = i + 1; j < sp->len && g_array_index(sp, Spike, j).cls != DCW_SPACE; j++) right++;
-    if (left > 0 && right > 0 && MIN(left, right) <= 2) {
+    if (left >= 3 && right > 0 && right <= 2) {
+      /* the short right piece is a WORD (K, R, CQ, DE, TU, 73 …): the gap
+       * before it is real — "OK1MDK CQ", "5NN K", "TEST DE" stay two words */
+      char rt[3] = { DCW_CHARS[g_array_index(sp, Spike, i + 1).cls],
+                     right == 2 ? DCW_CHARS[g_array_index(sp, Spike, i + 2).cls] : '\0', '\0' };
+      gboolean word = FALSE;
+      for (char **w = g_tune.gap_words; w && *w; w++) { if (strcmp(*w, rt) == 0) { word = TRUE; break; } }
+      if (word) continue;
+      if (g_taildump) {
+        char lt[4] = "", rt[4] = "";
+        for (guint k = 0; k < MIN(left, 3u); k++) lt[k] = DCW_CHARS[g_array_index(sp, Spike, i - left + k).cls];
+        for (guint k = 0; k < MIN(right, 3u); k++) rt[k] = DCW_CHARS[g_array_index(sp, Spike, i + 1 + k).cls];
+        fprintf(g_taildump, "X %.0f %" G_GUINT64_FORMAT " %.3f %u %u %s %s\n",
+                g_dump_hz, s->t, s->p, left, right, lt, rt);
+      }
       g_array_remove_index(sp, i);
       i--;
     }
@@ -224,14 +265,16 @@ static void drop_weak_tears(GArray *sp, double bar) {
 guint skim_deepcw_commit(const float *logp, guint T, guint64 w0,
                          guint64 *cursor, guint tail, guint margin,
                          gboolean *last_space, GString *out, double *conf) {
+  guint64 space_t = 0;
   return skim_deepcw_commit_ex(logp, T, w0, cursor, tail, margin, last_space,
-                               out, conf, NULL);
+                               &space_t, out, conf, NULL, 0, 0.0);
 }
 
 guint skim_deepcw_commit_ex(const float *logp, guint T, guint64 w0,
                             guint64 *cursor, guint tail, guint margin,
-                            gboolean *last_space, GString *out, double *conf,
-                            GString *draft) {
+                            gboolean *last_space, guint64 *space_t,
+                            GString *out, double *conf,
+                            GString *draft, guint draft_min, double draft_p) {
   const guint64 w1 = w0 + T;
   tune_init();
   GArray *sp = ctc_collapse(logp, T, w0);
@@ -259,7 +302,27 @@ guint skim_deepcw_commit_ex(const float *logp, guint T, guint64 w0,
     /* Same cursor/margin rule for the tail — a re-placed copy of the last
      * final character must not reappear as draft either. */
     if (sk->cls == DCW_SPACE) {
-      if (sk->t <= *cursor || ls) continue;
+      if (ls) continue;                         /* double gap: squeezed   */
+      if (sk->t <= *cursor) {
+        /* The model places a gap loosely — often ON the frame of the
+         * character before it, or a frame or two earlier — so a real gap
+         * used to read as a re-placed copy of something committed and
+         * vanished (80 m fixture: ~400 gaps per replay). A gap within
+         * `slack` before the cursor passes when no committed gap sits
+         * near it; a re-read of a committed gap sits within the same
+         * slack of *space_t and is squeezed. The cursor never moves back. */
+        const guint slack = 2 * margin;
+        const gboolean old_read = sk->t + slack <= *cursor;
+        const gboolean committed_gap =
+            *space_t && (sk->t + slack >= *space_t) && (*space_t + slack >= sk->t);
+        if (old_read || committed_gap) {
+          if (g_taildump && !in_tail) {
+            fprintf(g_taildump, "S %.0f %" G_GUINT64_FORMAT " %.3f %" G_GUINT64_FORMAT "\n",
+                    g_dump_hz, sk->t, sk->p, *cursor);
+          }
+          continue;
+        }
+      }
       ls = TRUE;
     } else {
       if (sk->t <= *cursor + margin) continue;
@@ -267,14 +330,29 @@ guint skim_deepcw_commit_ex(const float *logp, guint T, guint64 w0,
     }
     if (in_tail) {
       /* DRAFT: the model's current reading of the tail guard — display
-       * only, re-read (and possibly changed) at the next tick. */
+       * only, re-read (and possibly changed) at the next tick. Only its
+       * RELIABLE PREFIX shows: the reading is cut at the first spike that
+       * sits closer than draft_min frames to the window end (no right
+       * context yet) or below the draft_p posterior — measured on the 80 m
+       * fixture, the raw tail was mostly wrong and flickered at 2 Hz
+       * (Richard: "není nic čitelné"). */
+      if (w1 - sk->t < draft_min || sk->p < draft_p) break;
       g_string_append_c(draft, DCW_CHARS[sk->cls]);
+      if (g_taildump) {
+        fprintf(g_taildump, "T %.0f %" G_GUINT64_FORMAT " %" G_GUINT64_FORMAT " %u %c %.3f\n",
+                g_dump_hz, w1, sk->t, (unsigned)(w1 - sk->t), DCW_CHARS[sk->cls], sk->p);
+      }
       continue;
+    }
+    if (g_taildump) {
+      fprintf(g_taildump, "F %.0f %" G_GUINT64_FORMAT " %" G_GUINT64_FORMAT " %c %.3f\n",
+              g_dump_hz, w1, sk->t, DCW_CHARS[sk->cls], sk->p);
     }
     g_string_append_c(out, DCW_CHARS[sk->cls]);
     psum += sk->p;
     n++;
-    *cursor = sk->t;
+    if (sk->cls == DCW_SPACE) { *space_t = sk->t; }
+    *cursor = MAX(*cursor, sk->t);
     *last_space = ls;
   }
   g_array_free(sp, TRUE);
@@ -294,7 +372,8 @@ typedef struct {
   guint   ring_frames;
   guint64 frames_abs;
   guint64 committed;
-  guint   tick_frames, tick_phase, tail_f, minconf_f, margin_f;
+  guint64 space_t;              /* frame of the last committed word gap    */
+  guint   tick_frames, tick_phase, tail_f, minconf_f, margin_f, draft_min_f;
   gboolean last_space;          /* the last committed spike was a space   */
   double  lvl_ema, off_ema;
   double  env_lo;               /* channel noise floor (inner bins, EMA)   */
@@ -476,6 +555,7 @@ static gpointer dcw_channel_new(double rate) {
   st->out = g_string_new(NULL);
   st->draft = g_string_new(NULL);
   st->pane_last = g_string_new(NULL);
+  st->last_space = TRUE;             /* no gap before the first character */
   st->refs = 1;
   const double nf = rate / DCW_BIN_HZ;
   const guint N = (guint)llround(nf);
@@ -534,6 +614,7 @@ static gpointer dcw_channel_new(double rate) {
   st->tick_phase  = (g_reg++ * 7u) % st->tick_frames;
   st->tail_f      = (guint)llround(g_tune.tail_s * fps);
   st->minconf_f   = (guint)llround(g_tune.minconf_s * fps);
+  st->draft_min_f = (guint)llround(g_tune.draft_min_s * fps);
   return st;
 }
 
@@ -693,10 +774,13 @@ static void dcw_apply(DcwState *st, const float *logp, guint To, guint64 w0) {
   const gsize before = st->out->len;
   const guint64 cursor0 = MAX(st->committed, w0);
   g_string_truncate(st->draft, 0);
+  g_dump_hz = st->freq_hz;
   const guint n = skim_deepcw_commit_ex(logp, To, w0, &st->committed,
                                         st->tail_f, st->margin_f,
-                                        &st->last_space, st->out, &conf,
-                                        g_tune.draft ? st->draft : NULL);
+                                        &st->last_space, &st->space_t,
+                                        st->out, &conf,
+                                        g_tune.draft ? st->draft : NULL,
+                                        st->draft_min_f, g_tune.draft_p);
   st->pane_dirty = TRUE;             /* out and/or the draft moved       */
   if (n) {
     /* Confidence of the pending emission: length-weighted merge. */
@@ -921,6 +1005,7 @@ static void dcw_resync(gpointer state) {
   st->sfill = 0; st->spos = 0; st->since = 0;
   st->committed = st->frames_abs;
   st->last_space = TRUE;
+  st->space_t = 0;
   if (st->draft->len) { g_string_truncate(st->draft, 0); st->pane_dirty = TRUE; }
   pane_compose(st);
 }

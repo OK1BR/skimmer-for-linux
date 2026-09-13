@@ -154,6 +154,14 @@ static void route_over_cb(double hz, SkimPaneOpKind kind, guint erase,
 int main(void) {
   const double RATE = 250.0;
   printf("=== skimmer-deepcw-test ===\n");
+  /* The model sections run the RAW tail as draft (no distance/posterior
+   * bar) so that a draft-only hit deterministically precedes the first
+   * final text — the pipeline routing trap this gate guards. The shipped
+   * reliable-prefix rule (SKIM_DEEPCW_DRAFT_MIN 0.384 s, _P 0.9 — measured
+   * on the 80 m fixture) is proven as a pure function in section A2.
+   * FALSE = an explicit env still wins. */
+  g_setenv("SKIM_DEEPCW_DRAFT_MIN", "0", FALSE);
+  g_setenv("SKIM_DEEPCW_DRAFT_P", "0", FALSE);
 
   /* ---- (A) commit rule ------------------------------------------------- */
   printf("[A] commit rule (sliding window, frame cursor)\n");
@@ -227,6 +235,60 @@ int main(void) {
     g_free(m); g_string_free(out, TRUE);
   }
 
+  /* ---- (A3) word gaps: what is glued, what passes near the cursor ------ */
+  printf("[A3] word gaps\n");
+  {
+    guint T = 400; float *m; GString *out = g_string_new(NULL);
+    guint64 cur, spt; gboolean lsp; double conf;
+    /* a weak gap after a SHORT word (DE, CQ) stays: only a torn call TAIL
+     * (left ≥ 3, right ≤ 2) is glued */
+    m = logp_new(T); cur = 0; spt = 0; lsp = TRUE; g_string_truncate(out, 0);
+    guint tt = spikes_text(m, 10, 10, "DE"); spike(m, tt, SPACE, 0.55f);
+    tt = spikes_text(m, tt + 10, 10, "OK1MDK"); spike(m, tt, SPACE, 0.55f);
+    tt = spikes_text(m, tt + 10, 10, "CQ"); spike(m, tt, SPACE, 0.55f);
+    tt = spikes_text(m, tt + 10, 10, "TEST"); spike(m, tt, SPACE, 0.97f);
+    skim_deepcw_commit_ex(m, T, 0, &cur, 50, 4, &lsp, &spt, out, &conf, NULL, 0, 0.0);
+    check("weak gaps after DE and CQ (short LEFT piece) are kept",
+          strcmp(out->str, "DE OK1MDK CQ TEST ") == 0);
+    g_free(m);
+    /* the torn tail still glues: OK1C Z → OK1CZ */
+    m = logp_new(T); cur = 0; spt = 0; lsp = TRUE; g_string_truncate(out, 0);
+    tt = spikes_text(m, 10, 10, "OK1C"); spike(m, tt, SPACE, 0.55f);
+    tt = spikes_text(m, tt + 10, 10, "Z"); spike(m, tt, SPACE, 0.97f);
+    skim_deepcw_commit_ex(m, T, 0, &cur, 50, 4, &lsp, &spt, out, &conf, NULL, 0, 0.0);
+    check("weak gap before a 1-char tail is still glued (OK1C Z → OK1CZ)", strcmp(out->str, "OK1CZ ") == 0);
+    g_free(m);
+    /* a gap the model placed 2 frames BEFORE the last committed char (no
+     * committed gap near it) passes once; a re-read of a COMMITTED gap
+     * 3 frames before the cursor is squeezed */
+    m = logp_new(T); cur = 0; spt = 0; lsp = TRUE; g_string_truncate(out, 0);
+    spikes_text(m, 10, 10, "DE");                     /* D@10 E@20        */
+    guint n = skim_deepcw_commit_ex(m, T, 0, &cur, 50, 4, &lsp, &spt, out, &conf, NULL, 0, 0.0);
+    check("setup: DE committed, cursor on E", n == 2 && cur == 20);
+    g_free(m);
+    m = logp_new(T);
+    spikes_text(m, 11, 10, "DE");                     /* re-read, +1      */
+    spike(m, 18, SPACE, 0.9f);                        /* gap placed 2 before E's cursor */
+    spikes_text(m, 30, 10, "OK");
+    n = skim_deepcw_commit_ex(m, T, 0, &cur, 50, 4, &lsp, &spt, out, &conf, NULL, 0, 0.0);
+    check("a gap placed just before the cursor passes (DE OK), cursor never moves back",
+          strcmp(out->str, "DE OK") == 0 && cur == 40 && spt == 18);
+    g_free(m);
+    m = logp_new(T);
+    spikes_text(m, 11, 10, "DE"); spike(m, 17, SPACE, 0.9f);   /* the committed gap, jittered */
+    spikes_text(m, 31, 10, "OK"); spike(m, 37, SPACE, 0.9f);   /* a gap placed 3 before K's cursor, no committed gap near */
+    spikes_text(m, 50, 10, "1M");
+    n = skim_deepcw_commit_ex(m, T, 0, &cur, 50, 4, &lsp, &spt, out, &conf, NULL, 0, 0.0);
+    check("a re-read of the committed gap is squeezed, a new gap before the cursor passes",
+          strcmp(out->str, "DE OK 1M") == 0);
+    g_free(m);
+    /* a gap far behind the cursor (an old read) never passes */
+    m = logp_new(T); spike(m, 5, SPACE, 0.9f); spikes_text(m, 70, 10, "X");
+    n = skim_deepcw_commit_ex(m, T, 0, &cur, 50, 4, &lsp, &spt, out, &conf, NULL, 0, 0.0);
+    check("a gap far behind the cursor is an old read: squeezed", strcmp(out->str, "DE OK 1MX") == 0);
+    g_free(m); g_string_free(out, TRUE);
+  }
+
   /* ---- (A2) the draft: the tail guard's reading, display only ---------- */
   printf("[A2] draft (tail-guard reading)\n");
   {
@@ -236,9 +298,9 @@ int main(void) {
     spikes_text(m, 340, 10, "DE");                  /* inside the tail  */
     GString *out = g_string_new(NULL), *dr = g_string_new(NULL);
     GString *out2 = g_string_new(NULL);
-    guint64 cur = 0, cur2 = 0; gboolean lsp = TRUE, lsp2 = TRUE;
+    guint64 cur = 0, cur2 = 0, spt = 0; gboolean lsp = TRUE, lsp2 = TRUE;
     double conf = 0, conf2 = 0;
-    guint n = skim_deepcw_commit_ex(m, T, 0, &cur, 70, 4, &lsp, out, &conf, dr);
+    guint n = skim_deepcw_commit_ex(m, T, 0, &cur, 70, 4, &lsp, &spt, out, &conf, dr, 0, 0.0);
     guint n2 = skim_deepcw_commit(m, T, 0, &cur2, 70, 4, &lsp2, out2, &conf2);
     check("draft: tail characters land in the draft, not in out",
           n == 8 && strcmp(out->str, "CQ TEST ") == 0 && strcmp(dr->str, "DE") == 0);
@@ -253,7 +315,7 @@ int main(void) {
     spikes_text(m, 152, 10, "TEST"); spike(m, 201, SPACE, 0.95f);
     spikes_text(m, 342, 10, "DE"); spike(m, 362, SPACE, 0.9f); spike(m, 364, SPACE, 0.9f);
     g_string_truncate(dr, 0);
-    n = skim_deepcw_commit_ex(m, T, 0, &cur, 70, 4, &lsp, out, &conf, dr);
+    n = skim_deepcw_commit_ex(m, T, 0, &cur, 70, 4, &lsp, &spt, out, &conf, dr, 0, 0.0);
     check("draft: a jittered re-read commits nothing and re-reads the draft (double gap squeezed)",
           n == 0 && strcmp(out->str, "CQ TEST ") == 0 && strcmp(dr->str, "DE ") == 0 && cur == 200);
     g_free(m);
@@ -265,23 +327,41 @@ int main(void) {
     spike(m, 432 - 100, cls_of('B'), 0.9f);         /* re-placed B      */
     spike(m, 445 - 100, cls_of('R'), 0.9f);         /* tail: 445 > 430  */
     g_string_truncate(dr, 0);
-    n = skim_deepcw_commit_ex(m, T, 100, &cur, 70, 4, &lsp, out, &conf, dr);
+    n = skim_deepcw_commit_ex(m, T, 100, &cur, 70, 4, &lsp, &spt, out, &conf, dr, 0, 0.0);
     check("draft: the slide commits what cleared the tail, the rest stays draft",
           n == 7 && strcmp(out->str, "CQ TEST DE OK1B") == 0 && strcmp(dr->str, "R") == 0 && cur == 430);
     g_free(m);
     /* final text ending in a gap: a tail that starts with a gap shows no
      * double space in the draft */
     m = logp_new(T); g_string_truncate(out, 0); g_string_truncate(dr, 0);
-    cur = 0; lsp = TRUE;
+    cur = 0; lsp = TRUE; spt = 0;
     spikes_text(m, 240, 10, "DE"); spike(m, 270, SPACE, 0.9f);
     spike(m, 335, SPACE, 0.9f); spike(m, 345, cls_of('K'), 0.9f);   /* tail */
-    n = skim_deepcw_commit_ex(m, T, 0, &cur, 70, 4, &lsp, out, &conf, dr);
+    n = skim_deepcw_commit_ex(m, T, 0, &cur, 70, 4, &lsp, &spt, out, &conf, dr, 0, 0.0);
     check("draft: a gap after a final gap is squeezed out of the draft",
           strcmp(out->str, "DE ") == 0 && strcmp(dr->str, "K") == 0 && lsp);
     g_free(m);
+    /* the reliable prefix: draft_min frames from the window end and the
+     * posterior bar cut the reading at the FIRST failing spike — nothing
+     * behind it shows even if it would pass on its own */
+    m = logp_new(T); g_string_truncate(out, 0); g_string_truncate(dr, 0); cur = 0; lsp = TRUE; spt = 0;
+    spikes_text(m, 240, 10, "DE"); spike(m, 270, SPACE, 0.9f);        /* final */
+    spike(m, 335, cls_of('O'), 0.95f);   /* dist 65 ≥ 24, p ok → draft */
+    spike(m, 345, cls_of('K'), 0.95f);   /* dist 55 → draft              */
+    spike(m, 355, cls_of('1'), 0.60f);   /* p < 0.9 → cut here           */
+    spike(m, 365, cls_of('M'), 0.95f);   /* behind the cut: not shown    */
+    spike(m, 390, cls_of('D'), 0.95f);   /* dist 10 < 24 anyway          */
+    n = skim_deepcw_commit_ex(m, T, 0, &cur, 70, 4, &lsp, &spt, out, &conf, dr, 24, 0.9);
+    check("draft: the reliable prefix — cut at the first weak spike, nothing behind it",
+          strcmp(out->str, "DE ") == 0 && strcmp(dr->str, "OK") == 0);
+    g_string_truncate(dr, 0); cur = 0; lsp = TRUE; spt = 0; g_string_truncate(out, 0);
+    n = skim_deepcw_commit_ex(m, T, 0, &cur, 70, 4, &lsp, &spt, out, &conf, dr, 24, 0.0);
+    check("draft: no posterior bar → cut only at the distance bar",
+          strcmp(dr->str, "OK1M") == 0);
+    g_free(m);
     /* silence: no draft */
-    m = logp_new(200); g_string_truncate(out, 0); g_string_truncate(dr, 0); cur = 0; lsp = TRUE;
-    n = skim_deepcw_commit_ex(m, 200, 0, &cur, 50, 4, &lsp, out, &conf, dr);
+    m = logp_new(200); g_string_truncate(out, 0); g_string_truncate(dr, 0); cur = 0; lsp = TRUE; spt = 0;
+    n = skim_deepcw_commit_ex(m, 200, 0, &cur, 50, 4, &lsp, &spt, out, &conf, dr, 0, 0.0);
     check("draft: silence → no draft either", n == 0 && dr->len == 0);
     g_free(m); g_string_free(out, TRUE); g_string_free(out2, TRUE); g_string_free(dr, TRUE);
   }

@@ -1080,6 +1080,20 @@ Headless-verified on the 80 m fixture: the gray tail firms in place, no
 doubled word, no hole; ~56 ops/s band-wide, worst drain 0.2 ms. Richard's
 live look on the draft pending (his instance still runs the pre-draft
 build). Full account under SKM-3 in `docs/BACKLOG.md`.
+**Draft made readable + DeepCW word gaps (2026-09-13 afternoon).** His look
+at the raw draft: "není nic čitelné" — measured: the last 384 ms of the
+window read 11–44 % right, so the draft is now the tail's RELIABLE PREFIX
+(≥ 0.384 s from the end, posterior ≥ 0.9: 98 % right, lead ≈ 0.6 s;
+`SKIM_DEEPCW_DRAFT_MIN/_P`). His second look: "lepší, ale nedělá mezery
+mezi slovy" — not the draft (finals identical, widget == FreqLog): DeepCW
+finals lose word gaps. Fixed two of three causes (weak-gap glue only for a
+torn call tail and never before a known short word; a gap placed on the
+cursor passes unless a re-read of the committed gap): +5 % spaces, 34 vs 33
+stations, none lost. The third — the model emits no space after a long
+pause / at an over boundary — resisted an envelope-based gap twice (5 dits
+at the WPM: 13 stations lost; fixed 0.6 s: 6 lost + mutations) and was
+REMOVED; a real keyed detector would be the prerequisite. Gate deepcw 58
+checks, 13 gates green. Details under SKM-3 in `docs/BACKLOG.md`.
 
 ## Layout
 

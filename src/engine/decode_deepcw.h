@@ -84,16 +84,22 @@ guint skim_deepcw_commit(const float *logp, guint T, guint64 w0,
                          guint64 *cursor, guint tail, guint margin,
                          gboolean *last_space, GString *out, double *conf);
 
-/* The same rule, plus the DRAFT: every spike INSIDE the tail guard (beyond
- * the cursor/margin, spaces squeezed on from the final text) is appended
- * to `draft` — the model's current reading of the not-yet-final tail. It
- * is display only (the pane shows it dim) and is re-read at the next
- * tick; the cursor and last_space move only for final characters. NULL
- * for draft behaves exactly like skim_deepcw_commit. */
+/* The same rule, plus the DRAFT: the spikes INSIDE the tail guard (beyond
+ * the cursor/margin, spaces squeezed on from the final text) are the
+ * model's current reading of the not-yet-final tail; its RELIABLE PREFIX
+ * is appended to `draft` — the reading is cut at the first spike closer
+ * than draft_min frames to the window end or below the draft_p posterior
+ * (0 / 0.0 = the whole tail). Display only (the pane shows it dim), re-read
+ * at the next tick; the cursor and last_space move only for final
+ * characters. NULL for draft behaves exactly like skim_deepcw_commit. */
+/* *space_t = frame of the last committed word gap (0 = none): a gap the
+ * model placed ON or just before the cursor still passes unless it is a
+ * re-read of that committed gap. */
 guint skim_deepcw_commit_ex(const float *logp, guint T, guint64 w0,
                             guint64 *cursor, guint tail, guint margin,
-                            gboolean *last_space, GString *out, double *conf,
-                            GString *draft);
+                            gboolean *last_space, guint64 *space_t,
+                            GString *out, double *conf,
+                            GString *draft, guint draft_min, double draft_p);
 
 G_END_DECLS
 

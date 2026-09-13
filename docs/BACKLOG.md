@@ -775,6 +775,55 @@ gray char — that is what gray means; Richard's live look decides whether
 the flicker is acceptable (the switch is the fallback). NOT built: a
 draft for v2 (its per-element draft is already live per char).
 
+**Live verdict on the raw draft (Richard, 2026-09-13 ~14:37): "tohle není
+nic čitelné".** Measured why on the 80 m fixture (`SKIM_DEEPCW_TAILDUMP`,
+every draft spike paired with the final character that later landed on the
+same frame ±4): the model's reading of the last 384 ms of the window is
+11–44 % right (mostly insertions that never become final), 71 % at
+384–512 ms, 85–92 % beyond — so the raw tail flickered garbage at 2 Hz.
+**Reliable-prefix rule, shipped:** the draft is the tail reading cut at the
+first spike closer than `SKIM_DEEPCW_DRAFT_MIN` (0.384 s) to the window end
+or below posterior `SKIM_DEEPCW_DRAFT_P` (0.9) — 98.3 % right, 99 % beyond
+512 ms, a third of the raw draft's characters, lead over the final ≈ 0.6 s.
+Finals bit-identical with the draft on/off (decode log cmp). Gate: A2 keeps
+the raw-tail units, the model sections run the raw tail on purpose (so a
+draft-only hit precedes the first text — the routing trap), the prefix rule
+is proven as a pure function. His look at the rule: "dobrý, je to lepší,
+ale teď to má zase tendenci nedělat mezery mezi slovy".
+
+**Word gaps (same afternoon).** Not the draft: finals identical either way;
+widget mirror == FreqLog in 52/52 checks (`SKIM_PANE_DEBUG` now logs
+routed text and both tails). The DeepCW finals themselves lose gaps, three
+ways, measured with the dump (unique gaps, re-reads deduped): (1)
+`drop_weak_tears` glued every weak gap next to a ≤ 2-char piece — but a
+short LEFT piece is a word (DE, CQ, TU, K, R, 73: 1488 gaps dropped per
+replay, "DEOK1FHI", "CQOL"); (2) a gap the model places ON or just before
+the last committed character's frame was squeezed as a re-read (~400 real
+losses); (3) the model emits NO space at all after a long pause or at an
+over boundary (a fifth of consecutive committed characters sit > 1.9 s
+apart with no gap; the glued "DE" + call cases had 0.64–1.0 s of silence
+and no space spike in any read). Fixed (1): glue only a torn call TAIL
+(left ≥ 3, right ≤ 2) and never when the right piece is a known short
+word/prosign (`SKIM_DEEPCW_GAP_WORDS`, default K R CQ DE TU 73 88 GL GM GA
+GE GN KN SK AR BK UR ES DX RR). Fixed (2): a gap within 2×margin before
+the cursor passes unless it is a re-read of the last committed gap
+(`space_t` memory); the cursor never moves back. Measured on the fixture:
+spaces 1914 → 2011 (+5 %), 34 stations vs 33 (+DK3GG), no station lost, no
+mutation; glued DE unchanged (that class is (3)). Gate A3: DE/CQ gaps kept,
+OK1C Z still glued, pre-cursor gap passes once, re-read squeezed, old read
+squeezed — 58 checks. **(3) attempted and REMOVED, twice measured:** a
+space from the ENVELOPE (longest unkeyed run on the line bin between two
+committed characters, keyed = above half-way between the window peak and
+the floor, snapshotted per job) — 5 dits at the estimated WPM: 33 → 31
+stations, 13 lost, mutations OL1BI/DJ6UXD/K1J, reports 2807 → 1766 (the
+WPM estimate overshoots and a real 3-dit gap passes the bar); a fixed
+0.6 s bar: spaces +1775 (far more than the ~400 long pauses), 6 stations
+lost, DL3GAKF/DJ6UXDJ/OK1DSA minted — the half-way keyed threshold reads
+"silence" all over weak and QSB channels. Dead end as built; a real keyed
+detector (hysteresis, env_lo floor, mark-frame anchoring) would be the
+prerequisite, not a bar. So the model's omitted gaps after long pauses
+remain; the pane shows "DE" + a call glued where the operator paused.
+
 ### SKM-4 — In-app waterfall with decodes placed by frequency, click to set TX
 - **Type:** idea · **Severity:** — · **Status:** doing — half 1 DONE 2026-09-05 (M8 in SCOPE): engine tap + view + palettes + drag-pan + absolute-frequency history + the waterfall flowing through a retune (SDR HP kick, IQ centre stamps, largest-segment rows — Richard's live verdict on 80 m) + the callsign column with click-to-tune + logbook prefill (LIVE-verified 22:05) + the column's tooltip carrying kHz / speed / dB / heard / age (a dB after the call tried and taken out on his look) — and the station list DELETED on his word (~23:30); half 2 (click sets TX) deferred to sdr-for-linux `SDR-12`; half 1 SHIPPED in v0.4.0 (2026-09-06)
 - **Source:** e-mail from Roy Andre Løntjern, LB0EI, 2026-08-29; answered 2026-08-30
