@@ -1063,6 +1063,23 @@ puts OK1DOL/OK1MDK on their real frequencies. Latency ≈ 1.5 s on the GPU.
 Classical v2 stays the default; Richard runs DeepCW on CUDA live (live27);
 next: gray draft text in the pane via the phase-B ops, the station-table
 QSY rule, OL1B/OK1C-class tears.
+**DeepCW LIVE first look + gray DRAFT built (2026-09-13).** Richard on the
+engine live (20 m, quiet Sunday band): "zatím to překládá dobře", the delay
+is noticeable, its verdict waits for a CW contest. Then the draft, on his
+word with a recorded return point (main 45435e9): `skim_deepcw_commit_ex`
+returns the tail guard's reading as a draft; the backend composes an over
+region (pending final words plain + draft dim) through the decode.h pane
+ops at the end of `process()`, OPEN/SET/CLOSE, no `fresh`, `pane_own`
+FALSE — extractor, station table, spots and decode log untouched by
+construction; `SKIM_DEEPCW_DRAFT=0` switches it off. Pipeline fix on the
+way: ops-only hits route by the backend's tone offset (`hit_placeholder`),
+or a draft on a tone > 25 Hz off centre opened a never-closed region in
+another pane slot. Gate deepcw 35 → 50 (draft units, pane invariant with
+the model, whole-pipeline routing at +40 Hz — red on the pre-fix code).
+Headless-verified on the 80 m fixture: the gray tail firms in place, no
+doubled word, no hole; ~56 ops/s band-wide, worst drain 0.2 ms. Richard's
+live look on the draft pending (his instance still runs the pre-draft
+build). Full account under SKM-3 in `docs/BACKLOG.md`.
 
 ## Layout
 

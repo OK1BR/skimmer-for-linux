@@ -611,7 +611,15 @@ static void apply_over(App *app, double freq_hz, SkimPaneOpKind kind,
   const gsize before = skim_pane_log_over_len(fl->log);
   const SkimPaneOp op = { kind, erase, final_len, (char *)text, NULL };
   skim_pane_log_apply(fl->log, &op);
-  if (!pane_routed(app, freq_hz))
+  const gboolean routed = pane_routed(app, freq_hz);
+  if (g_getenv("SKIM_PANE_DEBUG")) {
+    g_printerr("pane: over %s %.2f len %zu final %u erase %u %s |%s|\n",
+               kind == SKIM_PANE_OP_OPEN ? "OPEN" : kind == SKIM_PANE_OP_SET ? "SET"
+               : kind == SKIM_PANE_OP_CLOSE ? "CLOSE" : "APPEND",
+               freq_hz, strlen(text), final_len, erase,
+               routed ? "routed" : "history", text);
+  }
+  if (!routed)
     return;
   /* Widget mirror: take back the previous region (or, on OPEN, the shown
    * draft), then insert the new view. Over text is ASCII — bytes == chars. */

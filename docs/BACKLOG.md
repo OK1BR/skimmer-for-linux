@@ -727,6 +727,54 @@ tail ≈ 1.5 s on the GPU. Next lever if he wants the pane to feel live: the
 model's uncommitted tail as gray DRAFT text through the phase-B pane ops
 (`take_pane_op`), firming up at commit — the extractor path unchanged.
 
+**Gray draft — BUILT (2026-09-13 afternoon; Richard's live verdict on the
+engine first: "zatím to překládá dobře… zpoždění tam sice trochu je, ale jak
+bude moc nepříjemné se uvidí až při nějakém závodě", then his "zkus jít do
+toho dalšího návrhu" with the return point recorded: main 45435e9).**
+`skim_deepcw_commit_ex()` = the commit rule plus a `draft` string: every
+spike inside the tail guard (beyond the cursor/margin, spaces squeezed on
+from the final text) is the model's CURRENT reading of the not-yet-final
+tail; the cursor and last_space move only for final characters, and the
+plain `skim_deepcw_commit()` is the same call with draft = NULL (gate: bit-
+identical output). The backend composes an over region through the decode.h
+pane ops at the END of `process()`, after the one-word extraction: region =
+the committed words still waiting in `out` (plain, `final_len`) + the draft
+(dim) — so the pipeline's one-word-per-call trickle never leaves a hole
+between the appended text and the draft; OPEN when a region appears, SET on
+change only, CLOSE("") when it empties, on a gate-closed tick and in
+`resync`; no op carries `fresh` (the decode log never sees a draft),
+`pane_own` stays FALSE (d.text is appended by the pipeline as before), so
+extractor, station table, spot path and log are untouched by construction.
+Kill switch `SKIM_DEEPCW_DRAFT=0`. **Pipeline trap found by design review
+and fixed:** an ops-only hit (draft, no decode) used to carry a zeroed
+decode → eff_off 0 → before the first text pins the frequency lock the draft
+routed at the channel CENTRE; with the tone > 25 Hz off centre (the app's
+pane-slot merge radius) the region opened in ANOTHER pane slot than the text
+and was never closed — stale gray text. `hit_placeholder()` gives such hits
+the backend's `tone_offset_hz`; the lock still updates on decoded-text hits
+only. Gate `skimmer-deepcw-test` 35 → 50 checks: (A2) draft unit cases
+(tail chars land in the draft not in out, jittered re-read re-reads it, the
+slide commits what cleared the tail, a re-placed copy is not draft, gap
+squeeze across the seam, silence → no draft); (C) the vtable with the model:
+d.text + ops applied to ONE SkimPaneLog in the pipeline's order — at every
+step the text outside the region == the appended text, a dim tail was
+shown, no `fresh`, after the over the region is CLOSED and pane == text;
+and the WHOLE offline pipeline with a tone +40 Hz off centre: every over op
+within 25 Hz of the text (8.0 Hz measured; the pre-fix pipeline goes RED at
+37.8 Hz — house rule kept). 13 gates green. **Headless-verified** (Broadway,
+isolated config, 80 m fixture replay, CDP click on the OK1MDK label, a
+burst of screenshots 160 ms apart): "OK1MD" black + "K T" gray → "OK1MDK "
+black + "O" gray → "OK" gray → "O" black + "KA" gray — the tail firms in
+place, no doubled word, no hole; region lifecycle on the fixed slot
+SET…CLOSE OPEN SET…; ~56 over ops/s band-wide, worst drain 0.1–0.2 ms at
+~210 ev/s (`SKIM_LAG_DEBUG`). `SKIM_PANE_DEBUG` now also logs every over
+op (kind, Hz, len, final, routed/history). Known and inherent: the tail
+reading is unstable while it is draft ("1E" → "1ME" → "MDE" → "DK" on
+OK1MDK) and a noise tail on a gated channel can show a flickering single
+gray char — that is what gray means; Richard's live look decides whether
+the flicker is acceptable (the switch is the fallback). NOT built: a
+draft for v2 (its per-element draft is already live per char).
+
 ### SKM-4 — In-app waterfall with decodes placed by frequency, click to set TX
 - **Type:** idea · **Severity:** — · **Status:** doing — half 1 DONE 2026-09-05 (M8 in SCOPE): engine tap + view + palettes + drag-pan + absolute-frequency history + the waterfall flowing through a retune (SDR HP kick, IQ centre stamps, largest-segment rows — Richard's live verdict on 80 m) + the callsign column with click-to-tune + logbook prefill (LIVE-verified 22:05) + the column's tooltip carrying kHz / speed / dB / heard / age (a dB after the call tried and taken out on his look) — and the station list DELETED on his word (~23:30); half 2 (click sets TX) deferred to sdr-for-linux `SDR-12`; half 1 SHIPPED in v0.4.0 (2026-09-06)
 - **Source:** e-mail from Roy Andre Løntjern, LB0EI, 2026-08-29; answered 2026-08-30

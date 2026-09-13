@@ -45,6 +45,7 @@ typedef struct {
   int    workers;    /* async inference threads                 (2)      */
   int    batch;      /* windows per model run on a worker      (32)      */
   int    debug;      /* SKIM_DEEPCW_DEBUG: 1 = ticks, 2 = + frames      */
+  gboolean draft;    /* SKIM_DEEPCW_DRAFT (1): gray draft tail in the pane */
 } DcwTune;
 
 static DcwTune g_tune;
@@ -68,6 +69,7 @@ static void tune_init(void) {
     g_tune.workers   = CLAMP((int)env_d("SKIM_DEEPCW_WORKERS", 2), 1, 8);
     g_tune.batch     = CLAMP((int)env_d("SKIM_DEEPCW_BATCH", 32), 1, 256);
     g_tune.debug     = (int)env_d("SKIM_DEEPCW_DEBUG", 0);
+    g_tune.draft     = env_d("SKIM_DEEPCW_DRAFT", 1) != 0;
     g_once_init_leave(&g_tune_once, 1);
   }
 }
@@ -222,12 +224,24 @@ static void drop_weak_tears(GArray *sp, double bar) {
 guint skim_deepcw_commit(const float *logp, guint T, guint64 w0,
                          guint64 *cursor, guint tail, guint margin,
                          gboolean *last_space, GString *out, double *conf) {
+  return skim_deepcw_commit_ex(logp, T, w0, cursor, tail, margin, last_space,
+                               out, conf, NULL);
+}
+
+guint skim_deepcw_commit_ex(const float *logp, guint T, guint64 w0,
+                            guint64 *cursor, guint tail, guint margin,
+                            gboolean *last_space, GString *out, double *conf,
+                            GString *draft) {
   const guint64 w1 = w0 + T;
   tune_init();
   GArray *sp = ctc_collapse(logp, T, w0);
   drop_weak_tears(sp, g_tune.space_p);
   guint n = 0;
   double psum = 0.0;
+  /* The space squeeze runs on through the tail: a draft that starts with
+   * a gap right after a final gap shows no double space. It is written
+   * back only when a character is FINAL — the draft never moves state. */
+  gboolean ls = *last_space;
   /* Sliding window: the whole ring is re-read every tick, so the model
    * always has its full left context (dropping committed audio from the
    * window tore words and lost stations on the 80 m fixture: 34 → 27).
@@ -240,18 +254,28 @@ guint skim_deepcw_commit(const float *logp, guint T, guint64 w0,
    * consecutive spaces are squeezed. */
   for (guint i = 0; i < sp->len; i++) {
     const Spike *sk = &g_array_index(sp, Spike, i);
-    if (w1 < tail || sk->t > w1 - tail) break;
+    const gboolean in_tail = w1 < tail || sk->t > w1 - tail;
+    if (in_tail && !draft) break;
+    /* Same cursor/margin rule for the tail — a re-placed copy of the last
+     * final character must not reappear as draft either. */
     if (sk->cls == DCW_SPACE) {
-      if (sk->t <= *cursor || *last_space) continue;
-      *last_space = TRUE;
+      if (sk->t <= *cursor || ls) continue;
+      ls = TRUE;
     } else {
       if (sk->t <= *cursor + margin) continue;
-      *last_space = FALSE;
+      ls = FALSE;
+    }
+    if (in_tail) {
+      /* DRAFT: the model's current reading of the tail guard — display
+       * only, re-read (and possibly changed) at the next tick. */
+      g_string_append_c(draft, DCW_CHARS[sk->cls]);
+      continue;
     }
     g_string_append_c(out, DCW_CHARS[sk->cls]);
     psum += sk->p;
     n++;
     *cursor = sk->t;
+    *last_space = ls;
   }
   g_array_free(sp, TRUE);
   if (conf) { *conf = n ? psum / n : 0.0; }
@@ -284,6 +308,19 @@ typedef struct {
   double  freq_hz;
   gboolean dead;
   gboolean nomodel;
+  /* Pane draft (display only, decode.h pane ops): the model's reading of
+   * the tail guard shows dim in the pane right after the tick and firms
+   * (or changes) ~tail_s later when it commits. The over region = the
+   * committed words still waiting in `out` (plain) + `draft` (dim), so
+   * the pipeline's one-word-per-call cadence never leaves a hole between
+   * the appended text and the draft. Ops carry no `fresh` — the decode
+   * log, extractor, station table and spot path never see a draft. */
+  GString *draft;               /* tail-guard reading from the last tick   */
+  GString *pane_last;           /* last region text sent (dedup)           */
+  gsize    pane_last_fin;
+  gboolean pane_open;           /* an over region is open in the pane      */
+  gboolean pane_dirty;          /* out/draft changed since the last compose */
+  GArray  *ops;                 /* pending SkimPaneOp (take_pane_op)       */
   float  *tile;                 /* scratch [ring_frames][DCW_BINS]         */
   /* async: one job in flight per channel; the result waits in the mailbox
    * for the engine thread, which runs the commit rule (deterministic order,
@@ -437,6 +474,8 @@ static gpointer dcw_channel_new(double rate) {
   DcwState *st = g_new0(DcwState, 1);
   st->rate = rate;
   st->out = g_string_new(NULL);
+  st->draft = g_string_new(NULL);
+  st->pane_last = g_string_new(NULL);
   st->refs = 1;
   const double nf = rate / DCW_BIN_HZ;
   const guint N = (guint)llround(nf);
@@ -504,7 +543,61 @@ static void state_unref(DcwState *st) {
   g_free(st->sring); g_free(st->ring); g_free(st->tile);
   g_free(st->res_logp);
   g_string_free(st->out, TRUE);
+  g_string_free(st->draft, TRUE);
+  g_string_free(st->pane_last, TRUE);
+  if (st->ops) {
+    for (guint i = 0; i < st->ops->len; i++) {
+      SkimPaneOp *op = &g_array_index(st->ops, SkimPaneOp, i);
+      g_free(op->text);
+      g_free(op->fresh);
+    }
+    g_array_free(st->ops, TRUE);
+  }
   g_free(st);
+}
+
+/* ---- pane draft (display only) ------------------------------------------ */
+static void pane_queue(DcwState *st, SkimPaneOpKind kind, char *text,
+                       guint final_len) {
+  if (!st->ops) { st->ops = g_array_new(FALSE, FALSE, sizeof(SkimPaneOp)); }
+  SkimPaneOp op = { kind, 0, final_len, text, NULL };
+  g_array_append_val(st->ops, op);
+}
+
+/* Compose the over region from the pending final words + the draft and
+ * queue ONE op when it differs from what the pane shows: OPEN when a region
+ * appears, SET on change, CLOSE("") when it empties. Called at the end of
+ * process() — after the one-word extraction — because the pipeline appends
+ * d.text BEFORE it drains the ops and the app inserts appended text ahead
+ * of an open region: per call the pane reads "word appended, region =
+ * remainder + draft". Composing earlier would double the word at the seam. */
+static void pane_compose(DcwState *st) {
+  if (!g_tune.draft || !st->pane_dirty) return;
+  st->pane_dirty = FALSE;
+  const gsize fin = st->out->len;
+  GString *reg = g_string_new_len(st->out->str, (gssize)fin);
+  g_string_append_len(reg, st->draft->str, (gssize)st->draft->len);
+  if (reg->len == 0) {
+    if (st->pane_open) {
+      pane_queue(st, SKIM_PANE_OP_CLOSE, g_strdup(""), 0);
+      st->pane_open = FALSE;
+      g_string_truncate(st->pane_last, 0);
+      st->pane_last_fin = 0;
+    }
+    g_string_free(reg, TRUE);
+    return;
+  }
+  if (st->pane_open && fin == st->pane_last_fin &&
+      strcmp(reg->str, st->pane_last->str) == 0) {
+    g_string_free(reg, TRUE);
+    return;
+  }
+  pane_queue(st, st->pane_open ? SKIM_PANE_OP_SET : SKIM_PANE_OP_OPEN,
+             g_strdup(reg->str), (guint)fin);
+  st->pane_open = TRUE;
+  g_string_assign(st->pane_last, reg->str);
+  st->pane_last_fin = fin;
+  g_string_free(reg, TRUE);
 }
 
 static void dcw_channel_free(gpointer state) {
@@ -599,9 +692,12 @@ static void dcw_apply(DcwState *st, const float *logp, guint To, guint64 w0) {
   double conf = 0;
   const gsize before = st->out->len;
   const guint64 cursor0 = MAX(st->committed, w0);
-  const guint n = skim_deepcw_commit(logp, To, w0, &st->committed, st->tail_f,
-                                     st->margin_f, &st->last_space, st->out,
-                                     &conf);
+  g_string_truncate(st->draft, 0);
+  const guint n = skim_deepcw_commit_ex(logp, To, w0, &st->committed,
+                                        st->tail_f, st->margin_f,
+                                        &st->last_space, st->out, &conf,
+                                        g_tune.draft ? st->draft : NULL);
+  st->pane_dirty = TRUE;             /* out and/or the draft moved       */
   if (n) {
     /* Confidence of the pending emission: length-weighted merge. */
     const gsize tot = st->out->len;
@@ -620,9 +716,9 @@ static void dcw_apply(DcwState *st, const float *logp, guint To, guint64 w0) {
   }
   if (g_tune.debug) {
     g_printerr("deepcw: %.2f kHz T=%u ratio %.1f dB duty %.2f wpm %.0f "
-               "commit %u |%s| cursor %" G_GUINT64_FORMAT "\n",
+               "commit %u |%s| draft |%s| cursor %" G_GUINT64_FORMAT "\n",
                st->freq_hz / 1000.0, To, st->ratio_db, st->duty, st->wpm, n,
-               st->out->str + before, st->committed);
+               st->out->str + before, st->draft->str, st->committed);
   }
 }
 
@@ -640,6 +736,8 @@ static void dcw_tick(DcwState *st) {
       g_printerr("deepcw: %.2f kHz T=%u closed ratio %.1f dB duty %.2f\n",
                  st->freq_hz / 1000.0, T, st->ratio_db, st->duty);
     }
+    /* the over ended (or never was): no draft may linger in the pane */
+    if (st->draft->len) { g_string_truncate(st->draft, 0); st->pane_dirty = TRUE; }
     return;
   }
   /* Tile: channel bins at 27..37, peak-normalised, log1p; rest zero. */
@@ -787,7 +885,7 @@ static gboolean dcw_process(gpointer state, const float *iq, guint nframes,
       dcw_frame(st);
     }
   }
-  if (st->out->len == 0) return FALSE;
+  if (st->out->len == 0) { pane_compose(st); return FALSE; }
   /* One WORD per call (the drain runs every ~256 ms per channel): the
    * extractor and the station table then see the same cadence of hits
    * they were tuned on with v2's per-character stream, instead of one
@@ -801,6 +899,8 @@ static gboolean dcw_process(gpointer state, const float *iq, guint nframes,
   memcpy(out->text, st->out->str, n);
   out->text[n] = '\0';
   g_string_erase(st->out, 0, (gssize)n);
+  st->pane_dirty = TRUE;             /* the word leaves the region       */
+  pane_compose(st);
   out->confidence     = CLAMP(st->out_conf, 0.0, 1.0);
   out->freq_offset_hz = st->off_ema;
   out->speed          = st->wpm;
@@ -821,6 +921,16 @@ static void dcw_resync(gpointer state) {
   st->sfill = 0; st->spos = 0; st->since = 0;
   st->committed = st->frames_abs;
   st->last_space = TRUE;
+  if (st->draft->len) { g_string_truncate(st->draft, 0); st->pane_dirty = TRUE; }
+  pane_compose(st);
+}
+
+static gboolean dcw_take_pane_op(gpointer state, SkimPaneOp *op) {
+  DcwState *st = state;
+  if (!st->ops || !st->ops->len) return FALSE;
+  *op = g_array_index(st->ops, SkimPaneOp, 0);
+  g_array_remove_index(st->ops, 0);
+  return TRUE;
 }
 
 void skim_decode_deepcw_debug(gpointer state, SkimDeepcwDebug *dbg) {
@@ -830,6 +940,7 @@ void skim_decode_deepcw_debug(gpointer state, SkimDeepcwDebug *dbg) {
   dbg->wpm = st->wpm; dbg->frames_abs = st->frames_abs;
   dbg->committed = st->committed; dbg->ticks = st->ticks; dbg->dead = st->dead;
   dbg->inflight = st->inflight;
+  dbg->draft_len = (guint)st->draft->len; dbg->pane_open = st->pane_open;
 }
 
 const SkimDecodeBackend *skim_decode_deepcw(void) {
@@ -842,7 +953,7 @@ const SkimDecodeBackend *skim_decode_deepcw(void) {
     .tone_offset_hz = dcw_tone_offset_hz,
     .set_freq       = dcw_set_freq,
     .take_aux_text  = NULL,
-    .take_pane_op   = NULL,
+    .take_pane_op   = dcw_take_pane_op,
     .resync         = dcw_resync,
   };
   return &backend;

@@ -115,6 +115,19 @@ static GArray *hit_take_ops(const SkimDecodeBackend *cw, gpointer dec) {
   return ops;
 }
 
+/* A hit that carries only display text (aux / pane ops, no decode) gets a
+ * zeroed decode — except the tone offset, which routes it: a DeepCW draft
+ * precedes the first final text by ~tail_s, and before that text pins the
+ * frequency lock the channel CENTRE would route it. With the tone > 25 Hz
+ * off centre the draft then opens its region in another pane slot than the
+ * text lands in, and that region is never closed — stale gray text. The
+ * lock itself still updates only on decoded-text hits. */
+static void hit_placeholder(const SkimDecodeBackend *cw, gpointer dec,
+                            SkimDecode *d) {
+  memset(d, 0, sizeof(*d));
+  if (cw->tone_offset_hz) { d->freq_offset_hz = cw->tone_offset_hz(dec); }
+}
+
 static void hit_free_ops(GArray *ops) {
   if (!ops)
     return;
@@ -777,7 +790,7 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
         GArray *ops = hit_take_ops(cw, p->dec[SL(c, WIDE_LANE)]);
         if (!got && !aux && !ops)
           continue;
-        if (!got) { memset(&d, 0, sizeof(d)); }
+        if (!got) { hit_placeholder(cw, p->dec[SL(c, WIDE_LANE)], &d); }
         Hit h = { .chan = c, .slot = WIDE_LANE, .eff_off = d.freq_offset_hz,
                   .contested = FALSE, .d = d, .aux = aux, .ops = ops };
         g_array_append_val(p->hits, h);
@@ -815,7 +828,7 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
           GArray *ops = hit_take_ops(cw, p->dec[SL(c, lane)]);
           if (!got && !aux && !ops)
             continue;
-          if (!got) { memset(&d, 0, sizeof(d)); }
+          if (!got) { hit_placeholder(cw, p->dec[SL(c, lane)], &d); }
           Hit h = { .chan = c, .slot = lane,
                     .eff_off = skim_tone_split_slot_hz(sp, s) +
                                d.freq_offset_hz,

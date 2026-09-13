@@ -18,6 +18,8 @@
 
 #include "engine/decode.h"
 #include "engine/decode_deepcw.h"
+#include "engine/pane_log.h"
+#include "engine/pipeline.h"
 
 static int fails, checks;
 static void check(const char *what, int ok) {
@@ -123,6 +125,32 @@ static guint run_state(const SkimDecodeBackend *be, gpointer st, const float *iq
   return hits;
 }
 
+/* Pipeline routing witnesses (text_cb / over_cb, offline = caller thread). */
+typedef struct {
+  guint  seq;                  /* event counter                          */
+  guint  text_n, text_seq;     /* first text: sequence number            */
+  double text_hz;              /* first text's frequency                 */
+  guint  over_n, over_seq;
+  double over_hz;              /* first over op's frequency              */
+  double over_min, over_max;   /* frequency range of ALL over ops        */
+  double over_maxdev;          /* max |over hz − text hz|, computed last */
+} RouteSeen;
+static void route_text_cb(double hz, const char *text, gpointer user) {
+  RouteSeen *r = user; (void)text;
+  r->seq++;
+  if (r->text_n++ == 0) { r->text_hz = hz; r->text_seq = r->seq; }
+}
+static void route_over_cb(double hz, SkimPaneOpKind kind, guint erase,
+                          const char *text, guint final_len, gpointer user) {
+  RouteSeen *r = user; (void)kind; (void)erase; (void)text; (void)final_len;
+  r->seq++;
+  if (r->over_n++ == 0) { r->over_hz = hz; r->over_seq = r->seq; r->over_min = r->over_max = hz; }
+  /* the text hz is known only after the first ops: keep the range of
+   * every op's hz and compare against the text at the end */
+  r->over_min = MIN(r->over_min, hz);
+  r->over_max = MAX(r->over_max, hz);
+}
+
 int main(void) {
   const double RATE = 250.0;
   printf("=== skimmer-deepcw-test ===\n");
@@ -197,6 +225,65 @@ int main(void) {
     check("weak gap before a 2-char piece is glued (OK2B TK → OK2BTK), weak gap between words kept",
           strcmp(out->str, "OK2BTK TEST ") == 0);
     g_free(m); g_string_free(out, TRUE);
+  }
+
+  /* ---- (A2) the draft: the tail guard's reading, display only ---------- */
+  printf("[A2] draft (tail-guard reading)\n");
+  {
+    guint T = 400; float *m = logp_new(T);
+    spikes_text(m, 10, 10, "CQ"); spike(m, 100, SPACE, 0.95f);
+    spikes_text(m, 150, 10, "TEST"); spike(m, 200, SPACE, 0.95f);
+    spikes_text(m, 340, 10, "DE");                  /* inside the tail  */
+    GString *out = g_string_new(NULL), *dr = g_string_new(NULL);
+    GString *out2 = g_string_new(NULL);
+    guint64 cur = 0, cur2 = 0; gboolean lsp = TRUE, lsp2 = TRUE;
+    double conf = 0, conf2 = 0;
+    guint n = skim_deepcw_commit_ex(m, T, 0, &cur, 70, 4, &lsp, out, &conf, dr);
+    guint n2 = skim_deepcw_commit(m, T, 0, &cur2, 70, 4, &lsp2, out2, &conf2);
+    check("draft: tail characters land in the draft, not in out",
+          n == 8 && strcmp(out->str, "CQ TEST ") == 0 && strcmp(dr->str, "DE") == 0);
+    check("draft: the final output is identical to the plain rule",
+          n == n2 && strcmp(out->str, out2->str) == 0 && cur == cur2 &&
+          lsp == lsp2 && fabs(conf - conf2) < 1e-6);
+    check("draft: the cursor stays on the last FINAL character", cur == 200);
+    g_free(m);
+    /* the same window re-read, spikes jittered +2, a double gap in the tail */
+    m = logp_new(T);
+    spikes_text(m, 12, 10, "CQ"); spike(m, 102, SPACE, 0.95f);
+    spikes_text(m, 152, 10, "TEST"); spike(m, 201, SPACE, 0.95f);
+    spikes_text(m, 342, 10, "DE"); spike(m, 362, SPACE, 0.9f); spike(m, 364, SPACE, 0.9f);
+    g_string_truncate(dr, 0);
+    n = skim_deepcw_commit_ex(m, T, 0, &cur, 70, 4, &lsp, out, &conf, dr);
+    check("draft: a jittered re-read commits nothing and re-reads the draft (double gap squeezed)",
+          n == 0 && strcmp(out->str, "CQ TEST ") == 0 && strcmp(dr->str, "DE ") == 0 && cur == 200);
+    g_free(m);
+    /* the window slid by 100: DE + OK1B clear the tail, R is still inside;
+     * a re-placed copy of B two frames after the cursor is not draft */
+    m = logp_new(T);
+    spikes_text(m, 340 - 100, 10, "DE"); spike(m, 360 - 100, SPACE, 0.9f);
+    spikes_text(m, 400 - 100, 10, "OK1B");          /* abs 400..430     */
+    spike(m, 432 - 100, cls_of('B'), 0.9f);         /* re-placed B      */
+    spike(m, 445 - 100, cls_of('R'), 0.9f);         /* tail: 445 > 430  */
+    g_string_truncate(dr, 0);
+    n = skim_deepcw_commit_ex(m, T, 100, &cur, 70, 4, &lsp, out, &conf, dr);
+    check("draft: the slide commits what cleared the tail, the rest stays draft",
+          n == 7 && strcmp(out->str, "CQ TEST DE OK1B") == 0 && strcmp(dr->str, "R") == 0 && cur == 430);
+    g_free(m);
+    /* final text ending in a gap: a tail that starts with a gap shows no
+     * double space in the draft */
+    m = logp_new(T); g_string_truncate(out, 0); g_string_truncate(dr, 0);
+    cur = 0; lsp = TRUE;
+    spikes_text(m, 240, 10, "DE"); spike(m, 270, SPACE, 0.9f);
+    spike(m, 335, SPACE, 0.9f); spike(m, 345, cls_of('K'), 0.9f);   /* tail */
+    n = skim_deepcw_commit_ex(m, T, 0, &cur, 70, 4, &lsp, out, &conf, dr);
+    check("draft: a gap after a final gap is squeezed out of the draft",
+          strcmp(out->str, "DE ") == 0 && strcmp(dr->str, "K") == 0 && lsp);
+    g_free(m);
+    /* silence: no draft */
+    m = logp_new(200); g_string_truncate(out, 0); g_string_truncate(dr, 0); cur = 0; lsp = TRUE;
+    n = skim_deepcw_commit_ex(m, 200, 0, &cur, 50, 4, &lsp, out, &conf, dr);
+    check("draft: silence → no draft either", n == 0 && dr->len == 0);
+    g_free(m); g_string_free(out, TRUE); g_string_free(out2, TRUE); g_string_free(dr, TRUE);
   }
 
   /* ---- (B) tile builder / vtable ---------------------------------------- */
@@ -360,6 +447,114 @@ int main(void) {
       check("no cross-talk between batched channels",
             !strstr(os[0]->str, "DL1ABC") && !strstr(os[1]->str, "OK1BR") && !strstr(os[2]->str, "OK1BR"));
       for (int k = 0; k < 3; k++) { be->channel_free(sts[k]); g_free(iqs[k]); g_array_free(envs[k], TRUE); g_string_free(os[k], TRUE); }
+    }
+    /* The pane draft through the vtable: apply d.text, then the channel's
+     * pane ops, to ONE SkimPaneLog in the pipeline's order. Invariant at
+     * every step: everything outside the over region is exactly the
+     * appended text (no doubled word at the seam, no hole); a dim tail
+     * (final_len < text) was seen; no op ever carries `fresh` (the decode
+     * log never learns a draft); once the over is over and the mailbox
+     * drained, the region is CLOSED and the pane equals the text. */
+    {
+      GArray *env = keyer("CQ CQ DE OK1BR OK1BR K", 25.0, RATE, 40, 120);
+      float *iq = tone_iq(env, RATE, +20.0, 0.05f, 0.004f, 7);
+      gpointer st = be->channel_new(RATE);
+      SkimPaneLog *pl = skim_pane_log_new();
+      GString *o = g_string_new(NULL);
+      guint ops_n = 0, dim_n = 0, fresh_n = 0, bad_n = 0, open_n = 0, close_n = 0;
+      SkimDecode d; SkimPaneOp op;
+      const guint blk = 64;
+#define STEP(nfr, iqp) do { \
+        if (be->process(st, (iqp), (nfr), &d)) { g_string_append(o, d.text); skim_pane_log_append(pl, d.text); } \
+        while (be->take_pane_op(st, &op)) { \
+          ops_n++; \
+          if (op.fresh) fresh_n++; \
+          if (op.text && op.final_len < strlen(op.text)) dim_n++; \
+          if (op.kind == SKIM_PANE_OP_OPEN) open_n++; \
+          if (op.kind == SKIM_PANE_OP_CLOSE) close_n++; \
+          skim_pane_log_apply(pl, &op); g_free(op.text); g_free(op.fresh); \
+        } \
+        const gsize outside = skim_pane_log_len(pl) - skim_pane_log_over_len(pl); \
+        if (outside != o->len || strncmp(skim_pane_log_text(pl), o->str, o->len) != 0) bad_n++; \
+      } while (0)
+      for (guint i = 0; i < env->len; i += blk) {
+        STEP(MIN(blk, env->len - i), iq + 2 * i);
+        if (!sync_env) g_usleep(2000);
+      }
+      /* the over is over: 4 s more silence, paced so every tick completes,
+       * then drain the mailbox and the pending words */
+      {
+        float *z = g_new0(float, 2 * blk);
+        for (guint i = 0; i < 4 * (guint)RATE; i += blk) {
+          STEP(blk, z);
+          if (!sync_env) g_usleep(20000);
+        }
+        for (int k = 0; k < 60; k++) {
+          STEP(0, z);
+          SkimDeepcwDebug dg; skim_decode_deepcw_debug(st, &dg);
+          if (!dg.inflight && !dg.pane_open) break;
+          if (!sync_env) g_usleep(10000);
+        }
+        g_free(z);
+      }
+#undef STEP
+      printf("      pane |%s| text |%s| ops %u (open %u close %u dim %u) seam faults %u\n",
+             skim_pane_log_text(pl), o->str, ops_n, open_n, close_n, dim_n, bad_n);
+      check("pane ops arrive (OPEN … CLOSE)", ops_n > 0 && open_n >= 1 && close_n >= 1);
+      check("a dim draft tail was shown at least once", dim_n > 0);
+      check("no op carries `fresh` — the decode log never sees a draft", fresh_n == 0);
+      check("at every step the text outside the region == the appended text (no doubled word, no hole)",
+            bad_n == 0);
+      check("after the over: region closed, pane == committed text",
+            skim_pane_log_over_len(pl) == 0 && strcmp(skim_pane_log_text(pl), o->str) == 0);
+      check("the committed text still reads the call", strstr(o->str, "OK1BR") != NULL);
+      be->channel_free(st); skim_pane_log_free(pl); g_free(iq); g_array_free(env, TRUE); g_string_free(o, TRUE);
+    }
+    /* Routing through the WHOLE offline pipeline: a tone 40 Hz off the
+     * channel centre (past the app's 25 Hz pane-slot merge radius). The
+     * draft precedes the first final text; before that text pins the
+     * frequency lock, an ops-only hit used to route at the channel CENTRE
+     * — a region opened in another pane slot than the text, never closed
+     * (stale gray). Every over op must land within 25 Hz of the text. */
+    {
+      const double rate = 48000.0, centre = 14050000.0, off = 12040.0;
+      GArray *env = keyer("CQ CQ DE OK1BR OK1BR K CQ DE OK1BR K", 25.0, rate, 40, 80);
+      float *iq = tone_iq(env, rate, off, 0.3f, 0.002f, 8);
+      SkimPipelineConfig cfg = { 0 };
+      cfg.chan_bw_hz = 125.0;
+      cfg.cw_engine = SKIM_CW_ENGINE_DEEPCW;
+      SkimPipeline *p = skim_pipeline_new(&cfg);
+      RouteSeen rs = { 0 };
+      skim_pipeline_set_text_cb(p, route_text_cb, &rs);
+      skim_pipeline_set_over_cb(p, route_over_cb, &rs);
+      GError *perr = NULL;
+      const gboolean started = skim_pipeline_start_offline(p, &perr);
+      check("offline pipeline starts with the DeepCW engine",
+            started && strcmp(skim_pipeline_cw_engine_name(p), "deepcw") == 0);
+      if (perr) { printf("      %s\n", perr->message); g_clear_error(&perr); }
+      for (guint at = 0; at < env->len; at += 4800) {
+        skim_pipeline_feed(p, iq + 2 * at, MIN(4800u, env->len - at), rate, centre);
+        if (!sync_env) g_usleep(4000);
+      }
+      float *z = g_new0(float, 2 * 4800);
+      for (guint k = 0; k < 40; k++) {              /* 4 s of silence   */
+        skim_pipeline_feed(p, z, 4800, rate, centre);
+        if (!sync_env) g_usleep(20000);
+      }
+      g_free(z);
+      skim_pipeline_stop(p);
+      rs.over_maxdev = MAX(fabs(rs.over_min - rs.text_hz), fabs(rs.over_max - rs.text_hz));
+      printf("      text hits %u first @ %.1f Hz (seq %u); over ops %u first @ %.1f Hz (seq %u), "
+             "max |op − text| %.1f Hz\n", rs.text_n, rs.text_hz, rs.text_seq,
+             rs.over_n, rs.over_hz, rs.over_seq, rs.over_maxdev);
+      check("pipeline: text arrived on the tone (+40 Hz ± 15)",
+            rs.text_n > 0 && fabs(rs.text_hz - (centre + off)) < 15.0);
+      check("pipeline: over ops arrived, the first BEFORE the first text (draft precedes final)",
+            rs.over_n > 0 && rs.over_seq < rs.text_seq);
+      check("pipeline: every over op routes within 25 Hz of the text (same pane slot)",
+            rs.over_n > 0 && rs.over_maxdev <= 25.0);
+      skim_pipeline_free(p);
+      g_free(iq); g_array_free(env, TRUE);
     }
     /* noise only, 20 s: no phantom text */
     GArray *env0 = g_array_new(FALSE, FALSE, sizeof(float)); const float z = 0.0f;

@@ -67,6 +67,8 @@ typedef struct {
   guint    ticks;            /* inference runs so far                     */
   gboolean dead;             /* unusable rate / no runtime                */
   gboolean inflight;         /* async: a window is at the workers         */
+  guint    draft_len;        /* chars of tail-guard draft from the last tick */
+  gboolean pane_open;        /* an over region is open in the pane        */
 } SkimDeepcwDebug;
 void skim_decode_deepcw_debug(gpointer state, SkimDeepcwDebug *dbg);
 
@@ -81,6 +83,17 @@ void skim_decode_deepcw_debug(gpointer state, SkimDeepcwDebug *dbg);
 guint skim_deepcw_commit(const float *logp, guint T, guint64 w0,
                          guint64 *cursor, guint tail, guint margin,
                          gboolean *last_space, GString *out, double *conf);
+
+/* The same rule, plus the DRAFT: every spike INSIDE the tail guard (beyond
+ * the cursor/margin, spaces squeezed on from the final text) is appended
+ * to `draft` — the model's current reading of the not-yet-final tail. It
+ * is display only (the pane shows it dim) and is re-read at the next
+ * tick; the cursor and last_space move only for final characters. NULL
+ * for draft behaves exactly like skim_deepcw_commit. */
+guint skim_deepcw_commit_ex(const float *logp, guint T, guint64 w0,
+                            guint64 *cursor, guint tail, guint margin,
+                            gboolean *last_space, GString *out, double *conf,
+                            GString *draft);
 
 G_END_DECLS
 
