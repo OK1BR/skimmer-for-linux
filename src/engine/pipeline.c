@@ -903,6 +903,14 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
         L->at = tnow;
       }
       const double sig_hz = L->hz > 0 ? L->hz : raw_hz;
+      if (G_UNLIKELY(g_getenv("SKIM_FLOCK_DEBUG")) && d.text[0]) {
+        /* per-hit frequency bookkeeping: channel, slot, the backend's
+         * in-channel offset, the raw absolute Hz, the lock it landed on,
+         * the arbitration level, the text — for lock/ghost analyses */
+        g_printerr("flock: ch %u slot %u off %+7.1f raw %.1f lock %.1f lvl %.4g "
+                   "conf %.2f |%s|\n", c, h->slot, h->eff_off, raw_hz, sig_hz,
+                   p->lvl[SL(c, h->slot)], d.confidence, d.text);
+      }
       if (p->dlog) {
         char tbuf[24];
         pipe_log_stamp(p, b, tbuf, sizeof(tbuf));

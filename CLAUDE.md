@@ -1094,6 +1094,18 @@ pause / at an over boundary — resisted an envelope-based gap twice (5 dits
 at the WPM: 13 stations lost; fixed 0.6 s: 6 lost + mutations) and was
 REMOVED; a real keyed detector would be the prerequisite. Gate deepcw 58
 checks, 13 gates green. Details under SKM-3 in `docs/BACKLOG.md`.
+**END OF 2026-09-13 (Richard ~16:40: "budu dál testovat, pro tuto session
+je to prozatím vše").** Live = skimmer `builddir` 848cb66 + this docs/debug
+commit (live32, DeepCW on CUDA, draft on) against the installed
+sdr-for-linux 0.5.1. His "slyším CW, ale nic nepřekládá" was a QSO's weak
+side (CT1BMW) under G4BPJ, not the channel — and it surfaced a KEYED copy
+of strong stations at the DDS centre in the IQ stream (~20 dB down), to be
+filed in sdr-for-linux. `SKIM_FLOCK_DEBUG` added. Open, in order: (1) the
+unsigned commit 60fe31f (re-sign = amend + force-push of two commits, only
+on his "ano"); (2) file the DC keyed-copy finding in sdr-for-linux's
+BACKLOG and measure it there; (3) his verdict on the draft + word gaps
+after more testing; (4) the model's omitted gaps after long pauses (needs a
+real keyed detector); (5) latency verdict waits for a CW contest.
 
 ## Layout
 

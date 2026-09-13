@@ -824,6 +824,31 @@ detector (hysteresis, env_lo floor, mark-frame anchoring) would be the
 prerequisite, not a bar. So the model's omitted gaps after long pauses
 remain; the pane shows "DE" + a call glued where the operator paused.
 
+**"Slyším CW, ale nic nepřekládá" (Richard, 2026-09-13 ~16:20, VFO
+14022.14 then 14022.007, radio filter ~20 Hz).** Neither the channel nor the
+filter: the CW bank is 125 Hz spacing / ±62.5 Hz per channel, overlapping,
+and the skimmer reads the wideband IQ ahead of the receiver filter. A 60 s
+probe capture at his centre (`/var/tmp/skimmer-iq/iq-20260913-14022-192k.cf32`,
+centre 14022007) replayed through BOTH engines reads the station cleanly —
+"OK GA DR BRIAN VY 73 TU … CQ CQ CQ DE G4BPJ G4BPJ K", G4BPJ tabled with CQ
+by v2 (1.00) and DeepCW (0.90). The garbled live text ("CT P T BMW … DE
+G4BPJ RR") was the QSO partner CT1BMW, weaker and torn, interleaved with
+G4BPJ — one frequency, two sides; while G4BPJ listens the pane stands still
+although the ear hears the weak side. **Side finding, NOT the skimmer's:**
+the IQ stream carries a KEYED copy of a strong nearby station exactly at
+the DDS centre (0 Hz), ~20 dB below it, with the station's keying rhythm
+(20 ms envelope of the 0 Hz component vs the +131 Hz tone: 2.5× higher
+during its marks; the fine FFT shows a 0 Hz line with ±10 Hz keying
+sidebands; the plain DC offset is 4 dB UNDER a 12.5 Hz bin's noise, so it
+is an envelope product, not an offset). The centre channel then decodes
+that copy as the neighbour's text (v2 read G4BPJ's whole sign-off on
+channel 0 at offset 0.0 Hz while the station sat 131 Hz up) — and the
+centre is where the VFO always is without CTUN. Mechanism unknown
+(ADC/DDC IMD2? something in the sdr-for-linux IQ path?); to be filed and
+measured in sdr-for-linux. New env `SKIM_FLOCK_DEBUG=1` prints per hit:
+channel, slot, in-channel offset, raw Hz, lock Hz, arbitration level,
+confidence, text — the tool that separated the two channels here.
+
 ### SKM-4 — In-app waterfall with decodes placed by frequency, click to set TX
 - **Type:** idea · **Severity:** — · **Status:** doing — half 1 DONE 2026-09-05 (M8 in SCOPE): engine tap + view + palettes + drag-pan + absolute-frequency history + the waterfall flowing through a retune (SDR HP kick, IQ centre stamps, largest-segment rows — Richard's live verdict on 80 m) + the callsign column with click-to-tune + logbook prefill (LIVE-verified 22:05) + the column's tooltip carrying kHz / speed / dB / heard / age (a dB after the call tried and taken out on his look) — and the station list DELETED on his word (~23:30); half 2 (click sets TX) deferred to sdr-for-linux `SDR-12`; half 1 SHIPPED in v0.4.0 (2026-09-06)
 - **Source:** e-mail from Roy Andre Løntjern, LB0EI, 2026-08-29; answered 2026-08-30
