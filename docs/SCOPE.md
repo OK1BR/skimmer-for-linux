@@ -419,7 +419,7 @@ M0…M8 are cited from source comments — keep them.
   `--version` / `-v`, answered in `handle-local-options` so it prints from the
   LOCAL process and exits — it can never activate (raise) a running instance.
 - **Hysteresis on the reported spot frequency (2026-08-08).**
-  DONE 2026-08-08.)** `skim_spot_out_emit()` quantised with no memory:
+  `skim_spot_out_emit()` quantised with no memory:
   `out_hz = round(freq_hz / rh) * rh` (`src/engine/spot_out.c`). A station
   whose frequency estimate wanders across a grid boundary therefore gets a
   DIFFERENT reported frequency on every re-announce (180 s) although it never
