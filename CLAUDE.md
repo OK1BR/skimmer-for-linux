@@ -38,6 +38,36 @@ back to the radio panadapter and to the RBN. The full plan is in
   = `G` after each commit. Richard, 2026-09-13, after one unsigned commit
   (60fe31f) slipped in — that one stays as is, on his word.
 
+## Work queue — GitHub Issues (since 2026-09-18)
+
+Bugs, ideas, debt and anything still waiting for a live check are **GitHub
+Issues** (`gh issue list -R OK1BR/skimmer-for-linux`), not a file in `docs/`.
+`docs/BACKLOG.md` (SKM-1…SKM-20) left the tree on 2026-09-18: eight items were
+done, the rest became #3–#16 — every "BACKLOG" / "SKM-N" mention below refers
+to its last version, commit 96606bf. SKM-3's measured record (DeepCW) moved to
+`docs/DEEPCW.md`. Richard's reason: finished and long-verified items kept
+sitting there as "open", and nobody could see what was really left.
+
+- Labels: type `bug` / `enhancement` / `debt`; `severity: high` = wrong data
+  or something that leaves the machine wrong, `medium` = gets in the
+  operator's way, `low` = cosmetic or log noise; `needs-live-check` = done in
+  code, gates green, but the issue **stays open until the behaviour was seen
+  live**; `at-the-radio` = the check needs the rig; `deferred` = parked on
+  purpose.
+- A commit closes its issue with `Fixes #N` only when nothing is left to
+  verify live — otherwise `Refs #N`, and the issue is closed by hand once the
+  check passed. Before filing a "needs live check", look for evidence that
+  real operation already proved it (logs, contest data).
+- Issue text is public and goes out under Richard's name: English, never
+  hard-wrapped, shown to him (with a Czech translation) before it is posted.
+- `docs/` keeps only what can have value in the future (Richard, 2026-09-18):
+  binding rules, decisions with their rationale, hard-won protocol/DSP facts,
+  measured numbers that justify a choice, rejected approaches, plans for work
+  still ahead. Build diaries, gate counts, "state at the end of the day"
+  blocks and old contest notes do not belong there — git keeps them. Notes
+  from live operation may start in `docs/CONTEST-NOTES-<date>.md`, are triaged
+  into issues, and then the file leaves the tree.
+
 ## TCI facts that matter (from sdr-for-linux `docs/TCI-SCOPE.md`)
 
 - Server: `ws://<host>:40001`, `PROTOCOL:ExpertSDR3,1.9`.
@@ -700,7 +730,12 @@ as upstream GTK/Pango, no code change:** the day-1 numbers were 16
 warnings (8 images × 2, INT_MIN baseline, 16/16), reproduced byte-identical
 on our binary under an empty fontset (first `pango_context_get_metrics`
 returns 0/0 where fonts give 14550/3623; control run 0 lines); the source
-reading lives in sdr-for-linux's SDR-3 write-up. **SKM-6 fixed the same
+reading lives in sdr-for-linux's SDR-3 write-up. Re-open recipe if the
+warnings ever matter: `G_DEBUG=fatal-warnings gdb -batch -ex run -ex bt --args
+builddir/skimmer-for-linux` catches the first one with a backtrace; if the
+trace runs through `gtk_layout_manager_measure` and the Pango metrics are
+zero it is this again — check the font cache first (`fc-cache -rv`,
+`~/.cache/fontconfig`), not our code. **SKM-6 fixed the same
 day (Richard's "ano"):** a second launch used to re-run `on_activate` in the
 primary instance (second window, second App, second feed bind — reproduced
 headless: the primary's stderr showed its own feed failing to bind);
@@ -1038,8 +1073,8 @@ the decode.h vtable (20-point DFT tiles from the 250 Hz channel, 10 s ring,
 `SkimCwEngine` in the pipeline config + `SKIM_CW_ENGINE=v1|v2|deepcw`, gate
 `skimmer-deepcw-test` (27 checks, model part SKIPs without
 `SKIM_ORT_LIB`/`SKIM_DEEPCW_MODEL`) — **13 gates.** Offline A/B on the 20 m
-and the fresh 80 m contest fixture: full account under SKM-3 in
-`docs/BACKLOG.md` (wins EA6AOY, OK5O, OK1CZ, DL3GAK; costs: fewer hits →
+and the fresh 80 m contest fixture: full account in
+`docs/DEEPCW.md` (wins EA6AOY, OK5O, OK1CZ, DL3GAK; costs: fewer hits →
 station-table takeovers lose some S&P callers, OK1DOL parked on a spur by the
 same-call rule, mutation twins). Replays run inference INLINE (1.3–1.6×
 realtime, `SKIM_DEEPCW_SYNC=1` set by skimmer-replay); the app runs it on
@@ -1084,7 +1119,7 @@ the model, whole-pipeline routing at +40 Hz — red on the pre-fix code).
 Headless-verified on the 80 m fixture: the gray tail firms in place, no
 doubled word, no hole; ~56 ops/s band-wide, worst drain 0.2 ms. Richard's
 live look on the draft pending (his instance still runs the pre-draft
-build). Full account under SKM-3 in `docs/BACKLOG.md`.
+build). Full account in `docs/DEEPCW.md`.
 **Draft made readable + DeepCW word gaps (2026-09-13 afternoon).** His look
 at the raw draft: "není nic čitelné" — measured: the last 384 ms of the
 window read 11–44 % right, so the draft is now the tail's RELIABLE PREFIX
@@ -1098,7 +1133,7 @@ stations, none lost. The third — the model emits no space after a long
 pause / at an over boundary — resisted an envelope-based gap twice (5 dits
 at the WPM: 13 stations lost; fixed 0.6 s: 6 lost + mutations) and was
 REMOVED; a real keyed detector would be the prerequisite. Gate deepcw 58
-checks, 13 gates green. Details under SKM-3 in `docs/BACKLOG.md`.
+checks, 13 gates green. Details in `docs/DEEPCW.md`.
 **END OF 2026-09-13 (Richard ~16:40: "budu dál testovat, pro tuto session
 je to prozatím vše").** Live = skimmer `builddir` 848cb66 + this docs/debug
 commit (live32, DeepCW on CUDA, draft on) against the installed
