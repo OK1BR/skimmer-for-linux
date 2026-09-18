@@ -119,7 +119,7 @@ gboolean skim_pipeline_start_offline(SkimPipeline *p, GError **error);
 void     skim_pipeline_feed(SkimPipeline *p, const float *iq, guint nframes,
                             double rate, double center_hz);
 
-/* TX hold (docs/TX-HOLD-SCOPE.md): TRUE while the operator's own radio
+/* TX hold (docs/SCOPE.md, "TX hold"): TRUE while the operator's own radio
  * transmits. Live it is driven automatically from the TCI trx/tune
  * broadcasts (sdr-for-linux ≥ cc470af reports the real keyed state); the
  * offline harness/gates drive it by hand. While held the pipeline swallows

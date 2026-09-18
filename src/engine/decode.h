@@ -102,7 +102,7 @@ struct _SkimDecodeBackend {
 
   /* Resynchronize after a gap the channel did NOT see (the pipeline's TX
    * hold swallows blocks while the operator's own TX deafens the band —
-   * TX-HOLD-SCOPE): drop mid-character framer state and sub-bit
+   * SCOPE: TX hold): drop mid-character framer state and sub-bit
    * accumulators, KEEP acquisition/tracking — the channel must decode the
    * answering station from its first characters. Optional. */
   void (*resync)(gpointer state);

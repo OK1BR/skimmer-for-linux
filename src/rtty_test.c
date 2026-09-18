@@ -679,7 +679,7 @@ int main(void) {
     g_array_free(sym2, TRUE);
   }
 
-  /* -- TX hold (docs/TX-HOLD-SCOPE.md): own-transmission freeze --------------- */
+  /* -- TX hold (docs/SCOPE.md, "TX hold"): own-transmission freeze ------------ */
   {
     /* One station, an over → 8 s of dead band (the operator's own TX: the
      * radio's RX is deafened) → the station continues. WITH the hold the

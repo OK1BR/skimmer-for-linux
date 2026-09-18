@@ -34,7 +34,7 @@ typedef void (*SkimTciVfoCb)(double vfo_hz, gpointer user_data);
 
 /* The radio keyed/unkeyed (trx:0 OR tune:0 — sdr-for-linux ≥ cc470af reports
  * the REAL keyed state, CW/RTTY text keying included). tx = combined
- * trx||tune. Fires on change only. LWS thread. TX-HOLD-SCOPE. */
+ * trx||tune. Fires on change only. LWS thread. SCOPE: TX hold. */
 typedef void (*SkimTciTxCb)(gboolean tx, gpointer user_data);
 
 /* The server dropped the connection (WS closed while running). LWS thread.

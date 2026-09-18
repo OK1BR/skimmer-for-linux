@@ -175,7 +175,7 @@ struct _SkimPipeline {
   gint64            stream_us;                 /* stream time (offline clock) */
   volatile gint     cq_only;                   /* spot only CALLING stations */
 
-  /* TX hold (TX-HOLD-SCOPE): own TX deafens the band — swallow blocks so
+  /* TX hold (SCOPE: TX hold): own TX deafens the band — swallow blocks so
    * decode state freezes instead of releasing every channel. */
   volatile gint     tx_now;                    /* TCI trx/tune, or the setter */
   gboolean          holding;                   /* feed side: swallowing       */
@@ -671,7 +671,7 @@ static void spec_feed(SkimPipeline *p, const IqBlock *b) {
 
 static void process_block(SkimPipeline *p, IqBlock *b) {
   spec_feed(p, b);                             /* M8: picture first, always  */
-  /* TX hold (TX-HOLD-SCOPE): while the operator's own TX deafens the RX
+  /* TX hold (SCOPE: TX hold): while the operator's own TX deafens the RX
    * (T/R relay + 31 dB TX attenuators), the band the decoders would see is
    * self-inflicted silence — evaluating it releases every channel and the
    * ANSWERING station is re-acquired seconds late (Richard, live

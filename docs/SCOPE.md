@@ -9,6 +9,13 @@ Reverse Beacon Network.
 
 Author: Richard Fakenberg, **OK1BR**. Licence: GPL-3.0-or-later.
 
+This file says what the skimmer **is** and **why** it is built the way it is —
+decisions with their rationale, the measured numbers behind them, rejected
+approaches, and the contracts with the sibling apps. What is open lives in
+[GitHub Issues](https://github.com/OK1BR/skimmer-for-linux/issues); how each
+piece was built is the git history (the last diary-style version of this file:
+commit 825b170). The neural CW engine has its own record: `docs/DEEPCW.md`.
+
 ## Why this exists
 
 CW Skimmer (Windows, closed source) is the reference tool a whole segment of the
@@ -45,22 +52,32 @@ light native UI.
 ## Architecture
 
 ```
- TCI WS client ──► IQ block (192/384k float32, true orientation as received)
+ TCI WS client ──► IQ block (192/384k float32, true orientation as received;
+    │                        the block's centre stamped by the SDR — iq_stamp)
     │
-    ├─► polyphase channelizer ──► N narrow COMPLEX baseband channels (~50–500 Hz)
+    ├─► spectrum tap (spectrum.c) ──► waterfall rows (M8) — independent of the channelizer
+    │
+    ├─► polyphase channelizer ──► N narrow COMPLEX baseband channels
     │        (complex, phase-preserving — RTTY/PSK need phase, not just magnitude)
     │
-    ├─► pluggable decode backend per active channel
+    ├─► tone splitter (opt-in) — two carriers in ONE channel → a slot per carrier
+    │
+    ├─► pluggable decode backend per active channel / slot
     │        decode.h:  channel(complex baseband) → { text, confidence, freq, wpm/baud }
-    │        · decode_cw   (phase 1)
-    │        · decode_rtty (phase 2)
-    │        · decode_psk  (phase 3: BPSK31, BPSK63)
+    │        · decode_cw_v2   the CW default: soft-decision semi-Markov Viterbi
+    │        · decode_cw      the classical v1 (SKIM_CW_ENGINE=v1)
+    │        · decode_deepcw  neural, ONNX Runtime through ort_shim — docs/DEEPCW.md
+    │        · decode_rtty    45.45 Bd / 170 Hz Baudot (M7)
+    │        · decode_psk     planned — issue #16
     │
-    ├─► station tracker  (freq / callsign / SNR / WPM / first-last-heard)
+    ├─► callsign extraction + validation  (structure + ITU allocation + CW context + MASTER.SCP)
     │
-    ├─► callsign extraction + validation  (prefix regex + known-call dictionary + plausibility)
+    ├─► station tracker  (freq / callsign / SNR / WPM / first-last-heard; ghost merge)
     │
-    └─► output:  SPOT back to sdr-for-linux panadapter   ·   RBN telnet feed   ·   local list + log
+    ├─► dup query  (UDP to log-for-linux :2238 — NEW / B4 / DUP / INV → spot and pane colours)
+    │
+    └─► output:  SPOT back to the sdr-for-linux panadapter · local telnet feed (:7300)
+                 · own window: waterfall + callsign column + decode pane
 ```
 
 ### Key design decision: the channelizer is mode-agnostic and complex
@@ -78,8 +95,9 @@ infrastructure*, not a dead end.
   the TCI server uses to decimate IQ per client). In-tree copy under
   `vendor/wdsp` (a copy, not a submodule — matches `sdr-for-linux`). Decision:
   vendor the whole WDSP block first (bezbolestné), prune later if worth it.
-- **`waterfall.c` / `panadapter.c`** — the pure-Cairo renderer, when we add a
-  full skimmer panorama (a later phase; the feeder model doesn't need it early).
+- **`waterfall.c`** — its palette table, interpolation and percentile
+  noise-floor auto-range are copied into the M8 waterfall, so the two apps
+  colour a band alike.
 - **libwebsockets** — TCI client transport.
 
 ### Reference code (studied, not linked)
@@ -102,25 +120,24 @@ PSK) segment decoded at once — not the entire 3.5/7/14 MHz allocation.
 
 The skimmer is a **feeder**, not a second full SDR window:
 - Decodes and pushes `SPOT:…` back into `sdr-for-linux`, where labels render on
-  the existing panadapter and a click tunes (F6d-2e is done — we get it for free).
-- Its own window is a **light station list** (callsign / freq / mode / WPM|baud /
-  SNR / first-heard / last-heard) plus a decode log.
-- **RBN telnet feed is a goal** (native Linux RBN nodes are scarce) — this drives
-  a *robust* callsign validator; we must not spot garbage.
-- A full own-panorama waterfall (à la CW Skimmer) is a later, optional phase once
-  the decoder is good; `waterfall.c` can seed it. *(Pulled forward 2026-09-05 as
-  M8 on LB0EI's request, Richard's call — see the M8 entry.)*
+  the existing panadapter and a click tunes.
+- Its own window is light: the M8 waterfall with a callsign column, and the
+  decode pane below it. (The original station list was removed on 2026-09-05,
+  Richard's call, once the column carried everything it showed.)
+- A telnet spot feed in the CW Skimmer dialect — LOCAL clients only, by
+  decision (M6) — which still drives a *robust* callsign validator: we must
+  not spot garbage.
 
-## Milestones (each independently testable, in the `sdr-for-linux` house style)
+## Milestones
 
 Every milestone ships an offline/headless gate binary (`skimmer-*-test`) plus,
-where relevant, a live check against a running `sdr-for-linux`.
+where relevant, a live check against a running `sdr-for-linux`. The labels
+M0…M8 are cited from source comments — keep them.
 
-- **M0 — scaffold.** `meson` project, GPLv3, docs, engine skeleton (GLib-only,
-  headless) + a minimal GTK4/libadwaita window. Gate: `meson compile` is clean;
-  the empty app launches.
-- **M1 — TCI client + IQ ingest. IMPLEMENTED; orientation LIVE-VERIFIED
-  2026-07-15 the hard way:** the first live run decoded real stations mirrored
+- **M0 — scaffold.** `meson` project, GPLv3, engine skeleton (GLib-only,
+  headless) + a minimal GTK4/libadwaita window.
+- **M1 — TCI client + IQ ingest. Orientation live-verified 2026-07-15 the
+  hard way:** the first live run decoded real stations mirrored
   around the DDC centre (out-of-band CW spots) — the client was conjugating a
   wire that already carries true orientation (see the TCI facts above). Fixed:
   ingest is pass-through. WebSocket client (libwebsockets),
@@ -133,14 +150,13 @@ where relevant, a live check against a running `sdr-for-linux`.
   byte-stream Stream reassembly so WS fragmentation is invisible, IQ passed
   through as received, dds tracked live, outgoing text queue that M5's spot()
   already rides).
-  Offline gate: `skimmer-tci-test` — mock TCI server, 16 checks incl. the
-  orientation correlation (+12 kHz stays +12 kHz, image < −40 dB) and the spot
-  format. Live gate: `skimmer-tci-probe [host] [port] [rate] [secs]` — prints
-  handshake, IQ stats (effective vs. nominal rate), top spectrum peaks + an
-  ASCII panorama in true orientation; the eyeball check against the panadapter
-  (station above centre ⇒ positive offset) is the orientation verdict, since
-  the skimmer is read-only and cannot key a reference tone.
-- **M2 — polyphase channelizer. IMPLEMENTED (offline-verified 2026-07-15).**
+  Since 2026-09-05 the client also sends `iq_stamp:1;` after `iq_start`, takes
+  the stamped centre over the `dds` label and splits a block where the centre
+  changes inside it (M8), and parses `trx`/`tune` into a TX-state callback
+  (TX hold). Gates: `skimmer-tci-test` (a mock TCI server, incl. the
+  orientation correlation — +12 kHz stays +12 kHz, image < −40 dB — and the
+  spot wire format); live probe `skimmer-tci-probe [host] [port] [rate] [secs]`.
+- **M2 — polyphase channelizer.**
   Wideband IQ → N narrow **complex** channels via a polyphase filter bank
   (WDSP FFT / resampler). Gate: `skimmer-chan-test` —
   synthetic multi-tone input, verify per-channel isolation + alias rejection,
@@ -158,8 +174,7 @@ where relevant, a live check against a running `sdr-for-linux`.
   recovered to 0.01 Hz (phase preserved for RTTY/PSK), channel-edge tone −6 dB
   in both straddlers; at the real 192 k/125 Hz geometry (M = 1536) the whole
   segment channelizes in **0.9 % of one core**.
-- **M3 — CW decode backend. IMPLEMENTED (synthetic gate 2026-07-15; the
-  off-air A/B vs fldigi/CW Skimmer awaits a recorded capture).** Per-channel
+- **M3 — CW decode backend (the classical v1).** Per-channel
   envelope → adaptive threshold → dot/dash timing → adaptive WPM → Morse;
   HMM/Bayes for a ragged fist (planned refinement — v1 is classical).
   Implements `decode.h`. Gate: `skimmer-cw-test` on synthetic CW.
@@ -176,13 +191,10 @@ where relevant, a live check against a running `sdr-for-linux`.
   cycle, noise ≈ 4 % — peak ratio alone cannot tell a weak signal from noise).
   Estimates per event: WPM, SNR, confidence, and the tone offset inside the
   channel from the marks' phase slope (M5 refines spot frequencies with it).
-  Gate results: exact copy 15–35 WPM; 12 dB SNR, ±15 % jitter and 10 dB QSB
-  copy with ≤2 errors; 18→28 WPM re-locks; 20 s of noise emits nothing; and
-  end-to-end through the real channelizer the right channel copies while a
-  noise-only channel stays mute. (Adjacent-channel ghosts of very strong
-  stations are real signals — the M5 station tracker dedups them.)
-- **M4 — callsign extraction + validation. IMPLEMENTED (offline gate
-  2026-07-15).** Prefix/suffix regex + known-call dictionary + plausibility
+  Gate `skimmer-cw-test`: exact copy 15–35 WPM; 12 dB SNR, ±15 % jitter and
+  10 dB QSB copy with ≤ 2 errors; 20 s of noise emits nothing.
+- **M4 — callsign extraction + validation.** Prefix/suffix regex + known-call
+  dictionary + plausibility
   scoring; suppress garbage (RBN-grade). Gate: `skimmer-call-test` on a
   labelled decode corpus (precision/recall).
   Done as `callsign.c`: a structural parser over the four shapes real calls
@@ -195,16 +207,12 @@ where relevant, a live check against a running `sdr-for-linux`.
   scores 0.55 structural + 0.25 DE marker (survives ≤2 garbled tokens) +
   0.10 CQ window + 0.20 repetition (+0.05 at ≥3) + 0.15 known-call dictionary
   (MASTER.SCP format, `skim_callsign_dict_load`), spot threshold 0.70 — a lone
-  structurally-valid token is never spotted. Gate: 26 real calls accepted,
-  18 garbage shapes rejected, labelled corpus at precision 1.0 / recall 1.0,
-  token continuity across fragmented feeds, dictionary boost, and 2×4000-token
-  fuzz (E/T noise babble; random alnum single mentions) with zero spots.
-- **M5 — spot feeder + light UI. IMPLEMENTED (offline pipeline gate
-  2026-07-15; the live panadapter check awaits Richard at the radio).** Valid
-  call on a frequency → `SPOT:…` back over TCI (renders on the `sdr-for-linux`
-  panadapter, click tunes) + the station-list window + decode log. Gate: live —
-  spots appear on the radio panadapter and a click tunes correctly.
-  Done in three layers. `station.c`: tracker keyed by call with the ghost rule
+  structurally-valid token is never spotted.
+  Gate `skimmer-call-test` (labelled corpus + fuzz: E/T noise babble and
+  random alnum single mentions spot nothing).
+- **M5 — spot feeder.** Valid call on a frequency → `SPOT:…` back over TCI
+  (renders on the `sdr-for-linux` panadapter, click tunes). Three layers.
+  `station.c`: tracker keyed by call with the ghost rule
   — the same call within 300 Hz merges and the STRONGER report positions the
   station (adjacent-channel splatter of a big signal folds back into one spot).
   `spot_out.c`: per-call dedup (re-spot after 180 s or a >150 Hz QSY), global
@@ -213,16 +221,13 @@ where relevant, a live check against a running `sdr-for-linux`.
   blocks (bounded, drops counted), the engine thread channelizes, walks every
   channel through decoder + extractor, folds into the tracker and offers to
   the spot feeder; the bank (and per-channel state) rebuilds if the device IQ
-  rate changes mid-run. The GTK app is the light UI: host + connect toggle,
-  frequency-sorted station list (call/kHz/WPM/SNR/heard), tailing decode log,
-  1 Hz status line; engine events marshalled via g_idle_add. Offline gate
-  `skimmer-spot-test` (20 checks): tracker + policy units, then the WHOLE
-  chain over a real WebSocket — a mock TCI server streams a synthesized
-  two-station 48 kHz band, the pipeline spots BACK, and the mock asserts both
-  calls at ±30 Hz absolute (measured: exact to the Hz), zero bogus calls
-  (RBN precision end to end), zero dropped blocks.
-- **M6 — telnet spot feed. IMPLEMENTED (gate 2026-07-15); LOCAL-ONLY by
-  decision.** The RBN does not take spots from a skimmer directly — the
+  rate changes mid-run.
+  Gate `skimmer-spot-test`: tracker + policy units, then the WHOLE chain over
+  a real WebSocket — a mock TCI server streams a synthesized two-station band,
+  the pipeline spots BACK, and the mock asserts both calls to the Hz, zero
+  bogus calls, zero dropped blocks.
+- **M6 — telnet spot feed. LOCAL-ONLY by decision.** The RBN does not take
+  spots from a skimmer directly — the
   Aggregator (closed, Windows-only .NET, undocumented uplink protocol)
   connects TO the skimmer's telnet server (the CW Skimmer convention,
   default port 7300) and relays. Richard decided 2026-07-15 NOT to feed the
@@ -239,14 +244,9 @@ where relevant, a live check against a running `sdr-for-linux`.
   `spot_out` instance — the RBN is ALWAYS CQ-only (independent of the local
   panadapter switch) and gated at callsign score ≥0.85 (vs 0.70 locally:
   repetition, dictionary or DE+CQ context required, a single unmarked copy
-  is never fed), re-spot 600 s / QSY 100 Hz / 5 per s. Gate
-  `skimmer-rbn-test` (26 checks): handshake + line format + multi-client
-  broadcast against a local telnet sink, then the OFFLINE pipeline over a
-  synthesized three-station band — the two CQ callers arrive at the exact
-  kHz ONCE each (dedup across two band passes), the S&P answerer is tracked
-  locally but NEVER hits the wire, zero unvalidated lines.
-- **CW decoder v2 — soft-decision semi-Markov Viterbi. IMPLEMENTED
-  (offline 2026-07-15; the PIPELINE DEFAULT since 2026-08-04 — Richard's
+  is never fed), re-spot 600 s / QSY 100 Hz / 5 per s.
+- **CW decoder v2 — soft-decision semi-Markov Viterbi (the PIPELINE
+  DEFAULT since 2026-08-04 — Richard's
   call after the 2026-08-01 contest session ran it live all day. The
   classical v1 stays in the tree behind `SKIM_CW_V1=1`; the flip is
   measured on the 600 s YOTA-contest replay — v2 tables 19 stations to
@@ -267,9 +267,9 @@ where relevant, a live check against a running `sdr-for-linux`.
   reports), v2 the true **9A170NT** (121 reports, 0.90, CQ); contest A/B —
   same core stations, lone-E/T noise 15.6 → 11.6 %, 3 extra weak-signal
   calls each, ~60× realtime (v1 ~90×).
-- **Tone splitter — two stations in ONE channel decode separately.
-  IMPLEMENTED (offline 2026-07-16; opt-in `SKIM_TONE_SPLIT=1` until a live
-  session confirms it).** Motivation: the 14036 slot (live 2026-07-15) —
+- **Tone splitter — two stations in ONE channel decode separately
+  (2026-07-16; opt-in `SKIM_TONE_SPLIT=1` until a live session confirms it).**
+  Motivation: the 14036 slot (live 2026-07-15) —
   two carriers < 60 Hz apart share a channel, their envelopes beat and the
   decoder mutates BOTH calls. `tone_split.c` watches each channel's
   Welch-averaged spectrum (64-pt FFT, 2 s EMA); when it resolves ≥2
@@ -286,47 +286,24 @@ where relevant, a live check against a running `sdr-for-linux`.
   possible later stage): the slot goes CONTESTED, its text still shows but
   breeds no callsign candidates — the beat mutations stop reaching spots.
   Single-carrier channels ride a sample-exact passthrough (legacy path
-  bit-identical; unarmed, the splitter is not even built). Gate
-  `skimmer-split-test` (46 checks, BOTH CW backends): sideband immunity,
-  Δf 50/30 Hz both texts copy, Δf 15 Hz contested + never split, slot TTL
-  collapse/re-engage (90 s — a slot survives the other side's over), and
-  the whole offline pipeline with two stations in one channel — both calls
-  tracked to the Hz, zero mutations.
-- **Clickable callsigns in decoded text → logbook prefill (requested by
-  Richard 2026-08-01; IMPLEMENTED offline the same day, live check
-  pending).** The decode view already highlights callsigns; make them
-  clickable. A click behaves exactly like a panadapter spot click in
-  `sdr-for-linux`: tune the radio to the station (the row-activation
-  `vfo:0,0,<hz>` path already exists) and announce the click over TCI
-  (`rx_clicked_on_spot`/`clicked_on_spot` with call + exact frequency in Hz)
-  so `log-for-linux` reacts instantly — it prefills its Call entry, pulls its
-  window forward and focuses the field with the call selected. That logbook
-  side is implemented and live as of 2026-08-01 and needs the spot's exact
-  frequency (`hz > 0`) in the message for its QSY-away staleness check
-  (prefill is dropped when the VFO wanders > 200 Hz off the spot).
-  The open point resolved by reading the server: it did NOT relay a
-  client-sent click (its parser knew only `spot`/`spot_delete`/`spot_clear`;
-  the click broadcast was wired to its own panadapter alone), so the relay
-  was added to `sdr-for-linux`'s `tci_server.c` — both forms accepted from
-  any client, rebroadcast to every client as `rx_clicked_on_spot` + legacy
-  (its `sdrfl-tci-test` covers the relay). Skimmer side: a left click on
-  any whitespace-delimited pane token that validates as a callsign (ends
-  trimmed of punctuation/over marks; drag-select does not fire) issues
-  `skim_pipeline_tune` + the new `skim_pipeline_spot_clicked` →
-  `clicked_on_spot:call,hz;` with the pane's pinned slot frequency (exact
-  carrier, not the 100 Hz-stepped VFO); a hand cursor over clickable calls
-  is the affordance. Gate: `skimmer-tci-test` checks the wire format.
-  Live status (contest evening 2026-08-01): the skimmer SENDS on click and
-  the server RELAYS both forms — proven on the wire (an observer client
-  captured ~30 real clicks, YL3FT/YT6X/UX0LL/SD7X/…; SKIM_PANE_DEBUG
-  traces press→release→sent). The remaining open end is the LOGBOOK
-  prefill: log-for-linux fills only an EMPTY Call entry (typed text is
-  never overwritten, by design) and its build was being restarted during
-  the click tests — one click with an empty Call field against the current
-  logbook build still awaits Richard's confirmation.
-- **Dup-aware spot & decode coloring via the logbook (requested by Richard
-  2026-08-01; logbook side DONE, skimmer side IMPLEMENTED the same day —
-  gate `skimmer-dup-test`, live look pending).** Goal: the
+  bit-identical; unarmed, the splitter is not even built).
+  Slot TTL 90 s — a slot survives the other side's over. Gate
+  `skimmer-split-test` runs for BOTH CW backends.
+- **Clickable callsigns → logbook prefill (Richard, 2026-08-01).** A left
+  click on any whitespace-delimited pane token that validates as a callsign
+  (ends trimmed of punctuation/over marks; drag-select does not fire) behaves
+  exactly like a panadapter spot click: `skim_pipeline_tune` +
+  `clicked_on_spot:call,hz;` over TCI with the pane's pinned slot frequency
+  (exact carrier, not the 100 Hz-stepped VFO). `log-for-linux` prefills its
+  Call entry from it and needs the exact frequency (`hz > 0`) for its
+  QSY-away staleness check (the prefill is dropped when the VFO wanders
+  > 200 Hz off the spot); it fills only an EMPTY Call entry, by design. The
+  server side had to learn the relay: sdr-for-linux's `tci_server.c` accepts
+  `clicked_on_spot` / `rx_clicked_on_spot` from any client and rebroadcasts
+  both forms to every client.
+- **Dup-aware spot & decode colouring via the logbook (Richard, 2026-08-01).**
+  The operator must see at a glance which spotted calls are already worked,
+  so he does not click duplicates.
   operator must see at a glance which spotted calls are already worked, so
   he does not click duplicates. `log-for-linux` now runs a read-only UDP
   lookup service on `127.0.0.1:2238` (always on while the logbook runs;
@@ -349,50 +326,27 @@ where relevant, a live check against a running `sdr-for-linux`.
   flips to DUP on the next re-announce/query). Do NOT read the logbook's
   SQLite directly — the dup rule and active-contest context live in the
   logbook, the UDP answer is the contract.
-  Implementation (offline-proven 2026-08-01): `src/engine/dup_query.c` —
-  connected non-blocking UDP client, 60 s answer TTL, 2 s re-ask
-  suppression for unanswered calls; every failure mode collapses to
-  UNKNOWN = default colour (live-probed: answers carry a trailing
-  newline; malformed requests get silence). The pipeline owns one
-  instance (pipeline-lifetime — the cache rides out reconnects);
-  `spot_out` emit asks with a 5 ms budget and colours the SPOT ARGB via
-  the shared `skim_spot_argb_for_dup` rule (`SKIM_SPOT_ARGB` bright /
-  `SKIM_SPOT_ARGB_DUP` gray, spot_out.h); the pane highlight asks with
-  a 0 ms budget (`skim_pipeline_dup_verdict`, GTK thread never blocks)
-  and tints via a second gray underline tag — verdict sharpening between
-  overlapping scans swaps the tag. Gate `skimmer-dup-test` (10 checks:
-  verdict round-trips incl. the newline, request wire format, silence →
-  UNKNOWN, re-ask suppression, TTL survives the logbook closing, no
-  listener → UNKNOWN, the colour rule). Live look 2026-08-01: colours
-  work, but a just-logged QSO grayed the panadapter label only on the
-  next re-announce (≤180 s) — too slow for contest flow (Richard).
-  **PUSH extension (skimmer side IMPLEMENTED; logbook side IMPLEMENTED
-  2026-08-01 — `logfl_dup_srv_notify()`, sent from the :2238 socket to all
-  peers with a valid `DUP?` in the last 10 min, max 8 peers; fires on QSO
-  logged (manual + WSJT-X), delete, and cell edit incl. the OLD identity
-  when call/band/mode moved; gate `log-dupq-test` covers the push, live
-  query verified, first real logged QSO is the live push check —
-  **LIVE-VERIFIED 2026-08-01: a logged QSO grays the panadapter label
-  instantly, Richard confirmed**):** the
-  moment a
-  QSO is logged (or deleted/edited so a call's verdict changes), the
-  logbook sends the STANDARD answer datagram (`DUP <call>` / `B4 <call>`
-  / `NEW <call>`, same format, trailing newline fine) UNSOLICITED from
-  the :2238 socket to the source address of every `DUP?` request seen
-  recently (last ~10 min is plenty; just the last requester works too).
-  No new protocol: the skimmer parses it exactly like an answer — the
-  cache flips, and a colour-changing flip (green↔gray) repaints the
-  live panadapter label AT ONCE (resend of the last emission with only
-  the ARGB changed; dedup/re-announce schedule untouched; only labels
-  fresher than the radio's 10 min spot TTL) and re-tints the decode
-  pane within 2 s (periodic tail rescan). Do NOT write TCI `spot:`
-  from the logbook — two writers of one label race (the skimmer's
+  As built (`src/engine/dup_query.c`): a connected non-blocking UDP client,
+  60 s answer TTL, 2 s re-ask suppression for unanswered calls; every failure
+  mode collapses to UNKNOWN = default colour (answers carry a trailing
+  newline; malformed requests get silence). The pipeline owns one instance
+  (the cache rides out reconnects); `spot_out` asks with a 5 ms budget and
+  colours the SPOT ARGB via the shared `skim_spot_argb_for_dup` rule, the
+  pane highlight asks with a 0 ms budget (the GTK thread never blocks).
+  **Push:** the moment a QSO is logged (or deleted/edited so a call's verdict
+  changes) the logbook sends the STANDARD answer datagram UNSOLICITED from the
+  :2238 socket to every peer with a valid `DUP?` in the last 10 min (max 8).
+  No new protocol: the skimmer parses it exactly like an answer — the cache
+  flips, and a colour-changing flip repaints the live panadapter label AT
+  ONCE (a resend of the last emission with only the ARGB changed; the
+  dedup/re-announce schedule untouched; only labels fresher than the radio's
+  10 min spot TTL) and re-tints the decode pane within 2 s. Do NOT write TCI
+  `spot:` from the logbook — two writers of one label race (the skimmer's
   re-announce would repaint green until its cache expires). Gate
-  `skimmer-dup-test` covers the push path (unsolicited datagram →
-  change queue → cache flip; 25 checks since the INV verdict landed).
-- **INV verdict — contest-invalid stations gray out like dups.
-  (Richard's priority 2026-08-08, mid-WAE; DONE the same day.)** The logbook's :2238
-  dup service grew a FOURTH verdict on 2026-08-08 (log-for-linux commit
+  `skimmer-dup-test`.
+- **INV verdict — contest-invalid stations gray out like dups (Richard's
+  priority 2026-08-08, mid-WAE).** The logbook's :2238 dup service has a
+  FOURTH verdict (log-for-linux `8093437`):
   `8093437`): `INV <call>` = under the ACTIVE CONTEST's rules no valid
   QSO with this station is possible at all — e.g. WAE scores only
   EU↔non-EU, so for OK1BR every EU station answers INV; EUHFC is the
@@ -408,25 +362,36 @@ where relevant, a live check against a running `sdr-for-linux`.
   verdict string from a NEWER logbook must keep collapsing to UNKNOWN =
   default color, never crash the parser (that tolerance is why INV can
   ship on the logbook side first). Extend gate `skimmer-dup-test`:
-  INV round-trip, INV via push, unknown-verdict tolerance. Without this,
-  an EU spot during WAE stays bright green and invites a QSO the
-  rules score at zero — the logbook's entry row already warns in red,
-  but the operator hunts from the panadapter, hence the priority.
-  Implementation (2026-08-08): `SKIM_DUP_INV` in the verdict enum; the
-  "gray" decision now has ONE truth, `skim_dup_verdict_gray()` in
-  dup_query.h — the parser's flip rule and `skim_spot_argb_for_dup`
-  both call it, so a future verdict is added in exactly two lines
-  (parse + gray-set membership) and spot ARGB, pane tint, recolour
-  pushes all follow. Unknown verdict strings were already dropped
-  before the cache (gate-proven now, not just by reading). Gate grew
-  15 → 25 checks (INV round-trip/push/cache-survival, unknown-verdict
-  answer AND push tolerance, INV colour). Live wire check the same
-  afternoon against the running logbook mid-WAE: `DL1AA → INV`,
-  `K1AA → NEW`, `OK1BR → INV`, trailing newline as documented. The
-  full visual chain (gray label on the live panadapter) is the same
-  code path DUP took through its 2026-08-01 live verification; INV
-  changes only the string→enum map and the gray set.
-  Richard's request, across every app of the family).** Every app must open
+  The "gray" decision has ONE truth, `skim_dup_verdict_gray()` in
+  `dup_query.h` — the parser's flip rule and `skim_spot_argb_for_dup` both
+  call it, so a future verdict is added in exactly two lines.
+- **TX hold — decoding freezes during the operator's own transmission
+  (2026-08-15).** Reported by Richard live, first RTTY QSO attempts: "when I
+  answer a call, after my over it hangs and doesn't decode for a while."
+  Mechanism (verified from the radio side): while the SDR transmits, its RX
+  is deliberately deafened (T/R relay + both step attenuators at 31 dB — TX
+  protection), so the whole band disappears from the IQ stream for the length
+  of the over. Every acquired RTTY channel then rides its release logic (~2 s
+  under the bar), and when the answering station comes back right after
+  unkey, acquisition must re-converge first → the first seconds of the reply
+  are lost; CW trackers suffer the same physics. Radio side (sdr-for-linux
+  cc470af): `trx:0,true/false;` reports the REAL keyed state (any RF: MOX,
+  TUNE, CW and RTTY text keying — before, only the MOX button), broadcast by
+  the 500 ms reporter; worst-case ~500 ms key-on latency sits comfortably
+  inside the ~2 s release bar. As built: the pipeline swallows blocks while
+  held plus a 0.3 s post-TX settle grace (`HOLD_GRACE_S`), capped at 30 s
+  (`HOLD_CAP_S` — a stuck trx must not freeze the skimmer forever); an
+  optional `resync` backend hook resets framers at resume (RTTY and DeepCW
+  implement it); `skim_pipeline_set_tx_hold` is public for the offline
+  harness; the spectrum tap is fed BEFORE the hold check, so the waterfall
+  keeps flowing. Measured in the RTTY gate: WITH the hold the reply decodes
+  complete from its first character and nothing decodes from the held band;
+  WITHOUT it 77 garbage decodes leak during the own-TX silence and the
+  reply's head is lost. Live: the 2026-08-23 contest day logged 54 clean
+  hold/release pairs, none unpaired.
+- **A GNOME-correct About dialog — the family contract (written down
+  2026-08-04 at Richard's request, across every app of the family; built
+  2026-08-08).** Every app must open
   the same kind of About from its primary menu, and its strings must agree
   with what the `.desktop` entry and the AppStream metainfo already say —
   one truth about the app, not three. The contract, in `AdwAboutDialog`
@@ -447,33 +412,13 @@ where relevant, a live check against a running `sdr-for-linux`.
   launched the app from the app grid must be able to see which version he
   is running without leaving it — the About dialog is that place. A CLI
   flag is welcome on top, never instead.
-  **BUILT 2026-08-08.** The header bar's standalone gear button became the
-  family primary menu (hamburger, `open-menu-symbolic`, packed where the
-  gear sat): Preferences, then "About Skimmer for Linux" LAST — the same
-  form as sdr-for-linux, whose About (`src/gui.c`) supplied the field set;
-  `debug_info` follows log-for-linux's (GTK + libadwaita runtime versions,
-  TCI host, telnet-feed state, settings/MASTER.SCP/decode-log paths —
-  pasteable via the dialog's Copy button). Comments line = the metainfo
-  `<summary>` = the `.desktop` Comment, verbatim; acknowledgement section
-  credits vendored WDSP. On top (never instead): `--version` /`-v` on the
-  CLI, answered in `handle-local-options` so it prints from the LOCAL
-  process and exits — it can never activate (raise) a running instance.
-  Verified: build + all 10 gates green, `--version` prints 0.1.0 while
-  the live instance ran undisturbed. The dialog itself is code-true to
-  the family reference but NOT yet seen on screen — both family apps were
-  live mid-WAE, and a second GApplication instance would either forward
-  to or visually poke the operator's session. Look pending after the
-  contest (the running binary is the installed pre-About one anyway).
-- **The Website field in the repo header. (Written down 2026-08-04 at
-  Richard's request, across every one of his projects; DONE for THIS repo
-  2026-08-08.)** Every OK1BR repo had that field empty while its README
-  already points at [rifak.cz](https://rifak.cz) — so the GitHub sidebar,
-  the first place a visitor looks, linked nowhere. Set via
-  `gh repo edit OK1BR/skimmer-for-linux --homepage https://rifak.cz` and
-  verified by reading it back (`gh repo view --json homepageUrl`). The
-  sibling repos keep their own copy of this note — each gets set when
-  someone works that project.
-- **Hysteresis on the reported spot frequency. (Written down 2026-08-07;
+  As built: the header bar's primary menu (hamburger) holds Preferences, then
+  "About Skimmer for Linux" LAST; `debug_info` carries GTK + libadwaita
+  runtime versions, TCI host, telnet-feed state, the CW engine, the
+  settings / MASTER.SCP / decode-log paths. On top (never instead):
+  `--version` / `-v`, answered in `handle-local-options` so it prints from the
+  LOCAL process and exits — it can never activate (raise) a running instance.
+- **Hysteresis on the reported spot frequency (2026-08-08).**
   DONE 2026-08-08.)** `skim_spot_out_emit()` quantised with no memory:
   `out_hz = round(freq_hz / rh) * rh` (`src/engine/spot_out.c`). A station
   whose frequency estimate wanders across a grid boundary therefore gets a
@@ -501,25 +446,18 @@ where relevant, a live check against a running `sdr-for-linux`.
   separate *reported* one that is updated only past half a bin (widths past
   0.75 bin). **Principle only — neither repository carries any licence, so
   none of their code may be copied into this GPLv3 tree.**
-  Implementation (2026-08-08): `SpotMemo` carries `out_hz` + `out_rh` (the
-  grid it was quantised to); emit re-sends the stored value unless the raw
-  estimate sits > ¾ step from it (the "half a step plus a small margin",
-  matching the fork's 0.75-bin figure) OR the grid setting changed
-  (`out_rh` differs — a preference flip re-quantises on the next
-  re-announce instead of leaving the label on the old grid forever);
-  `Exact` is untouched (follows the estimate, no memory). Recolour resends
-  the stored `out_hz`. Gate `skimmer-spot-test` +5 checks (26 total):
-  boundary-parked station with ±few Hz jitter over four 181 s
-  re-announces keeps ONE reported value, a real QSY re-quantises at once,
-  a grid change re-quantises, Exact follows raw; verified the new check
-  FAILS on the pre-fix code (the alternation is what it catches).
-- **M7 — RTTY backend. IMPLEMENTED (offline gates 2026-08-15, mid-contest);
-  LIVE-VERIFIED the same morning** — real contest spots (LA1TV 14093.2,
-  IZ0FVD 14091.5 — `RTTY … 45 BPS CQ` on the telnet feed), clean
-  strong-station copy, 11 % CPU at 192 k/768 channels; open fixture-tunable
-  leaks are logged in CLAUDE.md (a non-45.45 digimode passes the squelch as
-  sustained garbage; FT8-band single-char leaks; a 297 s live capture in
-  `/var/tmp/skimmer-iq/` carries all the cases). `decode_rtty.c` implements `decode.h` for
+  As built: `SpotMemo` carries `out_hz` + `out_rh` (the grid it was quantised
+  to); emit re-sends the stored value unless the raw estimate sits > ¾ step
+  from it OR the grid setting changed; `Exact` is untouched (follows the
+  estimate, no memory); recolour resends the stored `out_hz`. The gate's
+  boundary-parked station FAILS on the pre-fix code — the alternation is what
+  it catches.
+- **M7 — RTTY backend (2026-08-15, mid-contest; live-verified the same
+  morning — real contest spots on the telnet feed, 11 % CPU at
+  192 k / 768 channels).** Known leaks, tunable on the recorded fixture: a
+  non-45.45 digimode passes the squelch as sustained garbage; FT8-band
+  single-char leaks.
+  `decode_rtty.c` implements `decode.h` for
   45.45 Bd / 170 Hz-shift Baudot: a Hann-periodogram pair finder (the WEAKER
   tone scores, so a lone carrier can never acquire; sub-bin centre from
   floor-subtracted tone centroids) → two NCOs riding the tracked centre
@@ -545,62 +483,25 @@ where relevant, a live check against a running `sdr-for-linux`.
   the tone splitter/focus env vars are CW-only (an FSK pair IS two carriers
   to the splitter). App: Preferences → Decoding → Mode (CW/RTTY, persisted
   `[decode] mode`, change reconnects the engine), speed column and tuned
-  header show Bd, About debug_info carries the mode. Gates:
-  `skimmer-rtty-test` (25 checks: hardcoded ITA2 bit vectors as the
-  independent table witness, offsets, figures/UOS, reversed polarity, AWGN,
-  QSB, selective fade, squelch on noise/keyed-CW/two-carrier, worst-case
-  straddler through the real wide bank, and the WHOLE offline pipeline in
-  RTTY mode — two CQing stations tabled exactly, mode RTTY, ±4 Hz, no
-  phantoms); `skimmer-chan-test` 18 → 25. 11 gates total.
-- **OPEN — RTTY over-head startup is confused (measured 2026-08-15 on the
-  live capture; a fix is still owed).** Live symptom (Richard, parked on a
-  fixed frequency): the first characters of every over are wrong and text
-  appears only after a delay. Measured offline on
-  `iq-20260815-rtty-live1-192k.cf32` (engine replay + a literal Python port
-  of `decode_rtty.c` on the SV1JDZ channel, text-identical to the engine):
-  every over head decodes `CQ DE SV1JDZ…` — the first `CQ ` is eaten,
-  deterministically. Four stacked causes, by share: (1) the 0.7 s
-  **settle embargo** runs before the UARTs are armed, so nothing in that
-  window is framed OR buffered — the "over heads are not eaten" pend
-  guarantee above only holds from arm onward; with the usual ~0.7 s diddle
-  preamble the acquisition hides in the preamble and settle lands exactly
-  on the first text chars; (2) **UART sync-in**: the framers arm
-  mid-character, a false start bit can frame garbage that passes the stop
-  check and flushes from pend as a garbled head (live: `L DEV1JDZ…`);
-  (3) **ok_ema reaches re-acquire at ~0** — between TX end and the ~3 s
-  periodogram release the framers grind noise and decay it, so the ×0.5
-  "keep half" at release is moot and the squelch re-proves 5 valid chars
-  every over → OPEN sits at ACQ + 1.53 s (0.7 settle + 5 × 0.165 s) on
-  every single over; (4) **acquisition** itself: PSD EMA τ 0.8 s against
-  the 8× bar = 0.5 s at 24 dB but seconds near threshold, and everything
-  sent before it is unrecoverable. Net: first text ~2.0 s after key-on for
-  a strong station. Derived, unmeasured: a FIGS falling into the settle
-  window prints the following number group as letters. Candidate fix,
-  Richard-approved direction pending: a **pre-roll replay** in the RTTY
-  backend after the CW squelch-attack pattern (~2 s baseband ring replayed
-  through the converged demod/UART after acquisition + settle) — covers
-  the settle window, pre-acquisition text and the sync-in garble at once.
-  Separate class spotted on the way (NOT startup): a reproducible mid-over
-  loss of ` S` after `DE` (`DEV1JDZ`, `VQJDZ` — engine and sim agree), to
-  be dissected on the same fixture.
-- **Later — PSK backend** (BPSK31 + BPSK63, Costas loop, varicode). *(The
-  own-panorama waterfall that used to sit here is M8 below, since 2026-09-05.)*
-- **M8 — waterfall view (BACKLOG SKM-4, half 1). Engine tap IMPLEMENTED
-  (offline gate 2026-09-05); the view is in progress.** Roy Andre Løntjern,
-  LB0EI, keeps Windows for CW Skimmer's pileup display: a waterfall with
-  frequency VERTICAL and time flowing sideways, a kHz scale, and a column of
-  callsigns to the right of it, each on its own frequency, click to tune.
-  Richard adopted exactly that layout (2026-09-05, CW Skimmer's
-  `ContestShot.gif` as the reference): it takes the station list's slot in the
-  top half of the window via a header toggle, the decode pane stays below,
-  a click on a callsign tunes like a station row. **The TX half of Roy's
-  workflow is NOT in scope here:** in a split pileup the click has to move the
-  TX frequency, and sdr-for-linux has no VFO B or split — its TCI `vfo:rx,ch,f`
-  handler ignores the channel index and sets the single frequency, and
-  `split_enable`/`rit_*`/`xit_*` are accepted, stored and echoed without a
-  backend (read in `tci_server.c`, 2026-09-05). That is sdr-for-linux work
-  first (its BACKLOG SDR-12); the skimmer will use whatever TCI offers once it
-  exists.
+  header show Bd, About debug_info carries the mode.
+  Gates: `skimmer-rtty-test` (hardcoded ITA2 bit vectors as the independent
+  table witness, offsets, figures/UOS, reversed polarity, AWGN, QSB, selective
+  fade, squelch on noise / keyed CW / two carriers, the worst-case straddler
+  through the real wide bank, the WHOLE offline pipeline in RTTY mode) and
+  `skimmer-chan-test`.
+  **Open: the first ~2 s of every over are lost** — four measured causes, the
+  approved fix is a pre-roll replay: issue #6.
+- **PSK backend** (BPSK31 + BPSK63, Costas loop, varicode) — planned, issue #16.
+- **M8 — waterfall view + callsign column (2026-09-05, shipped in v0.4.0).**
+  Roy Andre Løntjern, LB0EI, keeps Windows for CW Skimmer's pileup display: a
+  waterfall with frequency VERTICAL and time flowing sideways, a kHz scale,
+  and a column of callsigns to the right of it, each on its own frequency,
+  click to tune. Richard adopted exactly that layout (CW Skimmer's
+  `ContestShot.gif` as the reference). **The TX half of Roy's workflow is NOT
+  in scope here:** in a split pileup the click has to move the TX frequency,
+  and sdr-for-linux has no split — its TCI `vfo:rx,ch,f` handler ignores the
+  channel index, `split_enable`/`rit_*`/`xit_*` are echo-only (a split was
+  built there on 2026-09-06 and removed the same day on Richard's call).
   **Engine (`spectrum.c`, GLib + fftw3f):** an FFT tap on the raw IQ band,
   independent of the channelizer — a picture must show keying, so the window
   must be shorter than a dit, which the 125 Hz channels never are. Two named
@@ -617,17 +518,6 @@ where relevant, a live check against a running `sdr-for-linux`.
   hold check, so the picture keeps flowing while the decoders freeze; the
   object is built lazily on the engine thread at the block's rate (fftw's
   planner is not thread-safe — same thread as the channelizer's plan).
-  **Gate `skimmer-spectrum-test` (39 checks):** at all four rates a +12 kHz
-  tone lands ABOVE the centre within ±bin/2 and a tone below the centre
-  below it (the 2026-07-15 mirror trap, gated), bin width constant, 90 rows
-  per second of IQ, tone−floor ≥ 55 dB in bytes, reset semantics; through the
-  offline pipeline: no rows while disabled, rows carry the stream centre,
-  peak on the right absolute Hz, rows keep coming during TX hold, silence
-  after disable. **Real-air orientation check:** `SKIM_SPECTRUM_DUMP=1`
-  replay of the 2026-08-15 RTTY fixture (centre 14 086 960) puts the band's
-  strongest bin at 14 017/14 027 kHz (CW segment) and 14 074–14 076 kHz (the
-  FT8 band) — a mirrored spectrum would have put them at 14 098–14 157 kHz.
-  12 gates total.
   **The view (same day, headless-verified).** `src/app/wf_compose.c` is the
   GLib-only history + composer (gate-tested): full-resolution rows in a ring
   (`SKIM_WF_HISTORY_ROWS` 2048 ≈ 22 s, 16 MB at 192 k), a pannable/zoomable
@@ -661,99 +551,34 @@ where relevant, a live check against a running `sdr-for-linux`.
   shows in the old columns and floor in the new ones (gated, 56 checks). The
   window recentres on the VFO only when the new band no longer overlaps it
   at all (a band change), and only a rate change (new bin width) clears the
-  history. **Retune tearing (third live-look catch, same day: "it breaks up
-  and jitters while tuning"):** the centre label rides the TCI control
-  channel while the IQ rides the data channel, and sdr-for-linux reported
-  GUI-side tuning only through its 500 ms reporter — so while the knob turned
-  the skimmer stamped up to half a second of rows with a stale centre and drew
-  them shifted (the sloping traces). Two-sided fix: sdr-for-linux now
-  broadcasts dds/vfo IMMEDIATELY from its frequency setter
-  (`tci_server_freq_changed()` in `engine_set_frequency`, every tuning path;
-  takes effect once the SDR runs that build), and the skimmer's
-  `SkimWfGuard` delays every row by `SKIM_WF_RETUNE_GUARD` = 3 rows, drops
-  the rows waiting when the centre changes, and then drops EVERY row until
-  the centre has stood still for `SKIM_WF_RETUNE_SETTLE` = 66 rows (≈ 0.7 s,
-  longer than any TCI server's polling cadence) — so a label that only
-  updates every 500 ms can never place a row on a stale centre and no server
-  version can grow teeth. Richard's rule, stated at the third look: when the
-  centre moves the picture only gets filled in at the edges, nothing restarts,
-  nothing recentres; while the knob turns the waterfall pauses and resumes
-  ~0.7 s after it stops, the marker keeps moving. Gate: 50 rows across a
-  change → 34 committed in order, 13 dropped, 3 waiting; a knob turning
-  (centre changes every 6 rows) commits nothing mid-turn; a steady centre
-  drops nothing (61 checks).
-  **STATE AT THE END OF 2026-09-05 (next session continues here).** Richard's
-  fourth remark: the settle pause itself is wrong — "while retuning the
-  spectrum sort of stops"; he wants the waterfall to FLOW through a retune,
-  the picture only filling in at the edges. That needs the true centre per
-  row, i.e. the label-to-data latency, which is now measurable: the
-  sdr-for-linux build with the immediate dds/vfo broadcast (ee7d08b) is
-  RUNNING live since 15:0x (restarted from `build/sdr-for-linux` at
-  Richard's "ano, zkus to"; the skimmer reconnected by itself), and the
-  skimmer carries an env-gated probe, `SKIM_WF_DEBUG=1`: for every row it
-  logs the band move the LABELS imply over the last four rows against the
-  move the DATA shows (cross-correlation with the row four back — disjoint
-  windows; consecutive rows share 75 % of their samples and their noise
-  correlates at lag 0, which blinded the first probe) and the difference.
-  A first live pass (panadapter drag: 241 label changes of 4–170 Hz within
-  4 s) was recorded by the blind probe; the fixed probe has so far seen only
-  ±1-bin noise — **the measurement with a few DISCRETE ≥ 1 kHz steps (click
-  on a station on the panadapter, pause, next) is still owed**. Plan once
-  the lag L (rows between label change and data shift) is known: replace the
-  settle DROP with a **label delay line** — stamp each row with the centre
-  that was current L rows earlier — so no row is dropped at all and the
-  waterfall keeps flowing while the knob turns; keep a small guard (±1–2
-  rows) for jitter; the 0.7 s settle stays only as a fallback for servers
-  that report by polling (detectable: labels arriving in ≥ 400 ms steps).
-  Then the callsign column + click-to-tune (still empty), then bin/hop/span
-  by his look. Live today: the ±3-row guard + settle 0.7 s build is what he
-  ran; palettes and drag-pan verified by him; the SKM-2 GtkImage warnings
-  recurred on the desktop at every launch (BACKLOG update).
-  **MEASURED at the very end (probe log `/var/tmp/skimmer-app-20260905-m8-live8.log`,
-  rows 769–802, one ~350 ms tuning sweep down at ~12–25 kHz/s):** the LABELS
-  move every row (−2 … −48 bins per 4 rows), the DATA moves in JUMPS of +44,
-  +70, +56 bins every ~9–10 rows (≈ 100 ms), each jump equal to the label
-  movement accumulated since the previous jump (sign: a fixed station rises
-  in bin index when the band tunes down — consistent). Root cause read in
-  sdr-for-linux `src/engine/protocol2.c`: `p2_set_frequency()` only STORES the
-  frequency; the keepalive timer thread pushes it in the next High-Priority
-  packet "≤ 100 ms, rapid tuning coalesces into ~10 retunes/s", whereas the
-  TCI label now leaves on every GUI step (ee7d08b). So the residual mismatch
-  is not transport latency but the radio getting the frequency 100 ms late
-  and in quanta. **First step next session, SDR side:** make
-  `p2_set_frequency` KICK the keepalive timer exactly as `p2_set_tx_state`
-  does (`kick_cond` — piHPSDR parity, schedule_high_priority on every freq
-  change), so the DDC follows each step within a millisecond or two; then
-  re-measure with the probe (expect data to follow the label within 1–2
-  rows), and only then size the skimmer guard / label delay line (likely
-  ±1–2 rows, no settle) so the waterfall flows through tuning with the
-  picture filling in at the edges. If some latency remains, the label delay
-  line absorbs it. The P1 path (`p1_set_frequency`) needs the same look.
-  **App:** rows travel the ONE event queue (EV_SPECTRUM, blob + centre + bin;
-  at most `SPEC_PENDING_MAX` 48 pending — the oldest row is dropped, a
-  stalled UI must not hoard 1.5 MB/s), one `queue_draw` per drain; the top
-  area is a `GtkStack` {station list | waterfall} driven by two linked header
-  toggles (both off = decode pane only, the old behaviour), persisted as
-  `[ui] view` (the pre-M8 `station_list` key migrates); the engine computes
-  spectrum rows ONLY while the waterfall shows. **`SKIM_IQ_FILE=<cf32>`**
-  replays a recording into the UI through the offline pipeline at real-time
-  pace (its `.meta` sidecar or `SKIM_IQ_RATE`/`SKIM_IQ_CENTER`), looping — no
-  radio needed for a look or a demo. Verified headless (Broadway + a separate
-  headless Chrome): the 2026-08-15 RTTY fixture shows the FSK pairs at 14 082
-  and 14 087 kHz and the carriers near 14 090 in a 20 kHz window, scale
-  078–096; `SKIM_LAG_DEBUG` under the replay: 94 rows/s through the queue,
-  worst drain 0.2 ms, no stall. Gate `skimmer-spectrum-test` 39 → 51 checks
-  (composer: orientation, round-trip, zoomed-in rows centred on the tone,
-  zoomed-out max-pooling, time direction, beyond-history and out-of-band
-  floor, history reset on a centre change). **Palette picker (Richard,
-  2026-09-05, at his first live look):** Preferences → Display → Colour
-  scheme lists the same six schemes as sdr-for-linux (Classic, Mono white,
-  Mono green, Mono amber, Inferno, Turbo), applies live — the whole history
-  recolours at once — and persists as `[ui] palette` (an index, like the
-  SDR's `[display] palette`); default Classic, the SDR's default too.
-  **Next: the callsign column + click-to-tune; the live look decides
-  bin/hop/span.**
-  **The callsign column landed the same evening (headless-verified).**
+  history.
+  **Retunes — the waterfall flows through them.** Every retune moves the IQ
+  centre, and the centre label (`dds:`) rides the TCI control channel while
+  the IQ rides the data channel — a row placed on a stale label is drawn a
+  whole tuning step off. The final design, after four rejected ones: **the
+  SDR stamps every IQ block with its centre** (`iq_stamp:1;`, a family TCI
+  extension — h[8] = centre of the block's first frame, h[9] = frame offset
+  of a change inside the block, h[10] = the centre from there on; opt-in,
+  because whether SDC / CW Skimmer tolerate non-zero reserved header words is
+  unverified), the boundary placed by a capture clock on the SDR side
+  (sdr-for-linux 98c57de); `tci_client` splits a block at h[9]; the spectrum
+  tap labels every row with the centre at its window MIDDLE, and a row whose
+  window holds a centre boundary is computed from its LARGEST single-centre
+  segment only (a fresh Hann over that segment, the rest zeroed, the floor
+  renormalised) — a discrete step shows a 2-column widening of a line instead
+  of a bar. Servers without stamps degrade to label-at-block-arrival (±1
+  block of jitter, inherent). Rejected on the way, each after a live look or
+  a measurement: clearing and recentring the history on every tune ("you
+  reset my waterfall"); a retune guard that dropped rows until the centre had
+  stood still for 0.7 s (the picture paused while the knob turned); a
+  constant label delay line (`SKIM_WF_LABEL_LAG` — no constant removes ±1
+  block of jitter; the default is 0 now, `SKIM_WF_LAG_ROWS` stays for
+  experiments); an explicit guard band around the boundary (measured
+  unnecessary — the fresh Hann tapers to zero there, 58 dB down). Live
+  verdict (Richard, 2026-09-05): on a real band the waterfall flows through a
+  retune with no teeth, no bars, no pause; dragging at 50–100 kHz/s a line is
+  inherently ~4× wider while the knob turns — the physics of a 10.7 ms hop.
+  **The callsign column.**
   CW Skimmer's layout to the letter of the brief: a rail down the column's
   left edge, a yellow dot on it at every tracked station's frequency, the
   callsign beside it with a "CQ " prefix for callers, and a connector from
@@ -775,388 +600,38 @@ where relevant, a live check against a running `sdr-for-linux`.
   on a label is the panadapter-spot gesture: tune to the station's TRACKED
   frequency (its carrier, not the pixel's Hz), `clicked_on_spot` over TCI so
   the logbook prefills (the pane-click path), the pane fixed on the station;
-  a press that travelled more than 4 px is a drag, not a click. Gate
-  `skimmer-spectrum-test` 61 → 75 checks (far-apart unmoved, pair spread
-  ±pitch/2 about the mean, five-cluster centred, neighbour nudged, top and
-  bottom clamps, outside hidden, over-capacity count + priority + order,
-  hit test incl. a hidden label). Headless with the RTTY fixture (Broadway,
-  a CDP-driven click, a private D-Bus session so the live instance stayed
-  untouched): SV1JDZ labelled at 14 086.96, the click logged `wf click:
-  SV1JDZ @ 14086964 Hz — tune + clicked_on_spot` and fixed the pane on it.
-  **Not verified:** the radio actually tuning and the logbook prefilling —
-  the offline replay has no TCI, `skim_pipeline_tune` is a no-op there;
-  Richard's live look decides. Still open from the morning: the SDR-side
-  `p2_set_frequency` kick + the label delay line (Richard reprioritised the
-  column over it).
-  **Richard's first live look at the column (2026-09-05, ~17:00):** "the
-  station list probably isn't needed, the waterfall view is much clearer"
-  → the WATERFALL is now the default top view for a fresh install
-  (`settings_load_view` → `VIEW_WF` with no saved key; a saved choice wins).
-  Two-step decision: the list and its toggle stay until the column shows
-  what only the list shows today (SNR, speed, heard, age); then the list —
-  widget, sorter, columns, toggle — goes entirely.
-  Same look, same minute: a hairline separator between the header bar and
-  the top view, matching the one above the decode pane — visible only while
-  the waterfall is the top view (his second remark), hidden otherwise.
-  Preferences split into four tabs the same session (Richard: "there is
-  getting to be a lot in there"): Radio · Decoding · Spots (panadapter
-  policy + telnet feed) · Display — `AdwPreferencesPage`s with the family's
-  title + symbolic icon; nothing behind the rows changed.
-  **STATE AT THE END OF 2026-09-05, EVENING (next session continues
-  HERE — this supersedes the morning block above).** Live on Richard's
-  desk: sdr-for-linux from `build/` (ee7d08b, immediate dds/vfo broadcast)
-  and the skimmer from `builddir` at 8c5d458 (column + default waterfall +
-  waterfall-only hairline + tabbed Preferences), launched with
-  `SKIM_WF_DEBUG=1`, log `/var/tmp/skimmer-app-20260905-m8-live12.log`.
-  Richard's verdict on the column: the waterfall view is "much clearer" —
-  it is the working view now. **Open, in order:**
-  (1) **The click on a callsign LIVE** — tune + `clicked_on_spot` → logbook
-  prefill — is still unreported: the offline replay proved the app-side
-  path only (`wf click: … tune + clicked_on_spot` in the log, pane fixed);
-  ask him first thing.
-  (2) **The column takes over what only the list shows** — SNR, WPM/Bd,
-  heard, age (tooltip on the label, or dB after the call as CW Skimmer
-  prints it); **then the station list goes entirely** — widget, sorter,
-  `fmt_*` columns, `freq_cmp`, its toggle and `[ui] view=list` (map to the
-  waterfall on load). Richard's two-step decision; step one is done
-  (waterfall default, list kept).
-  (3) **The waterfall must FLOW through a retune** (his fourth remark this
-  morning): SDR side first — `p2_set_frequency` kicks the keepalive timer
-  like `p2_set_tx_state` (`kick_cond`; same look at `p1_set_frequency`),
-  re-measure with `SKIM_WF_DEBUG=1` on discrete ≥ 1 kHz steps, then replace
-  the 0.7 s settle DROP with a label delay line sized by the measured lag.
-  (4) bin/hop/span by his look; the crowded fan-out (slanted connectors,
-  hidden low-priority labels) has never been seen live — the RTTY fixture
-  showed one station; drain cost with the column shown under contest load
-  is unmeasured (`SKIM_LAG_DEBUG`).
-  Housekeeping: the SKM-2 GtkImage baseline warnings now also fire when
-  Preferences opens (the four switcher icons — same upstream class, no code
-  change); scratch `/var/tmp/skimmer-wf-calls` holds the separate build
-  dir, the headless screenshots and `cdp.mjs` (30-line CDP driver over
-  node's WebSocket: click + screenshot on a Broadway page) — offered for
-  the bin; the `dbus-run-session` trick is what lets a headless test
-  instance coexist with Richard's live one (GApplication uniqueness is per
-  session bus).
-  **STATE AT THE END OF 2026-09-05, NIGHT (next session continues HERE —
-  supersedes the EVENING block for the open list).** Live on Richard's
-  desk at close: sdr-for-linux from `build/` at 98c57de (HP kick on every
-  frequency change; IQ centre stamps opt-in; boundary by the capture
-  clock) and the skimmer from `builddir` at 2ec8fd1 (stamps honoured,
-  largest-segment rows, delay line default 0), log
-  `/var/tmp/skimmer-app-20260905-m8-live18.log`, `SKIM_WF_DEBUG=1`. Richard's
-  verdict on 80 m: the waterfall flows through a retune — no teeth, no
-  bars, no pause. Both repos pushed; scratch dirs trashed. **Open, in
-  order:** (1) the callsign click LIVE (tune + logbook prefill) — still
-  unreported; (2) the column takes over SNR/WPM/heard/age, THEN the
-  station list is deleted; (3) SDR-13 in sdr-for-linux (came up at 1 Hz
-  after a restart); (4) coherent re-centring of the window — ONLY after
-  measuring the DDC NCO's phase across a retune on a strong stable
-  carrier; (5) `SDRFL_DDC_LAT_MS` 1.0 ms unmeasured below a row; (6)
-  bin/hop/span, crowded fan-out, column drain cost under contest load.
-  Family-extension inventory for TCI now: `clicked_on_spot`, `rtty`,
-  `iq_stamp` (all in sdr's TCI-SCOPE; spec 1.9 says invalid commands are
-  ignored and the reserved header words are ours to use).
-  **The waterfall FLOWS through a retune — both halves built and gated
-  (offline-proven 2026-09-05 evening; live measurement + Richard's look
-  pending).** Open item (3) above. **SDR side** (sdr-for-linux):
-  `p2_set_frequency` now KICKS the keepalive timer for ONE High-Priority
-  packet when the frequency CHANGES — piHPSDR parity read from dl1ycf master
-  the same evening (`rx_frequency_changed` → `schedule_high_priority` and
-  nothing else) — and the kick does NOT advance the cadence: the timer keeps
-  waiting for the same 100 ms tick, so a knob at 250 steps/s sends 250 HP
-  packets and nothing more (RX/TX-specific keep their 200 ms rhythm); an
-  unchanged frequency does not kick. Gate `sdrfl-txiq-ring-test` section [7]
-  (46 → 50 checks): ten retunes 15 ms apart each on the wire within 30 ms
-  (measured 0.0 ms worst; the OLD code goes red at 4 of 10, 31 ms worst),
-  RX/TX-specific ≤ cadence, the same frequency ×10 → 3 HP in 300 ms. The
-  live probe had measured, before the fix, the IQ arriving 3–11 rows
-  (32–117 ms) behind the dds label on eight discrete 4–18 kHz steps — the
-  100 ms quantum over a ~3-row floor (log live12, rows 2390…63420).
-  **Skimmer side:** the retune guard (3-row delay + 0.7 s settle DROP — the
-  pause Richard saw) is GONE; `wf_compose.c` carries a **label delay line**
-  instead: every row is placed on the centre label that was current
-  `SKIM_WF_LABEL_LAG` (3) rows EARLIER — nothing delayed, nothing dropped;
-  `SKIM_WF_LAG_ROWS=<n>` overrides it for a measurement session; a rate
-  change restarts the line on the new label. The view no longer forces a
-  full recompose on a mere centre change (only when the window had to
-  recentre): stored rows keep their own shift and the window stands still,
-  so nothing drawn changes — and without the settle that recompose would have
-  run per row while the knob turns (94 × 5 ms a second on the main thread).
-  The `SKIM_WF_DEBUG=1` probe was rebuilt for any step size (the old
-  ±128-bin cross-correlation clipped on every real step: 192…785 bins): a
-  retune episode keeps the last pre-change row as the reference and for every
-  later row reports the best lag L in 0..16 — correlation at the shift each
-  candidate label implies — plus the plain flip (the first row that matches
-  the reference better at the full step than at zero: the data's arrival),
-  and one summary line per episode ("data flipped N rows after the first
-  label change"). Gate `skimmer-spectrum-test` 75 → 76 (delay line: discrete
-  step, turning knob row-exact, steady, lag 0, rate restart, cap). Headless
-  replay of the RTTY fixture: draws as before, drain ≤ 0.3 ms. **LIVE
-  MEASUREMENT DONE the same evening (Richard's "ok, zkusíme to"; both apps
-  restarted on the new builds, SDR first):** the first probe build was
-  blind — a Pearson correlation of raw rows read 0.87 at ZERO shift across
-  an 8 kHz retune, because the IQ passband roll-off and the DC spur sit on
-  the same bins whatever the tuning; the probe now detrends each row
-  (running mean ±32 bins), masks the outer 5 % and ±8 bins around DC, keeps
-  only the positive excursions (the lines) and correlates those. With that:
-  Richard's own knob sweeps gave 972 voting rows — **L=2: 557, L=1: 305,
-  L=3: 103** — and four discrete steps sent over TCI (`vfo:0,0,<hz>;` from
-  a stdlib WebSocket client, `/var/tmp/skimmer-wf-calls/tci_step.py`,
-  the knob still) flipped the data **3, 2, 3, 2 rows** after the label
-  (a first round was contaminated by his concurrent tuning — the echo
-  showed a VFO value nobody sent). **`SKIM_WF_LABEL_LAG` = 2** (≈ 21 ms);
-  his instance runs it via `SKIM_WF_LAG_ROWS=2` (log live15). Probe rows
-  in the steady state after a step no longer vote (every candidate lag
-  implies the same shift there — the tie fell on L=0 and swamped the
-  histogram). **His look (19:58, with a screen recording): "it behaves a
-  bit better — the teeth are still there, but it is smooth."** The pause
-  is gone; the teeth are a different animal, pinned by the recording + the
-  probe log of the same minute: sharp single-column spikes up AND down on
-  strong traces, i.e. whole rows landing one tuning step off, both
-  directions. 84 % of voting sweep rows sit exactly, ~10 % are ≥ 4 bins
-  off with a heavy tail (100 rows ≥ 40 bins, max 357): the misplacement
-  is the STEP of that row (a wheel notch = 20–40 bins, a click = hundreds),
-  because the `dds` label and the IQ ride the same WebSocket but the label
-  gets attached to whichever block is ARRIVING when it lands — ±1 block of
-  jitter that no constant lag can remove (the votes alternated L 1 2 1 2 2
-  3 in that very second). **Fix built the same evening, both halves gated
-  (live look pending): the SDR STAMPS every IQ block with its centre.**
-  sdr-for-linux (`tci_server.c`): a client that sends `iq_stamp:1;`
-  (echoed) gets, in the otherwise-zero reserved words of the IQ Stream
-  header, h[8] = DDC centre of the block's first frame, h[9] = frame
-  offset at which the centre changed inside the block (0 = none), h[10] =
-  the centre from there on. The boundary is the DDC-ring sample index at
-  the moment of the change (the HP kick has just left) + the radio's
-  DDC→P2 latency (`SDRFL_DDC_LAT_MS`, default 2.5 ms), mapped through the
-  client's resampler ratio; two changes in one block report the first
-  offset with the final centre. Off for every client that never asks —
-  SDC / CW Skimmer keep byte-identical blocks (whether they tolerate
-  non-zero reserved words is unverified, hence opt-in; the advisor's
-  call). Gate `sdrfl-tci-test` 43 → 50 (unstamped = zeros, opt-in echo,
-  h[8] = centre, a mid-stream `vfo:` retune lands as a boundary inside a
-  block with h[10] = the new centre and every later block on it, opt-out
-  = zeros). Skimmer: `tci_client` sends `iq_stamp:1;` after `iq_start`,
-  takes h[8] over the label and SPLITS a block at h[9] into two `iq_cb`
-  calls (gate `skimmer-tci-test` 17 → 20 with a stamped mock); the
-  spectrum tap (`spectrum.c`) now takes the centre per push, keeps the
-  last centre transitions by sample index and labels every row with the
-  centre at its window MIDDLE (total − N/2 — the boundary between the
-  2nd and 3rd hop; a centre starting exactly there wins the tie, so with
-  a change per hop a row reads the centre of the hop before the newest);
-  `pipeline.c` passes the row's own centre on. Gate spectrum 76 → 92 (the
-  first row's own centre; the flip two hops after a change at every
-  rate; a change inside a push lands on its sample; a change per hop for
-  40 hops, ring pruning). The app delay line's default is 0 now — the row
-  arrives on its true centre — `SKIM_WF_LAG_ROWS` stays for experiments.
-  Servers without stamps degrade to today's behaviour (label at block
-  arrival, window-middle placement = the L≈2 offset built in, the ±1
-  jitter inherent). Acceptance metric for the live look: the share of
-  voting sweep rows with |best − cfg| ≥ 4 bins, 9.7 % before → expected
-  ≈ 0. **Live 20:42 (both apps restarted on the stamp builds; the skimmer
-  relink went wrong twice by running `ninja -C builddir` from the SDR's
-  cwd — use the absolute path):** stamps confirmed on the wire (a passive
-  `iq_stamp:1` subscriber saw h[8] follow the centre in every block), and
-  the probe put every sweep row on its own label (best lag 0 row after
-  row through a −5 → −116 bin sweep; worst deviation 11 bins vs 132
-  before). ⚠ 20:44: a peek script imported the TCI client whose main()
-  ran at import with foreign argv and sent `vfo:0,0,4;` — Richard's radio
-  sat at 4 Hz for ~25 s until `vfo:0,0,3520497;` restored it; the client
-  now has a main guard. Lesson: never import a script with radio side
-  effects. **His second recording (20:48): the spikes are gone, what is
-  left are vertical BARS at every retune, symmetric about a strong line
-  (the ADC/DC line at S9+20 made them glaring): the 4-hop window
-  straddle — a row whose window contains the step carries the line at
-  BOTH baseband positions and is drawn on one label, a bar the height of
-  the step.** Fixed in the tap the same evening (offline-proven): `emit_row`
-  computes a row whose window holds a centre boundary from its LARGEST
-  single-centre segment only — a fresh Hann over that segment (a chopped
-  edge of the full window leaked at −25 dB, gate-caught), the rest
-  zeroed, the floor renormalised by Σw²_full/Σw²_kept (noise reads the
-  same, a carrier a few dB lower for those rows) — and labels the row with
-  that segment's centre (ties → newest). A discrete step now shows a
-  2-column WIDENING of a line instead of a bar; a knob sweep shows lines
-  ~4× wider while it turns, correctly placed and continuous — the
-  resolution a sweeping receiver honestly has. Gate spectrum 92 → 100
-  (a tone at a fixed absolute frequency across a +5 kHz centre step: every
-  row, straddling ones included, puts it on its absolute frequency
-  through its own label, and the strongest byte > 16 bins away is 66 dB
-  down — the chopped-edge version read 28). Skimmer relaunched 20:54 on
-  it (log live18). **Richard: "rozplyty jsou tam stále" (the bars remain).**
-  Measured, not guessed: the probe's flip metric — with exact stamps the
-  data should flip in the SAME row the label does — read 1–2 rows late on
-  36 of 48 retunes (mode 1): the stamp boundary sat 10–20 ms EARLY, with
-  a spread. Cause in sdr-for-linux: the TCI push runs on the listener
-  thread AFTER the panadapter FFT, so packets queue in the socket while it
-  works and "frames ringed so far" at the kick trails the capture clock by
-  a varying backlog — no constant can fix it. Fixed there (98c57de): a
-  CAPTURE CLOCK from the pushes (least-delayed push of the last two
-  seconds = no backlog) places the boundary by TIME; gate: block #0 at
-  offset ~1780, ±25 frames (0.5 ms) over three runs, streaming through the
-  retune from a paced pusher thread. Skimmer side: an explicit n/16 guard
-  band around the boundary was built, measured (a label n/32 frames late
-  paints no ghost even WITHOUT it — the fresh Hann tapers to zero at the
-  boundary, 58 dB down) and removed; the late-label check stays (gate
-  spectrum 100 → 108 with it). The running skimmer build behaves
-  identically; only the SDR needs a restart for the clock. **SDR restarted
-  21:27 on the capture clock (his "ano, zkus"); the probe's flip metric
-  read 0 rows on 14 of 16 retunes (it had been 1–2), and 0 of 116
-  confident sweep rows sat ≥ 4 bins off (max 2). Richard's first look was
-  at 1 Hz on the ADC's DC line, 60 dB up, dragging at 50–100 kHz/s (median
-  22 bins per row): there a line is inherently ~4× wider while the knob
-  turns and beads at every notch — physics of a 10.7 ms hop. LIVE VERDICT,
-  Richard 2026-09-05 ~21:35: "pravda! na 80m co sleduju, tak tam už to
-  nedělá" — on a real band the waterfall flows through a retune with no
-  teeth, no bars, no pause. Open item (3) is CLOSED.** Left on the table,
-  each a separate decision: (a) coherent re-centring of the window (mix
-  every segment to one centre before the FFT so the full 4-hop window
-  stays usable while turning — sharp lines even at 100 kHz/s) works only
-  if the radio's DDC NCO is phase-continuous across a retune; measure the
-  phase jump on a strong stable carrier first, never assume; (b)
-  `SDRFL_DDC_LAT_MS` 1.0 ms is the radio's own pipeline, unmeasured below
-  a row — the probe cannot see it, and the Hann taper hides it; (c) the
-  SDR came up at "RX 1 Hz" after the restart, not at his last frequency —
-  filed on the sdr-for-linux side. Not built, on purpose: a polling-server fallback (settle
-  when labels arrive in ≥ 400 ms steps) — one click followed by stillness is
+  a press that travelled more than 4 px is a drag, not a click.
+  The label's tooltip carries kHz / speed / dB / heard / age (a dB printed
+  after the call was tried and taken out again on Richard's look). With the
+  column carrying all of it, **the station list was deleted** (Richard,
+  2026-09-05). **App plumbing:** rows travel the ONE event queue (at most
+  `SPEC_PENDING_MAX` 48 pending — the oldest row is dropped, a stalled UI must
+  not hoard 1.5 MB/s), one `queue_draw` per drain; the engine computes
+  spectrum rows ONLY while the waterfall shows. Preferences → Display → Colour
+  scheme lists the same six schemes as sdr-for-linux, applies live and
+  persists as `[ui] palette`. **`SKIM_IQ_FILE=<cf32>`** replays a recording
+  into the UI through the offline pipeline at real-time pace (its `.meta`
+  sidecar or `SKIM_IQ_RATE`/`SKIM_IQ_CENTER`), looping — no radio needed for a
+  look or a demo.
+  **Not built, on purpose:** a polling-server fallback (settle when labels
+  arrive in ≥ 400 ms steps) — one click followed by stillness is
   indistinguishable from a polling label, so any cadence detector would bring
-  the pause back on his most common gesture; no such server is measured.
-  Also not moved: the delay line stays in the waterfall; a time-stamped
-  version in `tci_client` would also fix the pipeline's centre mid-retune,
-  but the pipeline flushes its decoders on a centre change anyway — go there
-  only if spot frequencies during tuning ever matter.
-
-  **The callsign click is LIVE (Richard, 2026-09-05 22:05): open item (1)
-  CLOSED.** log-for-linux launched from its `builddir` (76349f8, relinked)
-  beside the running sdr 98c57de + skimmer 2ec8fd1 — all three on the one
-  TCI server, the logbook's dup service on 127.0.0.1:2238, its Call entry
-  empty. He clicked a station label in the waterfall column: "jo, to
-  vypadá, že funguje" — the radio tuned and the logbook took the call. What
-  the logs add: the running instance has no `SKIM_PANE_DEBUG`, so the
-  `wf click:` line is not written (gated, by design); the `SKIM_WF_DEBUG`
-  probe recorded two DISCRETE retunes at the moment of the test —
-  22:05:03 +855 bins (≈ +20.0 kHz) and 22:05:46 −855 bins back — each a
-  single label step with every row after it at L=0, the signature of a
-  click-tune (a knob sweep writes many small steps). Neither the SDR relay
-  nor the logbook logs a received click, so the prefill half rests on his
-  eyes alone. With this the click-through's last link (CLAUDE.md "open
-  before the tag" (2): prefill into an EMPTY Call entry) is confirmed as
-  well. Open, in order, now: (2) the column takes over SNR/WPM/heard/age,
-  THEN the station list is deleted; (3) SDR-13; (4) coherent re-centring
-  only after the NCO phase measurement; (5) DDC latency; (6) bin/hop/span,
-  crowded fan-out, column drain cost.
-
-  **The column carries the station list's columns (offline-proven 2026-09-05
-  night — Richard's "zkus to předělat podle toho, jak navrhuješ"; his live
-  look pending).** Open item (2), step one. The label reads
-  "CQ DL1ABC 23 dB" — the strength after the call, CW Skimmer style, drawn
-  in the label's colour at 0.6 alpha and never bold so the call stays the
-  word (the hover backdrop spans both) — and the label's tooltip carries
-  the rest: "DL1ABC · 14025.30 kHz" over "25 WPM · 23 dB · heard 12× ·
-  age 8s" ("Bd" in RTTY). The formats ARE the list's cell formats (kHz to
-  10 Hz, whole speed and dB, "%u×", "%ds" / "%dm%02ds"), pinned in
-  GLib-only `wf_compose.c` (`skim_wf_label_text`, `skim_wf_label_snr_text`,
-  `skim_wf_age_text` on a caller-supplied clock, `skim_wf_tooltip_text`)
-  so the gate reads them and the two views cannot drift; `SkimWfStation`
-  grew mode / speed / reports / last_heard. `query-tooltip` on the widget
-  resolves the label under the pointer through the click's own hit test
-  and sets the tip area to the label's seat band, so the tooltip stands
-  still while the pointer travels within one label (without it GTK
-  re-queries per pixel). Widths measured with Pango, not eyeballed:
-  "CQ OK1BR/P −12 dB" bold = 118 px against the column's 154 px of text
-  room — `COLUMN_W` stays 180. Gate `skimmer-spectrum-test` 108 → 117
-  (label with/without CQ, rounding, negative dB, the suffix alone, age
-  under/over a minute and a future stamp, CW and RTTY tooltips). Headless
-  (Broadway :9, private D-Bus, RTTY fixture, CDP hover): the column shows
-  "CQ SV1JDZ 24 dB" and the tooltip appears on hover — Broadway does render
-  the popup — reading "SV1JDZ · 14086,96 kHz / 45 Bd · 24 dB · heard 33× ·
-  age 831m56s". Two things seen there that are NOT this change: the
-  decimal comma is the process locale (the list's kHz cell shows
-  "14086,96" the same way — shared formatters; the gate runs in the C
-  locale), and the 831-minute age is the replay clock (the offline
-  pipeline stamps last_heard on stream time, the display clock is
-  monotonic — the list's Age column read 831m35s beside it; live, both are
-  monotonic). Not built, on purpose: smoothing of the dB after the call —
-  the table's SNR is the stronger report's value and the snapshot rebuilds
-  on every drain that touched the table, so the suffix may flicker under
-  load; an EMA is an unmeasured lever and his live look decides whether it
-  is needed at all. Step two (delete the list, its toggle, sorter and
-  formatters) waits for that look.
-
-  **Live look (Richard, 2026-09-05 ~23:25): "22 dB co je za volačkou se
-  tam moc nehodí… stačí to, co je v tooltipu, tam to vypadá líp."** The dB
-  after the call is OUT; the label is "CQ SV1JDZ" again and the tooltip
-  alone carries the list's columns (kHz, speed, dB, heard, age). Removed
-  with it: `skim_wf_label_text` / `skim_wf_label_snr_text`, the second
-  Pango layout and its four gate checks (spectrum 117 → 113); the tooltip
-  path, `SkimWfStation`'s new fields and the tip-area rule stay as built.
-  The flicker caveat above is moot — no number sits on the label. Step
-  two (delete the list) is next, on his word.
-
-  **The station list is GONE (Richard's "ano, vyhoď ten seznam", 2026-09-05
-  ~23:30; step two of his two-step call).** Deleted from `main.c`: the
-  frequency-sorted `GtkColumnView` with its seven columns and cell
-  formatters (`fmt_*`, `cell_setup` / `cell_bind`, `add_column`), the
-  `GtkSortListModel` + `freq_cmp`, `on_row_activated`, the WPM/Bd column
-  retitle on a mode change, the list toggle and the `GtkStack` that held
-  list | waterfall, and `VIEW_LIST`. What stays: the `GListStore` of
-  `SkimRow` with its call→row hash and O(1) in-place updates — it is the
-  station table's mirror, read by the waterfall column (`wf_stations_sync`)
-  and the tuned-pane resolver — and the pane-only layout: the header keeps
-  ONE toggle, waterfall on / off, `[ui] view` = "waterfall" | "none"; a saved
-  "list" and the pre-M8 `station_list=true` fall to the waterfall, the
-  list's successor. `age_tick` no longer re-announces the store (that fed
-  the list's Age column; the tooltip computes its age at query time). The
-  waterfall widget sits in the window box directly; the separator under it
-  is `pane_sep` now. Build clean, 12 gates green (no gate covered the
-  list). Headless (Broadway, private D-Bus, RTTY fixture, CDP): a config
-  saved with `view=list` opens on the waterfall with the single toggle;
-  toggle off → pane alone, no hairline, `view=none` written; toggle on →
-  waterfall + column ("CQ SV1JDZ"), `view=waterfall` written; zero GTK
-  warnings. −190 lines. Open, in order, now: SDR-13 (sdr-for-linux came up
-  at 1 Hz after a restart) → coherent re-centring only after the NCO phase
-  measurement → `SDRFL_DDC_LAT_MS` → bin/hop/span, crowded fan-out, column
-  drain cost under contest load.
-
-  **Richard's live look at the list-less window (2026-09-05 ~23:45): "jo,
-  je to dobrý" — session closed.** Live at close: sdr-for-linux `build/`
-  98c57de, skimmer `builddir` c1556f5 (log live21, no `SKIM_WF_DEBUG`),
-  log-for-linux `builddir` 76349f8. Scratch `/var/tmp/skimmer-wf-col/`
-  (build, configs, CDP driver, screenshots) stays until his word to trash
-  it. Next session continues at SDR-13 in sdr-for-linux.
-
-  **2026-09-06 — the open list re-cut (Richard: "nepitváme se náhodou ve
-  sračkách zbytečně?").** SDR-13 was READ, not reproduced: every tuning path
-  ends in `schedule_save`, `main()` saves once more after the run loop and
-  before the radio stops (the predecessor's log shows that path ran), the
-  keyfile write is atomic, the load applies no floor — and 1 Hz is exactly
-  the `nf < 1 → 1` clamp every GUI tuning path applies, where Richard had
-  been sweeping the DC line shortly before; the last frequency before the
-  SIGTERM is in no log and he does not remember. Hypothesis: a faithful
-  restore of operator state. Stays open in sdr-for-linux's BACKLOG
-  (1f288d9) with a recipe for the next restart that is planned anyway; the
-  live radio was not stopped for it. **Items (4) coherent re-centring and
-  (5) `SDRFL_DDC_LAT_MS` are SHELVED as polish** — sub-bin history shift and
-  sub-row latency are invisible on a waterfall he already accepted; not to
-  be offered again without a visible symptom. Item (6) stays for a contest
-  look. **Decided, in order: (a) release v0.4.0 FIRST** — 40 commits since
-  v0.3.0: M8 waterfall + callsign column + click-to-tune (LB0EI's ask),
-  SKM-1/SKM-6 fixes, the list gone, all live-verified; **(b) then the RTTY
-  over-head fix** (pre-roll replay, the OPEN item under M7 — measured
-  causes, approved direction, fixture in `/var/tmp/skimmer-iq/`).
-
-**v0.4.0 RELEASED 2026-09-06** (Richard's "ano"): 41 commits since v0.3.0
-— M8 waterfall + callsign column + click-to-tune, the retune flow, the list
-gone, four Preferences tabs, SKM-1/SKM-6. Bump a9dc73f, signed tag
-eb73cbe, checksum 194c42a; the GitHub release was created with curated
-notes right after the tag push so CI (run 34028010063, green) attached
-AppImage/deb/rpm to it; AUR 0.4.0-1 (fc5a832, check() 12 gates). The notes
-state the sdr-for-linux dependency honestly: v0.5.0 works, the waterfall
-flowing through a retune needs sdr's main ≥ 98c57de (all four retune-flow
-commits sit after v0.5.0). Next: the RTTY over-head pre-roll fix (M7 OPEN).
+  the pause back on his most common gesture; smoothing of a per-label SNR — an
+  EMA is an unmeasured lever. **Shelved as polish, not to be offered again
+  without a visible symptom (Richard, 2026-09-06):** coherent re-centring of
+  the window (works only if the radio's DDC NCO is phase-continuous across a
+  retune — measure the phase jump on a strong stable carrier first, never
+  assume) and the sub-row `SDRFL_DDC_LAT_MS` latency. Waiting for a contest
+  look: bin / hop / span and the crowded fan-out (issues #9, #10). One lesson
+  from the live evening: never import a script with radio side effects — a
+  peek script imported the TCI test client, whose `main()` ran at import and
+  sent `vfo:0,0,4;` to the live radio; the client has a main guard now.
 
 ## Safety / etiquette
 
 Read-only against the radio, with one deliberate exception: the skimmer
-*consumes* IQ, *sends spots*, and — only when the user activates a station row —
+*consumes* IQ, *sends spots*, and — only when the user clicks a callsign (the
+waterfall column or the decode pane) —
 *tunes* (`vfo:0,0,<hz>`; added 2026-07-15 at Richard's request). It never keys
 and never changes radio state on its own (no TRX/TUNE/CW from here). The RBN
 feed must never emit unvalidated callsigns — M4 gates M6. Richard's global rule
