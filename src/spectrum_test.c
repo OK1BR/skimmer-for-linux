@@ -4,9 +4,11 @@
  * The one trap this tap can fall into is the mirror: a +12 kHz tone drawn
  * BELOW the centre (the 2026-07-15 live catch, in a new coat). So the first
  * checks are orientation at every rate the radio can announce, then the
- * bin/row bookkeeping, the dynamic range of the byte encoding, and the
- * pipeline plumbing (rows only while enabled, rows during TX hold, the right
- * centre on every row).
+ * bin/row bookkeeping, the dynamic range of the byte encoding, the muted
+ * stream (exact-zero IQ — own TX on sdr-for-linux — draws nothing and never
+ * reaches the view's floor tracker, gh#17), and the pipeline plumbing (rows
+ * only while enabled, the picture following the DATA through a TX hold, the
+ * right centre on every row).
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -162,12 +164,14 @@ static void rate_section(double rate) {
   check(what, cap.last[pk] >= 185 && cap.last[pk] <= 200);
 
   /* Reset forgets the buffered tail: no row before a full window again. */
+  /* (Noise, not zeros: an exact-zero window is a muted stream and draws no
+   * row at all — the mute section below.) */
   cap.rows = 0;
   skim_spectrum_reset(s);
-  float *quiet = g_new0(float, 2 * (n - 1));
+  float *quiet = synth(rate, n, NULL, 0, 1e-4);
   skim_spectrum_push(s, quiet, n - 1, 14020000.0);
   check("reset: n−1 frames after reset produce no row", cap.rows == 0);
-  skim_spectrum_push(s, quiet, 1, 14020000.0);
+  skim_spectrum_push(s, quiet + 2 * (n - 1), 1, 14020000.0);
   check("reset: the n-th frame produces exactly one row", cap.rows == 1);
   g_free(quiet);
 
@@ -176,7 +180,7 @@ static void rate_section(double rate) {
    * reaches T — two hops after the change at hop = n/4, whatever the rate.
    * Feed one whole window at A, then hop-sized pieces at B. */
   skim_spectrum_reset(s);
-  float *z = g_new0(float, 2 * n);
+  float *z = synth(rate, n, NULL, 0, 1e-4);
   skim_spectrum_push(s, z, n, 1000.0);                 /* row 1: window [0,n) */
   check("label: the first row carries its own centre", cap.row_hz == 1000.0);
   double got[5] = { 0 };
@@ -279,6 +283,70 @@ static void rate_section(double rate) {
     g_free(pa); g_free(pb); g_free(pa2); g_free(pb2);
   }
 
+  /* Muted stream (gh#17): sdr-for-linux puts EXACT zeros on the wire while
+   * the radio transmits. A −6 dBFS tone over noise, a mute of 20⅓ hops that
+   * starts and ends off the hop grid, the band again. Wanted: the rows pause
+   * (no dead row is ever emitted), the rows whose window straddles a mute
+   * edge read the band's own floor and smear nothing across the row, and the
+   * view's floor tracker — fed with exactly the rows that come out — never
+   * leaves the band's floor. */
+  {
+    skim_spectrum_reset(s);
+    const guint m0 = n + 8 * hop - hop / 16;           /* n/64 short of a row end */
+    const guint mlen = 20 * hop + hop / 3;
+    const guint total = m0 + mlen + n + 8 * hop;
+    Tone tm = { 12000.0, 0.5, 0 };
+    float *live = synth(rate, total, &tm, 1, 1e-4);
+    memset(live + 2 * m0, 0, sizeof(float) * 2 * mlen);
+    SkimWfHistory *hist = skim_wf_history_new(64);
+    double ref_floor = 0.0, max_dev = 0.0;
+    guint8 ref_byte = 0;
+    guint emitted = 0, dead = 0, off_floor = 0, misplaced = 0, smeared = 0;
+    double worst_leak = 1e9;
+    cap.rows = 0;
+    for (guint off = 0; off < total; off += hop / 2) {
+      const guint len = MIN(hop / 2, total - off);
+      const guint before = cap.rows;
+      skim_spectrum_push(s, live + 2 * off, len, 14020000.0);
+      if (cap.rows == before) { continue; }
+      emitted++;
+      skim_wf_history_push(hist, cap.last, n, 14020000.0, bin);
+      const guint8 fb = floor_byte(cap.last, n);
+      if (emitted == 8) { ref_floor = skim_wf_history_floor_db(hist); ref_byte = fb; }
+      if (fb == 0) { dead++; }
+      if (emitted > 8) {
+        if (abs((int)fb - (int)ref_byte) > 2) { off_floor++; }
+        max_dev = MAX(max_dev, fabs(skim_wf_history_floor_db(hist) - ref_floor));
+      }
+      const guint pk = argmax(cap.last, n);
+      if (fabs(idx_hz(pk, n, bin) - 12000.0) > 2.5 * bin) { misplaced++; }
+      guint8 leak = 0;
+      for (guint i = 0; i < n; i++) {
+        if ((i > pk ? i - pk : pk - i) > 16 && cap.last[i] > leak) { leak = cap.last[i]; }
+      }
+      const double down = (double)cap.last[pk] - (double)leak;
+      worst_leak = MIN(worst_leak, down);
+      if (down < 30.0) { smeared++; }
+    }
+    const guint continuous = (total - n) / hop + 1;
+    const guint paused = continuous - emitted;
+    g_snprintf(what, sizeof(what), "mute: the rows pause — %u of %u rows not drawn over a %.1f-hop mute",
+               paused, continuous, (double)mlen / hop);
+    check(what, paused + 3 >= mlen / hop && paused <= mlen / hop);
+    g_snprintf(what, sizeof(what), "mute: no dead row comes out (%u with a zero floor)", dead);
+    check(what, dead == 0 && emitted > 16);
+    g_snprintf(what, sizeof(what), "mute: every row, straddlers included, reads the band's floor ±2 dB (%u off)", off_floor);
+    check(what, off_floor == 0);
+    g_snprintf(what, sizeof(what), "mute: the tone stays at +12 kHz on every row (%u misplaced)", misplaced);
+    check(what, misplaced == 0);
+    g_snprintf(what, sizeof(what), "mute: a chopped window smears nothing across the row (worst %.0f dB down ≥ 30)", worst_leak);
+    check(what, smeared == 0);
+    g_snprintf(what, sizeof(what), "mute: the view's floor tracker never leaves the band (max drift %.2f dB < 1)", max_dev);
+    check(what, max_dev < 1.0);
+    skim_wf_history_free(hist);
+    g_free(live);
+  }
+
   g_free(cap.last);
   skim_spectrum_free(s);
 }
@@ -324,15 +392,40 @@ static void pipeline_section(void) {
   g_snprintf(what, sizeof(what), "peak at %.1f Hz absolute (want 14 032 000 ±bin/2)", abs_hz);
   check(what, fabs(abs_hz - 14032000.0) <= cap.bin_hz / 2.0 + 1e-9);
 
-  /* TX hold swallows decode blocks; the picture must keep flowing. */
+  /* The picture follows the DATA, not the trx flag (gh#17): sdr-for-linux
+   * reports trx from a 500 ms poll — measured 0.04–0.43 s behind the muted
+   * IQ — so the flag can neither start nor end the pause. A TX hold over a
+   * LIVE stream (a server that keeps sending the band) keeps drawing… */
   const guint before = cap.rows;
   skim_pipeline_set_tx_hold(p, TRUE);
   for (guint off = 0; off + blk <= (guint)rate / 2; off += blk) {
     skim_pipeline_feed(p, iq + 2 * off, blk, rate, center);
   }
   skim_pipeline_set_tx_hold(p, FALSE);
-  g_snprintf(what, sizeof(what), "rows keep coming during TX hold (+%u)", cap.rows - before);
+  g_snprintf(what, sizeof(what), "TX hold over a live stream: rows keep coming (+%u)", cap.rows - before);
   check(what, cap.rows > before + 20);
+
+  /* …and a muted stream draws nothing, hold or no hold: half a second of
+   * exact zeros, then the band again. */
+  {
+    float *mute = g_new0(float, 2 * blk);
+    for (guint off = 0; off + blk <= (guint)rate; off += blk) {   /* flush the window */
+      skim_pipeline_feed(p, mute, blk, rate, center);
+    }
+    const guint at_mute = cap.rows;
+    for (guint off = 0; off + blk <= (guint)rate / 2; off += blk) {
+      skim_pipeline_feed(p, mute, blk, rate, center);
+    }
+    g_snprintf(what, sizeof(what), "muted stream (exact zeros): no rows (+%u)", cap.rows - at_mute);
+    check(what, cap.rows == at_mute);
+    for (guint off = 0; off + blk <= (guint)rate / 2; off += blk) {
+      skim_pipeline_feed(p, iq + 2 * off, blk, rate, center);
+    }
+    g_snprintf(what, sizeof(what), "band back: rows resume (+%u), floor byte %u — a live row",
+               cap.rows - at_mute, floor_byte(cap.last, cap.nbins));
+    check(what, cap.rows > at_mute + 20 && floor_byte(cap.last, cap.nbins) > 0);
+    g_free(mute);
+  }
 
   /* Off again: silence. */
   skim_pipeline_set_spectrum_enabled(p, FALSE);

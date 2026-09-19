@@ -1148,6 +1148,35 @@ the draft + word gaps after more testing; (3) the model's omitted gaps
 after long pauses (needs a real keyed detector); (4) latency verdict waits
 for a CW contest.
 
+**gh#17 — the waterfall pauses on a muted stream (offline-proven 2026-09-19,
+mid-SAC-CW; Richard's live look pending).** Live: every own over turned the
+waterfall white, ~4 s to settle, the over a black band in it. Measured on
+`iq-20260919-sac-20m-192k.cf32` (eight overs): the wire carries EXACT zeros
+during TX (eight zero runs, to the sample), such a row reads −200 dBFS, the
+view's floor tracker fell −127 → −191…−198 dBFS within one over and
+`wf_view.c` recoloured the whole history on every 1 dB of drift. Fix in
+`spectrum.c` `emit_row`: a kept segment of nothing but exact zeros → no row;
+a zero run ≥ N/32 at either end → the row comes from the live part alone via
+the retune cut path (fresh Hann, floor renormalised); under a hop of live
+signal → no row. The pause hangs off the DATA, not the TX hold — sdr-for-linux
+reports `trx` from its 500 ms reporter poll (tci_server.c, read), measured
+0.04–0.43 s behind the zeros at key-on and 0.30–0.79 s at release (poll +
+grace): a flag pause would still leak ~40 dead rows per over and cut 0.3–0.8 s
+of live picture after it — not built. The edge cut was measured too: without
+it a chopped window smears the strongest line across the row 15 dB down and
+moves the floor 2.8 dB. Same recording after: tracked floor −127.0…−125.9 dBFS
+over 300 s, no row under −128, station table + counters identical. Gate
+`skimmer-spectrum-test` 113 → 139 (mute section × 4 rates + pipeline; 25 red
+on the pre-fix code; the reset/label checks feed noise now — an exact-zero
+window draws no row by design). `SKIM_SPECTRUM_DUMP` prints the tracked floor
+per second. 13 gates green. Where the zeros originate (radio DDC vs
+sdr-for-linux) is NOT verified — the wire fact suffices. **Finding for
+separate tickets (not acted on):** the same late flag means the DECODERS see
+up to ~0.4 s of dead stream before every hold and lose up to ~0.8 s of the
+answer after it — an immediate `trx` broadcast in sdr-for-linux (parity with
+the `p2_set_frequency` kick) and/or a data-driven hold here; plausibly
+related to #18.
+
 ## Layout
 
 ```

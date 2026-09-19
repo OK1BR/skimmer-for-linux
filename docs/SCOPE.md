@@ -383,8 +383,14 @@ M0…M8 are cited from source comments — keep them.
   (`HOLD_CAP_S` — a stuck trx must not freeze the skimmer forever); an
   optional `resync` backend hook resets framers at resume (RTTY and DeepCW
   implement it); `skim_pipeline_set_tx_hold` is public for the offline
-  harness; the spectrum tap is fed BEFORE the hold check, so the waterfall
-  keeps flowing. Measured in the RTTY gate: WITH the hold the reply decodes
+  harness; the spectrum tap is fed BEFORE the hold check — the waterfall
+  follows the data, not the flag (M8 below: a muted stream pauses it).
+  Measured on the wire 2026-09-19 (SAC CW, eight overs recorded): the IQ is
+  EXACT zeros for the length of an over, not an attenuated band; the hold
+  engaged 0.04–0.43 s after the zeros began and released 0.30–0.79 s after
+  they ended (the 500 ms poll, plus the grace) — so the decoders still see up
+  to ~0.4 s of dead stream before every freeze and lose up to ~0.8 s of the
+  answer after it. Measured in the RTTY gate: WITH the hold the reply decodes
   complete from its first character and nothing decodes from the held band;
   WITHOUT it 77 garbage decodes leak during the own-TX silence and the
   reply's head is lost. Live: the 2026-08-23 contest day logged 54 clean
@@ -515,9 +521,29 @@ M0…M8 are cited from source comments — keep them.
   reads 194, a −60 dBFS noise floor ~95). Pipeline: `skim_pipeline_set_spectrum_cb`
   + `skim_pipeline_set_spectrum_enabled` (atomic, default OFF — no FFT for a
   hidden view); the tap is fed at the top of `process_block`, BEFORE the TX
-  hold check, so the picture keeps flowing while the decoders freeze; the
-  object is built lazily on the engine thread at the block's rate (fftw's
-  planner is not thread-safe — same thread as the channelizer's plan).
+  hold check; the object is built lazily on the engine thread at the block's
+  rate (fftw's planner is not thread-safe — same thread as the channelizer's
+  plan).
+  **The picture pauses on a muted stream (gh#17, 2026-09-19).** Live in SAC
+  CW the waterfall went white on every own over and needed ~4 s to settle,
+  the over itself standing in it as a black band. Measured on a recording of
+  eight overs: the wire carries exact zeros during TX, such a row reads
+  −200 dBFS, the view's floor tracker (20th percentile, EMA 0.01/row) fell
+  from −127 to −191…−198 dBFS within one over, and every 1 dB of that drift
+  recoloured the WHOLE history against the sunken floor. The pause therefore
+  hangs off the DATA, inside the tap: a window of nothing but exact zeros
+  yields no row, and a row straddling a mute edge is computed from its live
+  part alone through the retune cut path (fresh Hann, floor renormalised;
+  zero runs under N/32 stay in the full window, under a hop of live signal
+  no row). Same recording after: tracked floor −127.0…−125.9 dBFS over all
+  300 s, no row below −128, decode output identical. Rejected by
+  measurement: pausing on the TX hold (the operator's first idea) — the
+  `trx` flag trails the zeros by 0.04–0.43 s, ~40 dead rows per over would
+  still drag the floor ~24 dB (computed: 1 − 0.99⁴⁰ of the 73 dB gap), and at
+  release it would cost 0.3–0.8 s of live picture; rows without the edge cut — a chopped window smeared the
+  strongest line across the row only 15 dB down and moved the floor 2.8 dB.
+  A server that keeps sending a deafened band through TX (none seen) would
+  need the flag after all.
   **The view (same day, headless-verified).** `src/app/wf_compose.c` is the
   GLib-only history + composer (gate-tested): full-resolution rows in a ring
   (`SKIM_WF_HISTORY_ROWS` 2048 ≈ 22 s, 16 MB at 192 k), a pannable/zoomable

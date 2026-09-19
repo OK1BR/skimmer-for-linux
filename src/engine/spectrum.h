@@ -26,6 +26,12 @@
  * tone at bin centre reads ~200; a −120 dBFS noise floor reads ~80; the
  * viewer auto-ranges on the floor, so absolute calibration is not needed.
  *
+ * A muted stream draws nothing (gh#17): exact-zero IQ — what sdr-for-linux
+ * sends while the radio transmits — yields no row, and a row whose window
+ * straddles a mute edge is computed from its live part alone. The picture
+ * pauses on the data, to the sample; the view's noise-floor tracker never
+ * sees a dead row.
+ *
  * GLib-only, one thread (the engine thread — fftw's planner is not
  * thread-safe, so the object is built where the channelizer is built).
  */

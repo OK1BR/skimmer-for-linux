@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "app/wf_compose.h"                     /* floor-tracker constants (dump) */
 #include "engine/pipeline.h"
 
 #define BLK 2048                       /* frames per feed — the TCI block size */
@@ -65,10 +66,11 @@ static void spectrum_cb(const guint8 *row, guint nbins, double center_hz,
   (void)user;
   static guint rows;
   static double t_per_row;
+  /* The view's floor tracker replayed on the rows (wf_compose.h constants):
+   * what the colour map would hang off, and how far a run of rows drags it. */
+  static double trk;
+  static guint  trk_min = 255;
   if (!t_per_row) { t_per_row = 1.0 / (bin_hz * nbins) * (nbins / 4.0); }
-  rows++;
-  const guint per_sec = (guint)(1.0 / t_per_row + 0.5);
-  if (rows % MAX(per_sec, 1u)) { return; }
   guint pk = 0;
   guint hist[256] = { 0 };
   for (guint i = 0; i < nbins; i++) {
@@ -76,11 +78,19 @@ static void spectrum_cb(const guint8 *row, guint nbins, double center_hz,
     hist[row[i]]++;
   }
   guint cum = 0, fl = 0;
-  for (guint b = 0; b < 256; b++) { cum += hist[b]; if (cum >= nbins / 5) { fl = b; break; } }
-  fprintf(stderr, "spectrum: t=%4us peak %.1f kHz (byte %u, floor %u, +%.1f dB)\n",
-          rows / MAX(per_sec, 1u),
-          (center_hz + ((double)pk - nbins / 2.0) * bin_hz) / 1000.0,
-          row[pk], fl, (double)row[pk] - fl);
+  const guint target = nbins * SKIM_WF_FLOOR_PCT / 100;
+  for (guint b = 0; b < 256; b++) { cum += hist[b]; if (cum >= target) { fl = b; break; } }
+  trk = rows ? trk + SKIM_WF_FLOOR_SMOOTH * ((double)fl - trk) : (double)fl;
+  trk_min = MIN(trk_min, fl);
+  rows++;
+  const guint per_sec = (guint)(1.0 / t_per_row + 0.5);
+  if (rows % MAX(per_sec, 1u)) { return; }
+  fprintf(stderr, "spectrum: row %6u peak %.1f kHz (byte %u, floor %u, +%.1f dB)"
+          " tracked floor %.1f dBFS, lowest row floor %.0f dBFS\n",
+          rows, (center_hz + ((double)pk - nbins / 2.0) * bin_hz) / 1000.0,
+          row[pk], fl, (double)row[pk] - fl,
+          trk - SKIM_WF_DB_OFFSET, (double)trk_min - SKIM_WF_DB_OFFSET);
+  trk_min = 255;
 }
 
 static int by_freq(gconstpointer a, gconstpointer b) {

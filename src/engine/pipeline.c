@@ -202,7 +202,11 @@ struct _SkimPipeline {
   /* M8 waterfall: FFT tap on the raw band (spectrum.h). Built lazily on the
    * engine thread at the block's rate (fftw planning is not thread-safe —
    * same thread as the channelizer's plan), fed BEFORE the TX hold check:
-   * the picture keeps flowing while decoders freeze, own splatter and all. */
+   * the picture follows the DATA, not the trx flag. A muted stream (exact
+   * zeros — own TX on sdr-for-linux) pauses it inside the tap, to the sample
+   * (spectrum.c, gh#17: the flag comes from a 500 ms poll there, 0.04–0.43 s
+   * behind the zeros); a server that keeps sending the band through TX
+   * keeps the picture flowing while the decoders freeze. */
   SkimSpectrum         *spec;
   double                spec_rate;
   volatile gint         spec_on;
@@ -670,7 +674,8 @@ static void spec_feed(SkimPipeline *p, const IqBlock *b) {
 }
 
 static void process_block(SkimPipeline *p, IqBlock *b) {
-  spec_feed(p, b);                             /* M8: picture first, always  */
+  spec_feed(p, b);                             /* M8: the picture follows the
+                                                * data, not the hold below    */
   /* TX hold (SCOPE: TX hold): while the operator's own TX deafens the RX
    * (T/R relay + 31 dB TX attenuators), the band the decoders would see is
    * self-inflicted silence — evaluating it releases every channel and the

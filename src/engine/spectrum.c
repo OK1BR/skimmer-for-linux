@@ -95,6 +95,12 @@ void skim_spectrum_reset(SkimSpectrum *s) {
   s->head = s->filled = s->since = 0;
 }
 
+/* Exact digital silence at frame i of the window (0 = the oldest). */
+static inline gboolean frame_is_zero(const SkimSpectrum *s, guint i) {
+  const guint j = (s->head + i) % s->n;
+  return s->ring[2 * j] == 0.0f && s->ring[2 * j + 1] == 0.0f;
+}
+
 static void emit_row(SkimSpectrum *s) {
   const guint n = s->n;
   const guint64 w0 = s->total - (guint64)n;      /* index of the window's frame 0 */
@@ -129,6 +135,38 @@ static void emit_row(SkimSpectrum *s) {
    * frames mislabelled by a small stamp error carry next to no weight —
    * a label n/32 frames late paints no ghost (58 dB down, gate-measured
    * with an explicit n/16 guard removed; the guard only cost resolution). */
+
+  /* A MUTED stream is not a band (gh#17). sdr-for-linux puts exact zeros on
+   * the wire while the radio transmits (SAC CW 2026-09-19: eight overs, eight
+   * zero runs, to the sample). A row of them reads −200 dBFS: the view's
+   * floor tracker followed it 64–71 dB down within one over, the whole
+   * history was recoloured against that floor — the waterfall went white,
+   * took ~4 s to come back, and the over itself stood in it as a black band.
+   * So the pause hangs off the DATA: the trx flag cannot do it — it comes
+   * from a 500 ms poll there and ran 0.04–0.43 s behind the zeros, ~40 dead
+   * rows per over, a quarter of the way down again.
+   *   – nothing but exact zeros in the kept segment → no row: the picture
+   *     stops and resumes on the first live row;
+   *   – a zero run at either end → a mute edge inside the window: the row
+   *     comes from the live part alone, through the cut path below (fresh
+   *     Hann, floor renormalised) — a chopped window would smear every
+   *     strong line across the row. Under n/32 frames the full window's own
+   *     taper already leaves the edge no weight (the late-label figure
+   *     above), and a stray zero frame of a quantised source must not flip
+   *     rows onto the cut path;
+   *   – less than a hop of live signal next to a mute → no row either. */
+  {
+    const guint len = seg_hi - seg_lo;
+    guint lead = 0, trail = 0;
+    while (lead < len && frame_is_zero(s, seg_lo + lead)) { lead++; }
+    if (lead == len) { return; }
+    while (frame_is_zero(s, seg_hi - 1 - trail)) { trail++; }
+    const guint slack = n / 32;
+    const gboolean edge = lead >= slack || trail >= slack;
+    if (lead  >= slack) { seg_lo += lead; }
+    if (trail >= slack) { seg_hi -= trail; }
+    if (edge && seg_hi - seg_lo < s->hop) { return; }
+  }
   const gboolean cut = seg_lo != 0 || seg_hi != n;
 
   /* Oldest frame first: the ring's head is the next write slot, i.e. the
