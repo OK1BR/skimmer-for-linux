@@ -20,7 +20,7 @@ env:
   DEBIAN_FRONTEND: noninteractive
   APT_DEPS: >-
     meson ninja-build libgtk-4-dev libadwaita-1-dev libglib2.0-dev
-    libwebsockets-dev libfftw3-dev desktop-file-utils
+    libwebsockets-dev libfftw3-dev libcurl4-gnutls-dev desktop-file-utils
 
 jobs:
   gates:

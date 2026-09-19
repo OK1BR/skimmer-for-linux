@@ -51,6 +51,8 @@ overrides:
       - libadwaita-1-0 (>= 1.5)
       - libglib2.0-0t64
       - libwebsockets19t64
+      # the gnutls flavour: the one libadwaita's libappstream5 already loads
+      - libcurl3t64-gnutls
       - libfftw3-single3
       - libfftw3-double3
   rpm:
@@ -60,5 +62,6 @@ overrides:
       - libadwaita >= 1.5
       - glib2
       - libwebsockets
+      - libcurl
       - fftw-libs-single
       - fftw-libs-double

@@ -8,7 +8,7 @@ pkgdesc="Native GTK4/libadwaita multi-channel CW/RTTY skimmer (TCI client, spots
 arch=('x86_64')
 url="https://github.com/OK1BR/skimmer-for-linux"
 license=('GPL-3.0-or-later')
-depends=('gtk4' 'libadwaita' 'glib2' 'libwebsockets' 'fftw')
+depends=('gtk4' 'libadwaita' 'glib2' 'libwebsockets' 'fftw' 'curl')
 # desktop-file-utils + gtk-update-icon-cache: gnome.post_install wants both
 # tools at meson-configure time even though DESTDIR skips the actual refresh.
 makedepends=('meson' 'desktop-file-utils' 'gtk-update-icon-cache')

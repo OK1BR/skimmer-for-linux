@@ -26,6 +26,7 @@
 #include "spot_out.h"
 #include "decode_deepcw.h"
 #include "pipeline.h"
+#include "scp_update.h"
 #include "wf_compose.h"
 #include "wf_view.h"
 
@@ -109,6 +110,10 @@ typedef struct {
   gboolean        rbn_enabled;   /* persisted [rbn]                           */
   char           *rbn_call;      /* spotter callsign (persisted)              */
   int             rbn_port;      /* telnet port (persisted, default 7300)     */
+  SkimScpUpdater *scp;           /* MASTER.SCP kept current in the background
+                                  * (gh#15); NULL while switched off          */
+  gboolean        scp_auto;      /* persisted [scp] auto_update, default on   */
+  char            scp_note[256]; /* the last check's outcome, for About       */
   int             decode_font;   /* decode pane font size, pt (persisted)     */
   GtkCssProvider *css;           /* carries the decode pane font rule         */
   gboolean        probing;       /* port probe / handshake in flight          */
@@ -1113,6 +1118,20 @@ static guint settings_load_device(void) {
   return v;
 }
 
+/* MASTER.SCP auto-update: ON unless the user switched it off. */
+static gboolean settings_load_scp_auto(void) {
+  char *path = settings_file();
+  GKeyFile *kf = g_key_file_new();
+  gboolean v = TRUE;
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL) &&
+      g_key_file_has_key(kf, "scp", "auto_update", NULL)) {
+    v = g_key_file_get_boolean(kf, "scp", "auto_update", NULL);
+  }
+  g_key_file_free(kf);
+  g_free(path);
+  return v;
+}
+
 static void settings_load_rbn(App *app) {
   char *path = settings_file();
   GKeyFile *kf = g_key_file_new();
@@ -1150,6 +1169,7 @@ static void settings_save(const App *app) {
   g_key_file_set_boolean(kf, "rbn", "enabled", app->rbn_enabled);
   g_key_file_set_string(kf, "rbn", "call", app->rbn_call);
   g_key_file_set_integer(kf, "rbn", "port", app->rbn_port);
+  g_key_file_set_boolean(kf, "scp", "auto_update", app->scp_auto);
   g_key_file_set_integer(kf, "ui", "decode_font_pt", app->decode_font);
   g_key_file_set_integer(kf, "ui", "palette", app->palette);
   g_key_file_set_string(kf, "ui", "view",
@@ -1165,6 +1185,47 @@ static void settings_save(const App *app) {
   g_key_file_free(kf);
   g_free(dir);
   g_free(path);
+}
+
+/* --- MASTER.SCP kept current (gh#15) ------------------------------------------------------
+ * The updater owns a timer and a worker thread; nothing here ever waits on
+ * the network. A new file is swapped into the dictionary by the worker
+ * itself, live — the pane's tail re-tint and the next scored token simply
+ * see it. */
+static char *scp_dict_path(void) {
+  return g_build_filename(g_get_user_config_dir(), "skimmer-for-linux",
+                          "master.scp", NULL);
+}
+
+static void on_scp_update(const SkimScpOutcome *out, gpointer user) {
+  App *app = user;
+  if (app->closing) { return; }
+  static const char *WHAT[] = { "up to date", "updated", "not due", "failed",
+                                "cancelled" };
+  GDateTime *now = g_date_time_new_now_local();
+  char *when = g_date_time_format(now, "%Y-%m-%d %H:%M");
+  g_snprintf(app->scp_note, sizeof(app->scp_note), "%s %s — %s", when,
+             WHAT[MIN((guint)out->result, G_N_ELEMENTS(WHAT) - 1)], out->detail);
+  g_date_time_unref(now);
+  g_free(when);
+  if (out->result == SKIM_SCP_FAILED) {
+    g_warning("scp: update check failed (%s) — the file on disk stays, next "
+              "try in %d min", out->detail, (int)(out->wait_s / 60));
+  } else {
+    g_message("scp: %s", app->scp_note);
+  }
+}
+
+static void scp_apply(App *app) {
+  if (!app->scp_auto) {
+    g_clear_pointer(&app->scp, skim_scp_updater_free);
+    return;
+  }
+  if (app->scp) { return; }
+  char *path = scp_dict_path();
+  app->scp = skim_scp_updater_new(path, on_scp_update, app);
+  g_free(path);
+  skim_scp_updater_start(app->scp, 15);        /* after the connect settled  */
 }
 
 /* (Re)start the RBN telnet server to match the current settings. The feed
@@ -1319,8 +1380,7 @@ static void probe_done(GObject *src, GAsyncResult *res, gpointer user) {
  * whichever thread the engine runs on). Shared by the live path (probe_done)
  * and the offline replay (SKIM_IQ_FILE). */
 static SkimPipeline *pipeline_create(App *app) {
-  char *dict = g_build_filename(g_get_user_config_dir(), "skimmer-for-linux",
-                                "master.scp", NULL);
+  char *dict = scp_dict_path();
   /* Raw decodes go to a per-day log for decoder QA (M3 off-air A/B). */
   char *logdir = g_build_filename(g_get_user_data_dir(), "skimmer-for-linux",
                                   NULL);
@@ -1495,6 +1555,7 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   GtkWidget *rsw  = g_object_get_data(G_OBJECT(dlg), "rbn-row");
   GtkWidget *rcall = g_object_get_data(G_OBJECT(dlg), "rbn-call-row");
   GtkWidget *rport = g_object_get_data(G_OBJECT(dlg), "rbn-port-row");
+  GtkWidget *scprow = g_object_get_data(G_OBJECT(dlg), "scp-row");
   const char *h = gtk_editable_get_text(GTK_EDITABLE(row));
   char *host = g_strstrip(g_strdup((h && h[0]) ? h : "127.0.0.1"));
   int tci_port = (int)adw_spin_row_get_value(ADW_SPIN_ROW(tprow));
@@ -1511,6 +1572,8 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   guint dec_mode = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(mrow)), 1u);
   guint cw_engine = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(erow)), 1u);
   guint dcw_device = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(drow)), 1u);
+  gboolean scp_auto = adw_switch_row_get_active(ADW_SWITCH_ROW(scprow));
+  gboolean scp_changed = scp_auto != app->scp_auto;
   gboolean host_changed = host[0] && g_strcmp0(host, app->host) != 0;
   gboolean port_changed = tci_port != app->tci_port;
   gboolean mode_changed = dec_mode != app->dec_mode;
@@ -1554,6 +1617,10 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   } else {
     g_free(rbn_call);
   }
+  if (scp_changed) {
+    app->scp_auto = scp_auto;
+    scp_apply(app);                            /* applies live, no reconnect */
+  }
   if (mode_changed) {
     app->dec_mode = dec_mode;
   }
@@ -1565,7 +1632,7 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   }
   if (host_changed || port_changed || mode_changed || engine_changed ||
       device_changed || cq_changed || round_changed || font_changed ||
-      rbn_changed) {
+      rbn_changed || scp_changed) {
     settings_save(app);
   }
   /* A device change only matters to a DeepCW pipeline: the loaded session
@@ -1702,6 +1769,40 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(dgrp), drow);
   adw_preferences_page_add(p_dec, ADW_PREFERENCES_GROUP(dgrp));
 
+  /* Callsign dictionary: the site's own rule is that the user can switch
+   * automatic downloads off. */
+  GtkWidget *cgrp = adw_preferences_group_new();
+  adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(cgrp),
+                                  "Callsign dictionary");
+  GtkWidget *scprow = adw_switch_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(scprow),
+                                "Keep MASTER.SCP current");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(scprow),
+      "The known-call list from supercheckpartial.com: checked in the "
+      "background at most once a day, downloaded only when it changed, "
+      "applied without a reconnect");
+  adw_switch_row_set_active(ADW_SWITCH_ROW(scprow), app->scp_auto);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(cgrp), scprow);
+  GtkWidget *scpinfo = adw_action_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(scpinfo), "Loaded list");
+  {
+    char *rel = skim_callsign_dict_release();
+    char *sub;
+    if (skim_callsign_dict_size() > 0) {
+      sub = g_strdup_printf("Release %s · %u calls", rel ? rel : "unknown",
+                            (guint)skim_callsign_dict_size());
+    } else {
+      sub = g_strdup("None yet — it loads with the first connection, or "
+                     "with the first download");
+    }
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(scpinfo), sub);
+    g_free(sub);
+    g_free(rel);
+  }
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(cgrp), scpinfo);
+  adw_preferences_page_add(p_dec, ADW_PREFERENCES_GROUP(cgrp));
+  g_object_set_data(G_OBJECT(dlg), "scp-row", scprow);
+
   GtkWidget *sgrp = adw_preferences_group_new();
   adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(sgrp), "Spots");
   GtkWidget *sw = adw_switch_row_new();
@@ -1826,12 +1927,33 @@ static void act_about(GSimpleAction *action, GVariant *param, gpointer user) {
   } else {
     g_strlcpy(feed, "off", sizeof(feed));
   }
-  char scp_note[32];
+  char scp_note[64];
   if (skim_callsign_dict_size() > 0) {
-    g_snprintf(scp_note, sizeof(scp_note), "%u calls",
-               (guint)skim_callsign_dict_size());
+    char *rel = skim_callsign_dict_release();
+    g_snprintf(scp_note, sizeof(scp_note), "%u calls, release %s",
+               (guint)skim_callsign_dict_size(), rel ? rel : "unknown");
+    g_free(rel);
   } else {
     g_strlcpy(scp_note, "not loaded", sizeof(scp_note));
+  }
+  /* auto-update: the switch, the last completed check (from the state file,
+   * so it survives restarts) and this session's last outcome */
+  char scp_upd[400];
+  {
+    char *dpath = scp_dict_path();
+    gint64 lc = skim_scp_update_last_check(dpath, NULL);
+    g_free(dpath);
+    char when[32] = "never";
+    if (lc > 0) {
+      GDateTime *t = g_date_time_new_from_unix_local(lc);
+      char *f = t ? g_date_time_format(t, "%Y-%m-%d %H:%M") : NULL;
+      if (f) { g_strlcpy(when, f, sizeof(when)); }
+      g_free(f);
+      if (t) { g_date_time_unref(t); }
+    }
+    g_snprintf(scp_upd, sizeof(scp_upd), "%s, last completed check %s%s%s",
+               app->scp_auto ? "on" : "off", when,
+               app->scp_note[0] ? "; this session: " : "", app->scp_note);
   }
   /* Versions and paths, pasteable into a bug report via the Copy button. */
   char *dbg = g_strdup_printf(
@@ -1841,6 +1963,7 @@ static void act_about(GSimpleAction *action, GVariant *param, gpointer user) {
       "Telnet feed: %s\n"
       "Settings: %s/skimmer-for-linux/settings.ini\n"
       "MASTER.SCP: %s/skimmer-for-linux/master.scp (%s)\n"
+      "MASTER.SCP auto-update: %s\n"
       "Decode logs: %s/skimmer-for-linux/",
       gtk_get_major_version(), gtk_get_minor_version(),
       gtk_get_micro_version(),
@@ -1850,7 +1973,7 @@ static void act_about(GSimpleAction *action, GVariant *param, gpointer user) {
       app->pipeline ? skim_pipeline_cw_engine_name(app->pipeline)
                     : (app->cw_engine ? "deepcw (preferred)" : "cw-v2"),
       feed,
-      g_get_user_config_dir(), g_get_user_config_dir(), scp_note,
+      g_get_user_config_dir(), g_get_user_config_dir(), scp_note, scp_upd,
       g_get_user_data_dir());
   adw_about_dialog_set_debug_info(ad, dbg);
   g_free(dbg);
@@ -2028,6 +2151,9 @@ static void app_teardown(App *app) {
    * the loop is gone). The telnet feed goes AFTER the pipeline: the
    * pipeline's feed spot_out was built on it. */
   g_clear_pointer(&app->rbn, skim_rbn_feed_free);
+  /* A MASTER.SCP check in flight is cancelled; free() returns at once (it
+   * grants a transfer at most 0.4 s to leave libcurl, and needs ms). */
+  g_clear_pointer(&app->scp, skim_scp_updater_free);
   g_message("app: window closed — engine stopped, timers cleared");
 }
 
@@ -2079,6 +2205,8 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   app->palette      = settings_load_palette();
   settings_load_rbn(app);
   rbn_apply(app);                /* the telnet server is up before the radio */
+  app->scp_auto = settings_load_scp_auto();
+  scp_apply(app);                /* first look 15 s from now, if one is due  */
 
   app->title = ADW_WINDOW_TITLE(adw_window_title_new("Skimmer for Linux", ""));
   GtkWidget *header = adw_header_bar_new();

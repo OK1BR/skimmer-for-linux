@@ -23,7 +23,7 @@ feed**.
 > a callsign column, click to tune (M8). Fresh off the bench: a per-channel **tone splitter**
 > (two stations in one channel decode separately) and a **fist model** (the
 > decoder learns each operator's own spacing). Everything is gated offline —
-> `meson test`, 12 gates, plus a ~50× realtime replay harness for A/B runs on
+> `meson test`, 14 gates, plus a ~50× realtime replay harness for A/B runs on
 > recorded off-air IQ. See [`docs/SCOPE.md`](docs/SCOPE.md) for the full plan.
 
 ![The decode pane during a contest evening](docs/screenshot-decode-pane.png)
@@ -194,7 +194,7 @@ The engine is GLib-only — no GTK anywhere near DSP — so every milestone ship
 an **offline gate binary**: mock TCI server round-trips, synthetic-keying
 decoder suites (run for *both* CW backends), two-tone splitter fixtures, a
 full offline pipeline over a real WebSocket asserting spot frequencies exact
-to the Hz. Twelve gates run in `meson test`; a replay harness pushes recorded
+to the Hz. Fourteen gates run in `meson test`; a replay harness pushes recorded
 off-air IQ through the real pipeline at ~60× realtime, which is how every
 decoder change gets an A/B against yesterday's build on the same corpus
 before it ships.
@@ -231,7 +231,8 @@ mode is a pluggable decode backend on shared infrastructure.
   SunSDR / ExpertSDR3 run has been reported so far
   ([#2](https://github.com/OK1BR/skimmer-for-linux/issues/2)); they are not
   yet a tested, supported target.
-- Linux, GTK4 + libadwaita, GLib, libwebsockets, FFTW (single + double).
+- Linux, GTK4 + libadwaita, GLib, libwebsockets, libcurl, FFTW (single +
+  double).
 - Build: `meson` + `ninja`.
 
 ## Install
@@ -249,7 +250,7 @@ packages on the [Releases page](https://github.com/OK1BR/skimmer-for-linux/relea
   helper: `git clone https://aur.archlinux.org/skimmer-for-linux.git &&
   cd skimmer-for-linux && makepkg -si`. The same recipe lives in this repo
   as [`packaging/PKGBUILD`](packaging/PKGBUILD) — it builds the tagged
-  release tarball and runs the twelve gates in `check()` before packaging.
+  release tarball and runs the fourteen gates in `check()` before packaging.
 
 Both distro packages are install-tested in clean containers before they are
 attached to a release.
@@ -259,7 +260,7 @@ attached to a release.
 ```sh
 meson setup build
 meson compile -C build
-meson test -C build             # 12 offline gates, no radio needed
+meson test -C build             # 14 offline gates, no radio needed
 ./build/skimmer-for-linux
 ```
 
@@ -278,8 +279,16 @@ separately) and `SKIM_TONE_FOCUS=1` (a narrow slot on a lone carrier; it arms
 the splitter machinery too). `SKIM_CW_V1=1` falls back to the classical
 decoder.
 
-Optional: drop a `MASTER.SCP` into `~/.config/skimmer-for-linux/` and the
-extractor uses it as a dictionary boost. Settings live in
+The extractor uses the Super Check Partial call list
+(`~/.config/skimmer-for-linux/master.scp`) as a dictionary boost, and the app
+keeps that file current by itself: in the background it asks
+[supercheckpartial.com](https://www.supercheckpartial.com) at most once a day
+whether a new `MASTER.SCP` is out, downloads it only when it changed, checks
+it (checksum, size, content that looks like a call list) and swaps it in
+without a reconnect. No network, a slow or broken server: the file on disk
+stays as it is and the app carries on. Preferences → Decoding → "Keep
+MASTER.SCP current" switches it off; a file you copy in by hand works as
+before. Settings live in
 `~/.config/skimmer-for-linux/settings.ini`; decode logs in
 `~/.local/share/skimmer-for-linux/`.
 

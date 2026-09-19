@@ -28,6 +28,7 @@ lws_dep   = dependency('libwebsockets')       # M1: TCI client transport
 fftw3f_dep  = dependency('fftw3f')            # M2: channelizer FFT (float)
 fftw3_dep   = dependency('fftw3')             # WDSP fir.c min-phase path (double)
 threads_dep = dependency('threads')
+curl_dep  = dependency('libcurl', version : '>=7.85')  # app: MASTER.SCP updater
 
 # WDSP subset (FIR designer + resampler) — declares wdsp_dep. VENDOR.md there
 # records provenance and the subset rationale.
@@ -224,11 +225,24 @@ skimmer_rbn_test = executable('skimmer-rbn-test',
 )
 test('rbn-feed', skimmer_rbn_test, timeout : 120)
 
+# gh#15: offline gate — the MASTER.SCP updater against a mock HTTP server:
+# the good path, every way a server or a download can be wrong (the old file
+# and the loaded dictionary must survive each), the persisted rate limits,
+# and the app handle (main loop never blocked, teardown never waits).
+skimmer_scp_test = executable('skimmer-scp-test',
+  ['src/scp_test.c', 'src/app/scp_update.c'],      # updater is GTK-free
+  include_directories : [include_directories('src'), engine_inc],
+  dependencies : engine_deps + [curl_dep],
+  link_with : engine_lib,
+)
+test('scp-update', skimmer_scp_test, timeout : 180)
+
 # --- Application ------------------------------------------------------------
 executable('skimmer-for-linux',
-  ['src/app/main.c', 'src/app/wf_compose.c', 'src/app/wf_view.c'],
+  ['src/app/main.c', 'src/app/wf_compose.c', 'src/app/wf_view.c',
+   'src/app/scp_update.c'],
   include_directories : engine_inc,
-  dependencies : [gtk_dep, adw_dep, glib_dep],
+  dependencies : [gtk_dep, adw_dep, glib_dep, gio_dep, curl_dep],
   link_with : engine_lib,
   install : true,
   c_args : ['-DSKIMMER_DATADIR="@0@"'.format(
