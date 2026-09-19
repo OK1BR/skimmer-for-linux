@@ -1224,6 +1224,16 @@ next lever if live asks for it. Gate `skimmer-deepcw-test` 58 → 69 (sync
 65), red without the live-end scan; 13 gates green. `SKIM_DEEPCW_FLUSH=0` =
 the old path for A/B.
 
+**gh#18 — first live look (Richard, 2026-09-19 ~20:20, SAC CW, 20 m).** His
+instance restarted on 544f756 at 20:08:37 (live35, DeepCW on CUDA; a restart,
+settings untouched; IQ back in 0.1 s) and after a first round of testing:
+"uvidíme při závodech, ale co teď testuji, tak se to chová mnohem lépe" — an
+interim verdict, not the final one (the contest was still on, but the band
+"už není tak plné" by then): the issue STAYS OPEN (`needs-live-check`) until
+a full contest band has shown it over many overs. What to watch there:
+the known ~0.35 s limit (an answer keyed right on the end of the over) and
+whether it asks for the smear compensation.
+
 ## Layout
 
 ```
