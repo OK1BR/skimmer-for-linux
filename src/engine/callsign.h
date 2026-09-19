@@ -27,10 +27,28 @@ gboolean skim_callsign_is_valid(const char *s);
 
 /* Optional known-call dictionary (MASTER.SCP style: one call per line, '#'
  * comments, "!!" directives and lines that cannot be a call are skipped).
- * Replaces any previously loaded dictionary. Load on the thread
- * that owns the pipeline setup (no reload while readers run). */
+ * Replaces any previously loaded dictionary, and may do so from any thread
+ * at any time: lookups on other threads see the old table or the new one,
+ * never a half-built one. A file that cannot be read leaves the loaded
+ * dictionary as it was. */
 gboolean skim_callsign_dict_load(const char *path, GError **error);
 guint    skim_callsign_dict_size(void);
+
+/* The loaded file's "# Release 2026.09.18" comment as "2026.09.18", or NULL
+ * when it carried none / nothing is loaded. Caller frees. */
+char    *skim_callsign_dict_release(void);
+
+/* What a load of these bytes WOULD take, without touching the loaded
+ * dictionary — the updater's sanity check on a download. Safe on arbitrary
+ * bytes (no terminator needed, NULs and endless lines are junk). */
+typedef struct {
+  guint calls;                 /* lines carrying a call                      */
+  guint valid;                 /* of those, skim_callsign_is_valid()         */
+  guint junk;                  /* neither call, blank, '#' nor "!!" line     */
+  char  release[32];           /* "2026.09.18", "" when the file names none  */
+} SkimCallsignDictInfo;
+void skim_callsign_dict_inspect(const char *data, gsize len,
+                                SkimCallsignDictInfo *info);
 
 /* TRUE when the loaded dictionary knows this exact call (case-insensitive).
  * The scorer uses it for its +0.15 boost; the app highlights dictionary

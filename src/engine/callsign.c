@@ -147,7 +147,9 @@ gboolean skim_callsign_is_valid(const char *s) {
 
 /* --- known-call dictionary ---------------------------------------------------- */
 
+static GRWLock     s_dict_lock;                /* guards the two below       */
 static GHashTable *s_dict;                     /* call → itself (owned)      */
+static char        s_dict_release[32];         /* "2026.09.18"; "" = none    */
 
 /* One stripped dictionary line → TRUE when it carries a call. Blank lines,
  * '#' comments and "!!" directives (Super Check Partial opens its files with
@@ -168,40 +170,105 @@ static gboolean dict_line_is_call(const char *s) {
   return digit && alpha && n >= 3 && n <= 15;
 }
 
+/* The one parser: the loader and skim_callsign_dict_inspect() walk a file
+ * the same way, so what a check counted is what a load would take. Runs on
+ * a length, not on a terminator — the updater hands it bytes off the network,
+ * and those may be anything (an HTML error page, a NUL-ridden binary). A line
+ * longer than the stack copy, or one hiding a NUL, is junk by definition. */
+static void dict_parse(const char *data, gsize len, GHashTable *into,
+                       SkimCallsignDictInfo *info) {
+  SkimCallsignDictInfo z = { 0 };
+  const char *p = data, *end = data + len;
+  while (p < end) {
+    const char *nl = memchr(p, '\n', (gsize)(end - p));
+    gsize n = nl ? (gsize)(nl - p) : (gsize)(end - p);
+    char line[64];
+    gboolean fits = n < sizeof(line) && !memchr(p, '\0', n);
+    if (fits) {
+      memcpy(line, p, n);
+      line[n] = '\0';
+      g_strstrip(line);
+    }
+    p += n + (nl ? 1 : 0);
+    if (!fits) { z.junk++; continue; }
+    if (!dict_line_is_call(line)) {
+      if (line[0] == '#') {                    /* "# Release 2026.09.18"     */
+        const char *r = line + 1;
+        while (*r == ' ') { r++; }
+        if (!z.release[0] && g_ascii_strncasecmp(r, "Release ", 8) == 0) {
+          g_strlcpy(z.release, r + 8, sizeof(z.release));
+          g_strstrip(z.release);
+        }
+      } else if (line[0] && !(line[0] == '!' && line[1] == '!')) {
+        z.junk++;
+      }
+      continue;
+    }
+    for (char *c = line; *c; c++) { *c = g_ascii_toupper(*c); }
+    z.calls++;
+    if (skim_callsign_is_valid(line)) { z.valid++; }
+    if (into) { g_hash_table_add(into, g_strdup(line)); }
+  }
+  if (info) { *info = z; }
+}
+
+void skim_callsign_dict_inspect(const char *data, gsize len,
+                                SkimCallsignDictInfo *info) {
+  dict_parse(data, len, NULL, info);
+}
+
+/* A reload may come at any time (the app swaps a freshly downloaded file in
+ * while the engine thread scores tokens and the GTK thread underlines them):
+ * the new table is built with no lock held, the swap is two pointer moves
+ * under the writer lock, and the old table dies outside it. Readers pay one
+ * uncontended reader lock per lookup. */
 gboolean skim_callsign_dict_load(const char *path, GError **error) {
   char *data = NULL;
-  if (!g_file_get_contents(path, &data, NULL, error))
+  gsize len = 0;
+  if (!g_file_get_contents(path, &data, &len, error))
     return FALSE;
-  if (s_dict) { g_hash_table_destroy(s_dict); }
-  s_dict = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-  char **lines = g_strsplit(data, "\n", -1);
-  for (char **l = lines; *l; l++) {
-    char *call = g_strstrip(*l);
-    if (!dict_line_is_call(call))
-      continue;
-    char *up = g_ascii_strup(call, -1);
-    g_hash_table_add(s_dict, up);
-  }
-  g_strfreev(lines);
+  GHashTable *fresh = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                            NULL);
+  SkimCallsignDictInfo info;
+  dict_parse(data, len, fresh, &info);
   g_free(data);
+  g_rw_lock_writer_lock(&s_dict_lock);
+  GHashTable *old = s_dict;
+  s_dict = fresh;
+  g_strlcpy(s_dict_release, info.release, sizeof(s_dict_release));
+  g_rw_lock_writer_unlock(&s_dict_lock);
+  if (old) { g_hash_table_destroy(old); }
   return TRUE;
 }
 
 guint skim_callsign_dict_size(void) {
-  return s_dict ? g_hash_table_size(s_dict) : 0;
+  g_rw_lock_reader_lock(&s_dict_lock);
+  guint n = s_dict ? g_hash_table_size(s_dict) : 0;
+  g_rw_lock_reader_unlock(&s_dict_lock);
+  return n;
+}
+
+char *skim_callsign_dict_release(void) {
+  g_rw_lock_reader_lock(&s_dict_lock);
+  char *r = s_dict_release[0] ? g_strdup(s_dict_release) : NULL;
+  g_rw_lock_reader_unlock(&s_dict_lock);
+  return r;
 }
 
 static gboolean dict_has(const char *call) {
-  return s_dict && g_hash_table_contains(s_dict, call);
+  g_rw_lock_reader_lock(&s_dict_lock);
+  gboolean has = s_dict && g_hash_table_contains(s_dict, call);
+  g_rw_lock_reader_unlock(&s_dict_lock);
+  return has;
 }
 
 gboolean skim_callsign_dict_has(const char *call) {
-  if (!s_dict || !call || !call[0] || strlen(call) >= 24)
+  if (!call || !call[0] || strlen(call) >= 24)
     return FALSE;
   char up[24];
   g_strlcpy(up, call, sizeof(up));
   for (char *p = up; *p; p++) { *p = g_ascii_toupper(*p); }
-  return g_hash_table_contains(s_dict, up);
+  return dict_has(up);
 }
 
 /* --- stateful extractor -------------------------------------------------------- */

@@ -29,6 +29,23 @@ static void check(const char *what, int ok) {
   printf("  %-4s %s\n", ok ? "ok" : "FAIL", what);
 }
 
+/* Live-swap probe: readers look one call up in a tight loop while main()
+ * reloads the dictionary under them. */
+typedef struct {
+  gint stop;                                   /* atomic                     */
+  gint lookups, misses;                        /* atomic                     */
+} SwapProbe;
+
+static gpointer swap_reader(gpointer data) {
+  SwapProbe *sp = data;
+  while (!g_atomic_int_get(&sp->stop)) {
+    gboolean has = skim_callsign_dict_has("HB9CV");
+    g_atomic_int_inc(&sp->lookups);
+    if (!has) { g_atomic_int_inc(&sp->misses); }
+  }
+  return NULL;
+}
+
 int main(void) {
   printf("=== callsign gate (offline) ===\n");
 
@@ -284,9 +301,69 @@ int main(void) {
           !skim_callsign_dict_has("!!ORDER,1,1") &&
           skim_callsign_dict_has("2D0OMN") && skim_callsign_dict_has("OK1BR/P") &&
           skim_callsign_dict_has("C4W"));
+    char *rel = skim_callsign_dict_release();
+    check("the file's \"# Release\" comment is kept",
+          rel && strcmp(rel, "2026.09.18") == 0);
+    g_free(rel);
+
+    /* inspect(): what a load WOULD take — on bytes as hostile as a download
+     * can be: a NUL inside a line, a line with no end, an HTML tag. */
+    {
+      GString *b = g_string_new("!!Order,1,1\r\n#  release 2026.01.02 \r\n"
+                                "OK1BR\r\nhb9cv\r\n<html>\r\nQQ0QQQ\r\n");
+      g_string_append_len(b, "OK1\0BR\n", 7);
+      for (int i = 0; i < 300; i++) { g_string_append_c(b, 'A'); }
+      SkimCallsignDictInfo di;
+      skim_callsign_dict_inspect(b->str, b->len, &di);   /* no final newline */
+      check("inspect: 3 call lines, 2 of them valid, 3 junk, release read",
+            di.calls == 3 && di.valid == 2 && di.junk == 3 &&
+            strcmp(di.release, "2026.01.02") == 0);
+      check("inspect leaves the loaded dictionary alone",
+            skim_callsign_dict_size() == 3 && skim_callsign_dict_has("C4W"));
+      skim_callsign_dict_inspect("", 0, &di);
+      check("inspect: empty input is empty, not a crash",
+            di.calls == 0 && di.junk == 0 && !di.release[0]);
+      g_string_free(b, TRUE);
+    }
+
+    check("an unreadable file leaves the loaded dictionary as it was",
+          !skim_callsign_dict_load("/nonexistent/skimmer/master.scp", NULL) &&
+          skim_callsign_dict_size() == 3 && skim_callsign_dict_has("2D0OMN"));
+
+    /* Live swap: two threads look HB9CV up without a pause while the file is
+     * reloaded 200 times. HB9CV is the LAST line of 20 000, so a loader that
+     * empties the table and refills it in place leaves a long window where
+     * the lookup misses (or reads freed memory) — every lookup must hit. */
+    {
+      GString *big = g_string_new("# Release 2026.09.18\n");
+      for (int i = 0; i < 20000; i++) {
+        g_string_append_printf(big, "OK%d%c%c%c\n", i % 10, 'A' + i / 676 % 26,
+                               'A' + i / 26 % 26, 'A' + i % 26);
+      }
+      g_string_append(big, "HB9CV\n");
+      g_file_set_contents(dict, big->str, (gssize)big->len, NULL);
+      g_string_free(big, TRUE);
+      skim_callsign_dict_load(dict, NULL);
+      SwapProbe sp = { 0 };
+      GThread *t1 = g_thread_new("dict-r1", swap_reader, &sp);
+      GThread *t2 = g_thread_new("dict-r2", swap_reader, &sp);
+      gboolean loads_ok = TRUE;
+      for (int i = 0; i < 200; i++) {
+        loads_ok = skim_callsign_dict_load(dict, NULL) && loads_ok;
+      }
+      g_atomic_int_set(&sp.stop, 1);
+      g_thread_join(t1);
+      g_thread_join(t2);
+      check("live swap: 200 reloads under two reader threads, no lookup misses",
+            loads_ok && sp.lookups > 1000 && sp.misses == 0);
+    }
+
     /* the sections below run with the two-call dictionary, as before */
     g_file_set_contents(dict, "# test dict\nHB9CV\nOK1BR\n", -1, NULL);
     skim_callsign_dict_load(dict, NULL);
+    rel = skim_callsign_dict_release();
+    check("a file without a release comment reports none", rel == NULL);
+    g_free(rel);
     g_remove(dict);
     g_free(dict);
   }
