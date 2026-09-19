@@ -1234,6 +1234,54 @@ a full contest band has shown it over many overs. What to watch there:
 the known ~0.35 s limit (an answer keyed right on the end of the over) and
 whether it asks for the smear compensation.
 
+**gh#15 — MASTER.SCP keeps itself current (offline-proven + one real-site
+run 2026-09-19; Richard's live look pending).** New dependency **libcurl**
+(Richard's "ano"; all C). Why not libsoup-3: `linuxdeploy-plugin-gtk` does
+not bundle GIO modules (read in its script), so an AppImage on a non-Ubuntu
+host would have no TLS; libcurl rides along with its TLS libs (neither
+libcurl nor libgnutls is on the AppImage excludelist — read 2026-09-19; only
+libgmp is, the host's is used) and the CA bundle is looked up in code (`skim_scp_env_ca_path`, only under
+`$APPIMAGE`/`$APPDIR` or `$SSL_CERT_FILE` — AppImage-on-Fedora itself is
+NOT verified, no such build exists before a tag). Site facts, checked by
+hand: `/api/v1/files` names files (no URLs), the file is at `/<name>`, 304
+to If-None-Match, and **the ETag is the sha256 of the body** (undocumented —
+enforced only where an ETag is 64 hex). Three commits: (1) `Fixes #7`, the
+loader skips "!!Order,1,1" and anything lexically not a call — NOT
+`skim_callsign_is_valid`, which rejects 72 of the release's 50 003 calls
+(C4W, D4C, C5A … — a ticket of its own); (2) `callsign.c` reloads under
+readers (new table built unlocked, pointer swap under a `GRWLock`, old table
+freed outside; the old in-place reload SEGFAULTs under the new gate check),
+one length-bounded parser for load and `skim_callsign_dict_inspect()`, the
+"# Release" line kept for About; (3) `src/app/scp_update.c` (GLib + libcurl,
+GTK-free): file list → skip when the list's etag equals the local sha256 →
+conditional GET → in-memory checks (sha256 vs ETag, ≥ 10 000 calls, ≥ 98 %
+validating, ≤ 1 % junk lines, ≥ 50 % of the file replaced — measured on the
+real file: 99.86 % validate, 0 junk) → `g_file_set_contents_full` (atomic)
+→ live `dict_load` on the WORKER thread. **Nothing waits on the network:**
+curl multi interface + `curl_multi_wakeup` from the cancelling thread
+(free() mid-transfer measured 0.1 ms; a bounded 0.4 s grace only for a stuck
+resolver), connect 10 s / total 60 s / low-speed aborts, SIGPIPE ignored
+(CURLOPT_NOSIGNAL drops libcurl's own shield), env read on the main thread
+only. **Rate limits persisted in `master.scp.state`** (Richard's request):
+1 completed check / 24 h, 1 h after a failure, 4 attempts / 24 h, 3 full
+downloads / 7 days, the attempt recorded BEFORE the request, no request at
+all when the state file cannot be written, future stamps clamped to now.
+Preferences → Decoding → "Keep MASTER.SCP current" (default ON, `[scp]
+auto_update`), About carries release + last check; `SKIM_SCP_URL` points
+the app at a mock. Gates: call-test 23 → 32, new `skimmer-scp-test` 45
+checks against an in-process mock HTTP server on its own GMainContext thread
+(21 failure classes each leave file + loaded dictionary untouched; main-loop
+beat gap 10 ms through a 1.5 s-slow server) — **14 gates**, clean under
+ASan + UBSan. Headless app run (private D-Bus session, isolated XDG,
+`.invalid` TCI host, Python mock): updated 15 s after launch, second launch
+sent nothing. Real site once, on a scratch copy of the 2026.07.15 file:
+UPDATED to 2026.09.18 in 0.60 s, second run NOT_DUE. NOT verified: the
+Preferences group and About lines on screen (dialogs open warning-free,
+nobody looked), AppImage TLS. **Live check = Richard restarts after SAC: the
+log says `scp: … updated — release …` ~15 s in and About shows the new
+release; no radio needed.** Build lesson: his live instance runs from
+`builddir`, so this work was built in `/var/tmp/skimmer-issue15/build`.
+
 ## Layout
 
 ```
@@ -1248,7 +1296,8 @@ src/engine/   headless, GLib-only:
   callsign     extraction + validation (RBN-grade)
   spot_out     TCI SPOT feed + RBN telnet feed
 src/app/      GTK4/libadwaita: main.c (window: waterfall + callsign column over the
-              decode pane), wf_view.c (widget), wf_compose.c (GLib-only pixels + layout)
+              decode pane), wf_view.c (widget), wf_compose.c (GLib-only pixels + layout),
+              scp_update.c (GLib + libcurl, GTK-free: MASTER.SCP background updater)
 vendor/wdsp/  in-tree WDSP copy (FFT + resampler)
 vendor/onnxruntime/  ONNX Runtime C API header only (MIT) — dlopen at run time
 docs/SCOPE.md the plan

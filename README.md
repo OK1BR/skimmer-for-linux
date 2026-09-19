@@ -287,8 +287,9 @@ whether a new `MASTER.SCP` is out, downloads it only when it changed, checks
 it (checksum, size, content that looks like a call list) and swaps it in
 without a reconnect. No network, a slow or broken server: the file on disk
 stays as it is and the app carries on. Preferences → Decoding → "Keep
-MASTER.SCP current" switches it off; a file you copy in by hand works as
-before. Settings live in
+MASTER.SCP current" switches it off — do that to keep a list of your own:
+with the switch on, a file you copy in by hand is replaced by the site's at
+the next check. Settings live in
 `~/.config/skimmer-for-linux/settings.ini`; decode logs in
 `~/.local/share/skimmer-for-linux/`.
 
