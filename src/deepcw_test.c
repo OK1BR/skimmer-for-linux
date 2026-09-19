@@ -151,6 +151,17 @@ static void route_over_cb(double hz, SkimPaneOpKind kind, guint erase,
   r->over_max = MAX(r->over_max, hz);
 }
 
+/* TX-hold witnesses: all text in arrival order; was OK1BR reported? */
+typedef struct { GString *text; gboolean station; } HoldSeen;
+static void hold_text_cb(double hz, const char *text, gpointer user) {
+  HoldSeen *h = user; (void)hz;
+  g_string_append(h->text, text);
+}
+static void hold_station_cb(const SkimStation *st, gpointer user) {
+  HoldSeen *h = user;
+  if (strcmp(st->call, "OK1BR") == 0) { h->station = TRUE; }
+}
+
 int main(void) {
   const double RATE = 250.0;
   printf("=== skimmer-deepcw-test ===\n");
@@ -635,6 +646,140 @@ int main(void) {
             rs.over_n > 0 && rs.over_maxdev <= 25.0);
       skim_pipeline_free(p);
       g_free(iq); g_array_free(env, TRUE);
+    }
+    /* TX-hold flush (decode.h hold_begin, gh#18). The operator answers a
+     * station a moment after its over: the tail guard still holds the end
+     * of the call. hold_begin must commit it (and close the word), the
+     * text must drain through process() with ZERO frames, a word the hold
+     * cut short must NOT go out, and the first text after resync starts a
+     * new word. */
+    {
+      const char *over = "CQ TEST DE OK1BR";
+      /* 14 dits of quiet after the over = the operator's reaction time */
+      GArray *env = keyer(over, 25.0, RATE, 40, 14);
+      float *iq = tone_iq(env, RATE, +20.0, 0.05f, 0.004f, 21);
+      /* the same over, the feed stopping inside the B of the call */
+      GArray *head = keyer("CQ TEST DE OK1", 25.0, RATE, 40, 0);
+      const guint cut_at = head->len + (guint)llround(5 * (1.2 / 25.0) * RATE);
+      g_array_free(head, TRUE);
+      SkimDecode d;
+#define FEED(stp, o, ptr, len) do { \
+        for (guint _i = 0; _i < (len); _i += 64) { \
+          if (be->process((stp), (ptr) + 2 * _i, MIN(64u, (len) - _i), &d)) g_string_append((o), d.text); \
+          if (!sync_env) g_usleep(2000); \
+        } } while (0)
+#define DRAIN(stp, o) do { \
+        for (int _k = 0, _idle = 0; _k < 500 && _idle < 5; _k++) { \
+          SkimDeepcwDebug _dg; \
+          if (be->process((stp), iq, 0, &d)) { g_string_append((o), d.text); _idle = 0; } \
+          skim_decode_deepcw_debug((stp), &_dg); \
+          if (!_dg.inflight) _idle++; else { _idle = 0; if (!sync_env) g_usleep(10000); } \
+        } } while (0)
+      check("the DeepCW backend implements hold_begin", be->hold_begin != NULL);
+      /* (1) the over ended: the flush completes the call */
+      gpointer sf = be->channel_new(RATE); GString *of = g_string_new(NULL);
+      FEED(sf, of, iq, env->len); DRAIN(sf, of);
+      char *before = g_strdup(of->str);
+      be->hold_begin(sf); DRAIN(sf, of);
+      printf("      flush: before |%s| after |%s|\n", before, of->str);
+      check("flush: the tail guard still held the end of the call when the hold began",
+            strstr(before, "OK1BR") == NULL);
+      check("flush: hold_begin commits the tail — the call is whole, the word closed",
+            g_str_has_suffix(of->str, "OK1BR "));
+      check("flush: nothing doubled at the seam", strstr(of->str, "OK1BR") == g_strrstr(of->str, "OK1BR") &&
+            strstr(of->str, "  ") == NULL);
+      /* (2) the answer after the hold starts a new word */
+      {
+        GArray *env2 = keyer("5NN TU", 25.0, RATE, 10, 120);
+        float *iq2 = tone_iq(env2, RATE, +20.0, 0.05f, 0.004f, 22);
+        be->resync(sf);
+        FEED(sf, of, iq2, env2->len); DRAIN(sf, of);
+        printf("      after the hold |%s|\n", of->str);
+        check("flush: the text after the hold starts a NEW word (no OK1BR5NN glue)",
+              strstr(of->str, "OK1BR 5NN") != NULL && strstr(of->str, "  ") == NULL);
+        g_free(iq2); g_array_free(env2, TRUE);
+      }
+      /* (3) control: resync alone abandons the tail — the loss this fixes */
+      gpointer sc = be->channel_new(RATE); GString *oc = g_string_new(NULL);
+      FEED(sc, oc, iq, env->len); DRAIN(sc, oc);
+      be->resync(sc);
+      {
+        float *zz = g_new0(float, 2 * 64);
+        for (guint i = 0; i < 3 * (guint)RATE; i += 64) {
+          if (be->process(sc, zz, 64, &d)) g_string_append(oc, d.text);
+          if (!sync_env) g_usleep(20000);
+        }
+        g_free(zz);
+      }
+      DRAIN(sc, oc);
+      printf("      control (no hold_begin) |%s|\n", oc->str);
+      check("control: without hold_begin the end of the call never comes out",
+            strstr(oc->str, "OK1BR") == NULL);
+      /* (4) the hold cuts the call mid-character: nothing of the cut word */
+      gpointer sk = be->channel_new(RATE); GString *ok = g_string_new(NULL);
+      FEED(sk, ok, iq, cut_at); DRAIN(sk, ok);
+      char *kbefore = g_strdup(ok->str);
+      be->hold_begin(sk); DRAIN(sk, ok);
+      printf("      cut: before |%s| after |%s|\n", kbefore, ok->str);
+      check("flush: a word the hold cut short adds NOTHING and stays open (its head is no token)",
+            strcmp(ok->str, kbefore) == 0 && !g_str_has_suffix(ok->str, " "));
+      be->channel_free(sf); be->channel_free(sc); be->channel_free(sk);
+      g_string_free(of, TRUE); g_string_free(oc, TRUE); g_string_free(ok, TRUE);
+      g_free(before); g_free(kbefore);
+#undef FEED
+#undef DRAIN
+      g_free(iq); g_array_free(env, TRUE);
+    }
+    /* The same through the WHOLE offline pipeline: the TX flag goes up a
+     * moment after the over, the wire goes to exact zeros (sdr-for-linux
+     * mutes it), and the call must reach the text AND the station table
+     * WHILE the hold lasts — the pipeline pumps the held backend. A strong
+     * carrier a few channels away makes the mute what it is on the air: a
+     * band cut to zero between two samples CLICKS in every channel, and the
+     * model reads that click as a dit ("OK1BR E") unless the flush window
+     * ends before it. */
+    {
+      const double rate = 48000.0, centre = 14050000.0, off = 12020.0;
+      GArray *env = keyer("CQ TEST DE OK1BR", 25.0, rate, 40, 14);
+      float *iq = tone_iq(env, rate, off, 0.3f, 0.002f, 23);
+      for (guint n = 0; n < env->len; n++) {          /* + a carrier 400 Hz down */
+        const double ph = 2.0 * G_PI * (off - 400.0) * n / rate;
+        iq[2 * n] += 0.5f * (float)cos(ph); iq[2 * n + 1] += 0.5f * (float)sin(ph);
+      }
+      SkimPipelineConfig cfg = { 0 };
+      cfg.chan_bw_hz = 125.0;
+      cfg.cw_engine = SKIM_CW_ENGINE_DEEPCW;
+      SkimPipeline *p = skim_pipeline_new(&cfg);
+      HoldSeen hs = { g_string_new(NULL), FALSE };
+      skim_pipeline_set_text_cb(p, hold_text_cb, &hs);
+      skim_pipeline_set_station_cb(p, hold_station_cb, &hs);
+      GError *perr = NULL;
+      check("hold: offline pipeline starts", skim_pipeline_start_offline(p, &perr));
+      g_clear_error(&perr);
+      for (guint at = 0; at < env->len; at += 4800) {
+        skim_pipeline_feed(p, iq + 2 * at, MIN(4800u, env->len - at), rate, centre);
+        if (!sync_env) g_usleep(4000);
+      }
+      const gboolean early = strstr(hs.text->str, "OK1BR") != NULL;
+      float *z = g_new0(float, 2 * 4800);
+      skim_pipeline_feed(p, z, 4800, rate, centre);   /* key down: the wire mutes … */
+      skim_pipeline_feed(p, z, 4800, rate, centre);
+      skim_pipeline_set_tx_hold(p, TRUE);             /* … the flag follows 0.2 s later */
+      for (guint k = 0; k < 30; k++) {                /* 3 s of own transmission  */
+        skim_pipeline_feed(p, z, 4800, rate, centre);
+        if (!sync_env) g_usleep(20000);
+      }
+      printf("      hold: text during the hold |%s| station %d (before the hold: %d)\n",
+             hs.text->str, hs.station, early);
+      check("hold: the call was still in the tail guard when the operator keyed", !early);
+      check("hold: the call reaches the text WHILE the hold lasts — and the mute's click reads as nothing",
+            g_str_has_suffix(hs.text->str, "OK1BR "));
+      check("hold: and the station table (CQ … DE OK1BR)", hs.station);
+      skim_pipeline_set_tx_hold(p, FALSE);
+      g_free(z);
+      skim_pipeline_stop(p);
+      skim_pipeline_free(p);
+      g_string_free(hs.text, TRUE); g_free(iq); g_array_free(env, TRUE);
     }
     /* noise only, 20 s: no phantom text */
     GArray *env0 = g_array_new(FALSE, FALSE, sizeof(float)); const float z = 0.0f;

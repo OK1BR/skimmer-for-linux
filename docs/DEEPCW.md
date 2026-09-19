@@ -387,3 +387,99 @@ centre is where the VFO always is without CTUN. Mechanism unknown
 measured in sdr-for-linux. New env `SKIM_FLOCK_DEBUG=1` prints per hit:
 channel, slot, in-channel offset, raw Hz, lock Hz, arbitration level,
 confidence, text — the tool that separated the two channels here.
+
+## TX hold — the tail is read to its end, not dropped (gh#18)
+
+**Seen live, SAC CW 2026-09-19 (Richard):** the wait itself is tolerable
+(open point (1) of #5) — what gets in the way is that the gray draft
+VANISHES when he starts to transmit instead of turning into text. In search
+and pounce that is the call of the station being answered: its over ends, he
+keys within a second, the call is gone — from the pane, the extractor and the
+spot path. Mechanism: a character is final once it sits `SKIM_DEEPCW_TAIL`
+(1 s) before the window end; the TX hold swallows the blocks, so the window
+end stops at the key and the last second never commits; `resync` then moves
+the cursor to the current frame and abandons it. Replayed on the recording of
+that session (`iq-20260919-sac-20m-192k.cf32`, its eight own overs as holds):
+`TEST SE5E TEST SE5TEST` — the E lost, the text after the hold glued on —
+and on the neighbours `LB1UK LB1UR`, `5NN 778`, `CSJPC2F`.
+
+**Built: a flush when the hold BEGINS** (decode.h `hold_begin`, the pipeline
+pumps the backend with zero-frame `process()` calls every 4th swallowed block
+— in the app the inference comes back from a worker during the hold). One
+more model run over the window as it stands, 0.5 s of dead air appended (the
+band IS dead for us from there on), the tail committed without the tail
+guard. Four rules keep it honest, each found by measurement:
+
+1. **The window ends at the LIVE end, not at the ring's end.** sdr-for-linux
+   mutes the wire at key-down and reports `trx` 0.04–0.43 s later, so the
+   ring ends in exact-zero frames — and a band cut to zero between two
+   samples is a broadband CLICK in every channel (dumped on one: ~250× the
+   noise beside the line, ~6 frames wide through the channelizer prototype +
+   DFT window). The model
+   reads it as a dit: a trailing "E" at p = 1.00 on channel after channel
+   (`CQ E`, ` E`, and "C 5E" on the real overs). Frames at the end whose
+   quietest inner bin sits outside ×/÷ 3 of the lower quartile of the last
+   2 s (zeros, the fade, the click — a CW line is narrow, the click is not)
+   are cut off, plus two more; the model never sees them.
+2. **The last word goes out only when it is WHOLE:** its own line (strongest
+   bin over the word's frames, ±1) silent for 6 dits at the live end — more
+   than a character gap. Every other channel is mid-over when the operator
+   keys, and the head of a call validates as a call (OH2X / OH2XX). A cut
+   word is dropped back to the last word gap the model placed. Keyed =
+   over 4× the NOISE beside the line (lower quartile of the per-frame floor
+   across the word). The first version keyed on half the word's peak: KC1XX
+   fading 12 dB inside one call read "silent" mid-character and "KC1" went
+   out as a whole word; a louder station earlier in the 10 s window hid a
+   weaker one's keying the same way when the line was taken from the window.
+3. **One spike of the last word under p 0.5 inside the tail zone → the word
+   stays out whole** (word-atomic: a prefix would be a truncated token).
+   Simulated on the dumps: 0.5 removes 11 of 16 wrong last words for 5 of 77
+   right ones; 0.7 only 2 more for 9 more right ones.
+4. **The word is CLOSED (a gap appended) only when it is whole.** A hold is
+   an over boundary and the model emits no gap there, hence `OH2BBMOK1BR`
+   live; but the closed head of a CUT word would be a token of its own, while
+   left open it fuses with whatever fragment the channel resumes on and
+   validates as nothing — as it always did.
+
+**Measured** with `skimmer-replay`'s new harness (`SKIM_REPLAY_HOLDS`,
+`SKIM_REPLAY_MUTE` to the sample, `SKIM_REPLAY_FROM/TO`; `SKIM_DEEPCW_ONLY`
+restricts inference to a band slice — a full 20 m contest band runs 0.1×
+realtime on the CPU, ~225 channels open at once): 37 synthetic overs laid
+into the SAC recording (mute at the key, flag 0.04–0.44 s later, 3 s long),
+10 kHz slice, against the same slice replayed with no hold — every flushed
+character looked up by STREAM time in that full-context reading. 258 flushed
+characters: 241 agree (93 %), and **all 213 with p ≥ 0.9 agree**; the rest
+are p < 0.9 and mostly older than the tail zone (a regular tick would have
+committed them the same). Last words judged whole: 64 exact, 4 "truncated" —
+two of them after 0.7 s of silence (the reference glued two words, the known
+missing-gap class), one is `5NN` / `5NN18` (an exchange, 224 ms pause), one
+(`SM6` / `SM6X5AC`, 240 ms against a 224 ms need) may be real. NONE of the
+four validates as a callsign (`skim_callsign_is_valid`: 5NN, YR, SM6, LBV no;
+the controls OK1B, SM6X, OH2X yes) — the issue's criterion was "a truncated
+call that still validates is worse than no call". By margin over
+the need at 5 dits: 0–2 frames → 8 exact, 2 truncated, 2 mutated; ≥ 8 frames
+→ 55 exact — hence 6 dits. The eight real overs: `SE5E TEST`, `LB1UK LB1UK`,
+`TU SE5E TEST SE5E` recovered; station table identical but for SM2EKM, which
+the no-flush run kept alive to the end through stale-candidate re-reports on
+foreign text (last real decode at 104 s in both; honest token boundaries age
+the candidate 2 tokens sooner — traced with `SKIM_ST_DEBUG`).
+
+**Rejected by the same dumps: promoting the last draft at `resync`** (the
+cheap direction). The draft is a reliable PREFIX, cut by distance and
+posterior, not by words: on 239 words the hold cut it would have promoted a
+word HEAD in 201; on 93 whole words it carried the whole word in 38 and only
+a head in 54 (1 s tick; 0.5 s live makes the draft younger, not
+word-aligned).
+
+**Known limits.** The silence test reads the line through an 80 ms DFT
+window behind a 64 ms prototype: after a strong mark the line stays over the
+bar for up to ~9 frames, so a strong station needs ~6 dits + 0.14 s of real
+silence — an operator who keys inside ~0.35 s of the over's end still loses
+the last word, as before. Smear compensation is the next lever if live shows
+it matters. Gate `skimmer-deepcw-test` 58 → 69 checks (sync 65): tail
+committed + word closed, no doubled seam, new word after the hold, control
+without `hold_begin` loses the call, a cut word adds nothing and stays open,
+and through the whole offline pipeline with a strong carrier beside the
+station (so the mute clicks): the call reaches the text AND the station table
+while the hold lasts — red with the live-end scan disabled ("OK1B", no
+station). `SKIM_DEEPCW_FLUSH=0` restores the old path for A/B replays.

@@ -1186,6 +1186,44 @@ Still open from this work, as separate tickets on his word after the
 contest: the late `trx` flag on the DECODER side (immediate broadcast in
 sdr-for-linux; a data-driven hold here).
 
+**gh#18 — DeepCW: a TX hold commits the tail instead of dropping it
+(offline-proven 2026-09-19 evening, mid-SAC-CW; Richard's live look
+pending).** Live: the gray draft vanished when he keyed — in S&P the call of
+the station being answered, lost to the pane AND the spot path (the tail
+guard never gets its right context through a hold, `resync` abandons it);
+replayed on the SAC recording with its eight own overs as holds:
+`TEST SE5E TEST SE5TEST`. Built: decode.h **`hold_begin`** (optional hook,
+fired when the hold engages) + the pipeline **pumps** such a backend with
+zero-frame `process()` every 4th swallowed block (pass 2 of `process_block`
+moved verbatim into `dispatch_hits`), so the flushed text reaches pane,
+extractor and station table DURING the transmission; DeepCW runs one more
+inference over the window with 0.5 s of dead air appended and commits the
+tail. Four measured rules (full account in `docs/DEEPCW.md`, "TX hold"):
+(1) the window ends at the LIVE end — the wire's mute (exact zeros, flag
+0.04–0.43 s late) is a broadband CLICK in every channel and the model read
+it as "E" at p 1.00; (2) the last word goes out only when its own line was
+silent 6 dits at the live end (noise-relative bar — a half-peak bar called
+KC1XX silent in a QSB dip and "KC1" went out), else the flush stops at the
+last word gap: a cut call must not validate; (3) one spike under p 0.5 in
+the tail zone drops the last word whole; (4) the word is closed with a gap
+only when whole (fixes `OH2BBMOK1BR`; a cut head stays open and fuses, as
+before). Measured on 37 synthetic overs laid into the recording
+(`SKIM_REPLAY_HOLDS` / `_MUTE` / `_FROM` / `_TO` in skimmer-replay,
+`SKIM_DEEPCW_ONLY=<lo-hi kHz>` — the full contest band runs 0.1× realtime on
+the CPU and the GPU stayed with the live instance): 241 of 258 flushed
+characters agree with the no-hold reading, ALL 213 at p ≥ 0.9; 64 whole last
+words exact, 4 shorter than the reference's word (two after 0.7 s of silence,
+one the exchange "5NN 18", one possibly real: SM6) — NONE of the four
+validates as a callsign (`skim_callsign_is_valid`; OK1B/SM6X/OH2X do), which
+is the criterion the issue set. Direction B (promote the draft at resync)
+REJECTED on the same dumps: a word HEAD on 201 of 239 cut words. Station
+table identical but for one stale-candidate artifact (SM2EKM, traced).
+Known limit: keying inside ~0.35 s of the over's end still loses the last
+word (DFT/prototype smear in the silence test) — smear compensation is the
+next lever if live asks for it. Gate `skimmer-deepcw-test` 58 → 69 (sync
+65), red without the live-end scan; 13 gates green. `SKIM_DEEPCW_FLUSH=0` =
+the old path for A/B.
+
 ## Layout
 
 ```

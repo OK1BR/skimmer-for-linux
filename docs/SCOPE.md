@@ -394,7 +394,18 @@ M0…M8 are cited from source comments — keep them.
   complete from its first character and nothing decodes from the held band;
   WITHOUT it 77 garbage decodes leak during the own-TX silence and the
   reply's head is lost. Live: the 2026-08-23 contest day logged 54 clean
-  hold/release pairs, none unpaired.
+  hold/release pairs, none unpaired. **The hold has a BEGIN hook too (gh#18,
+  2026-09-19):** a backend that commits behind the live edge — DeepCW's 1 s
+  tail guard — used to lose that tail at every hold (the swallowed blocks
+  never bring its right context, `resync` then abandons it), which in search
+  and pounce is the call of the very station being answered. The optional
+  `hold_begin` backend hook fires when the hold engages, and while it lasts
+  the pipeline pumps such a backend with zero-frame `process()` calls every
+  4th swallowed block, so flushed text reaches the pane, the extractor and
+  the station table DURING the transmission. The wire's mute is itself an
+  event in the data: a band cut to exact zeros between two samples is a
+  broadband click in every channel (a dit, to a decoder). Rules and numbers:
+  `docs/DEEPCW.md`, "TX hold".
 - **A GNOME-correct About dialog — the family contract (written down
   2026-08-04 at Richard's request, across every app of the family; built
   2026-08-08).** Every app must open

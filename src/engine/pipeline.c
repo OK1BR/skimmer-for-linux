@@ -182,6 +182,7 @@ struct _SkimPipeline {
   gboolean          hold_capped;               /* cap hit — decoding resumed  */
   guint64           hold_frames;               /* swallowed this episode      */
   guint64           grace_frames;              /* post-TX settle left         */
+  guint             hold_pump;                 /* swallowed blocks (pump cadence) */
 
   char             *dlog_path;                 /* decode log (engine thread) */
   FILE             *dlog;
@@ -652,6 +653,17 @@ static void hold_resume(SkimPipeline *p) {
   }
 }
 
+/* The hold BEGINS: backends that commit behind the live edge read their
+ * tail to its end now (decode.h hold_begin; optional per backend). */
+static void hold_begin(SkimPipeline *p) {
+  const SkimDecodeBackend *be = pipe_backend(p);
+  if (!be->hold_begin || !p->dec || !p->bank)
+    return;
+  for (guint i = 0; i < p->nchan * NSLOT; i++) {
+    if (p->dec[i]) { be->hold_begin(p->dec[i]); }
+  }
+}
+
 static void spec_row_cb(const guint8 *row, guint nbins, double center_hz, gpointer user) {
   SkimPipeline *p = user;
   if (p->spec_cb) {
@@ -673,186 +685,11 @@ static void spec_feed(SkimPipeline *p, const IqBlock *b) {
   skim_spectrum_push(p->spec, b->iq, b->nframes, b->center_hz);
 }
 
-static void process_block(SkimPipeline *p, IqBlock *b) {
-  spec_feed(p, b);                             /* M8: the picture follows the
-                                                * data, not the hold below    */
-  /* TX hold (SCOPE: TX hold): while the operator's own TX deafens the RX
-   * (T/R relay + 31 dB TX attenuators), the band the decoders would see is
-   * self-inflicted silence — evaluating it releases every channel and the
-   * ANSWERING station is re-acquired seconds late (Richard, live
-   * 2026-08-15). Swallow the blocks instead: unfed decoders freeze all
-   * their time constants for free. Stream time keeps ticking (TTLs). */
-  const gboolean tx = g_atomic_int_get(&p->tx_now) != 0;
-  if (tx || p->holding) {
-    if (tx) {
-      if (!p->holding) {
-        p->holding     = TRUE;
-        p->hold_capped = FALSE;
-        p->hold_frames = 0;
-        g_message("pipeline: TX hold — decode frozen (own transmission)");
-      }
-      p->grace_frames = (guint64)(HOLD_GRACE_S * b->rate);
-      p->hold_frames += b->nframes;
-      if (p->hold_frames <= (guint64)(HOLD_CAP_S * b->rate)) {
-        p->frames += b->nframes;
-        p->stream_us = (gint64)((double)p->frames * G_USEC_PER_SEC /
-                                MAX(b->rate, 1.0));
-        return;
-      }
-      if (!p->hold_capped) {
-        p->hold_capped = TRUE;
-        g_message("pipeline: TX hold cap (%.0f s) exceeded — decoding "
-                  "resumes on the live band", HOLD_CAP_S);
-      }
-      /* fall through: decode normally under a stuck/very long TX */
-    } else if (p->hold_capped) {
-      p->holding = FALSE;            /* already live-decoding since the cap */
-      p->grace_frames = 0;
-    } else if (p->grace_frames >= b->nframes) {
-      p->grace_frames -= b->nframes; /* post-TX settle: swallow the T/R glitch */
-      p->frames += b->nframes;
-      p->stream_us = (gint64)((double)p->frames * G_USEC_PER_SEC /
-                              MAX(b->rate, 1.0));
-      return;
-    } else {
-      p->grace_frames = 0;
-      p->holding = FALSE;
-      hold_resume(p);
-      g_message("pipeline: TX hold released — decode resumed");
-    }
-  }
-
-  if (!p->bank || p->bank_rate != b->rate) { bank_build(p, b->rate); }
-  if (!p->bank)
-    return;
-
-  /* A dds/centre change (band switch, panadapter re-centre) invalidates
-   * every channel's ABSOLUTE meaning: the decoders' trackers describe
-   * signals that are no longer there, the extractors still hold the OLD
-   * band's callsign candidates — they age by TRAFFIC, not time, so the
-   * first decodes on the new band re-announced 20 m calls and the QSY
-   * logic teleported their spots onto 40 m (live-caught 2026-07-15).
-   * Flush all per-channel state; the station table keeps the old band's
-   * records (really heard — they age out via their own TTL). */
-  if (b->center_hz != p->center_hz) {
-    if (p->center_hz != 0) {
-      const SkimDecodeBackend *cwf = pipe_backend(p);
-      const double out_rate = skim_channelizer_out_rate(p->bank);
-      for (guint c = 0; c < p->nchan; c++) {
-        for (guint s = 0; s < NSLOT; s++) {
-          const guint i = SL(c, s);
-          if (p->dec[i]) { cwf->channel_free(p->dec[i]); }
-          /* The PERSISTENT passthrough lane must survive the flush with a
-           * fresh decoder — every drain calls set_freq on it before the
-           * splitter can engage. Narrow lanes are born in slot_sync().
-           * (Pre-reground this was slot 0; leaving it there left WIDE_LANE
-           * NULL and the first block after a centre change segfaulted —
-           * live-caught 2026-08-01, 45 min into a contest.) */
-          p->dec[i] = (s == WIDE_LANE) ? cwf->channel_new(out_rate) : NULL;
-          if (p->ext[i]) { skim_callsign_extractor_reset(p->ext[i]); }
-          p->sgen[i] = 0;
-        }
-        if (p->split) {                /* fresh detection: old carriers gone */
-          skim_tone_split_free(p->split[c]);
-          p->split[c] = skim_tone_split_new(out_rate);
-          if (p->focus_fc > 0) {
-            skim_tone_split_set_focus(p->split[c], p->focus_fc);
-          }
-        }
-      }
-      memset(p->flock, 0, p->nchan * NSLOT * sizeof(FreqLock));
-    }
-    p->center_hz = b->center_hz;
-  }
-
-  skim_channelizer_push(p->bank, b->iq, b->nframes);
-  p->frames += b->nframes;
-  p->stream_us = (gint64)((double)p->frames * G_USEC_PER_SEC /
-                          MAX(b->rate, 1.0));
-
-  const SkimDecodeBackend *cw = pipe_backend(p);
-  float buf[DRAIN_FRAMES * 2];
+/* Pass 2 of a block: arbitrate the collected hits (p->hits) and dispatch the
+ * survivors — decode log, pane, extractor, station table, spot sinks. */
+static void dispatch_hits(SkimPipeline *p, const IqBlock *b,
+                          const SkimDecodeBackend *cw) {
   SkimDecode d;
-
-  /* Pass 1: drain every channel, collect its decodes (dispatch waits until
-   * all levels for this block are known — arbitration needs the neighbours).
-   * An armed splitter sits between the channel and the decoders: samples go
-   * through it and come back out per slot (verbatim while passthrough). */
-  g_array_set_size(p->hits, 0);
-  for (guint c = 0; c < p->nchan; c++) {
-    SkimToneSplit *sp = p->split ? p->split[c] : NULL;
-    const double chan_hz = cw->set_freq
-        ? b->center_hz + skim_channelizer_offset_hz(p->bank, c) : 0.0;
-    if (cw->set_freq && !sp) {
-      cw->set_freq(p->dec[SL(c, WIDE_LANE)], chan_hz);
-    }
-    guint n;
-    while ((n = skim_channelizer_read(p->bank, c, buf, DRAIN_FRAMES)) > 0) {
-      if (!sp) {
-        const gboolean got = cw->process(p->dec[SL(c, WIDE_LANE)], buf, n, &d);
-        char *aux = cw->take_aux_text
-                        ? cw->take_aux_text(p->dec[SL(c, WIDE_LANE)]) : NULL;
-        GArray *ops = hit_take_ops(cw, p->dec[SL(c, WIDE_LANE)]);
-        if (!got && !aux && !ops)
-          continue;
-        if (!got) { hit_placeholder(cw, p->dec[SL(c, WIDE_LANE)], &d); }
-        Hit h = { .chan = c, .slot = WIDE_LANE, .eff_off = d.freq_offset_hz,
-                  .contested = FALSE, .d = d, .aux = aux, .ops = ops };
-        g_array_append_val(p->hits, h);
-        continue;
-      }
-      skim_tone_split_push(sp, buf, n);
-      /* Narrow slots (split/focus) run lanes 0..ns-1 with generation
-       * resets; the wide passthrough runs the PERSISTENT wide lane — an
-       * engage parks it mid-state, a collapse resumes it (v2 reads the
-       * gap as a pause and reopens; the extractor keeps its candidates). */
-      const gboolean insplit = skim_tone_split_is_split(sp);
-      const guint ns = skim_tone_split_slots(sp);
-      for (guint s = 0; s < ns; s++) {
-        const guint lane = insplit ? s : WIDE_LANE;
-        if (insplit) { slot_sync(p, c, s, cw); }
-        if (cw->set_freq) {
-          cw->set_freq(p->dec[SL(c, lane)],
-                       chan_hz + skim_tone_split_slot_hz(sp, s));
-        }
-        float sbuf[DRAIN_FRAMES * 2];
-        guint m;
-        while ((m = skim_tone_split_read(sp, s, sbuf, DRAIN_FRAMES)) > 0) {
-          const gboolean got = cw->process(p->dec[SL(c, lane)], sbuf, m, &d);
-          if (got && d.speed > 0) {          /* focus cutoff rides the WPM   */
-            skim_tone_split_slot_hint_wpm(sp, s, d.speed);
-          }
-          /* Solid = elem_err under ~0.1 — a beat-garbled channel still
-           * emits CONFIDENT mutations around 0.6-0.7 (that is why beat
-           * text validates), so the bar sits where clean copy lives. */
-          if (!insplit && got && d.text[0] && d.confidence >= 0.85) {
-            skim_tone_split_hint_wide_solid(sp);
-          }
-          char *aux = cw->take_aux_text
-                          ? cw->take_aux_text(p->dec[SL(c, lane)]) : NULL;
-          GArray *ops = hit_take_ops(cw, p->dec[SL(c, lane)]);
-          if (!got && !aux && !ops)
-            continue;
-          if (!got) { hit_placeholder(cw, p->dec[SL(c, lane)], &d); }
-          Hit h = { .chan = c, .slot = lane,
-                    .eff_off = skim_tone_split_slot_hz(sp, s) +
-                               d.freq_offset_hz,
-                    .contested = skim_tone_split_slot_contested(sp, s),
-                    .d = d, .aux = aux, .ops = ops };
-          g_array_append_val(p->hits, h);
-        }
-      }
-    }
-    const gboolean c_split = sp && skim_tone_split_is_split(sp);
-    for (guint s = 0; s < NSLOT; s++) {
-      const gboolean live = c_split ? (s < skim_tone_split_slots(sp))
-                                    : (s == WIDE_LANE);
-      p->lvl[SL(c, s)] = (live && p->dec[SL(c, s)] && cw->level)
-                             ? cw->level(p->dec[SL(c, s)]) : 0.0;
-    }
-  }
-
-  /* Pass 2: arbitrate and dispatch the survivors. */
   for (guint i = 0; i < p->hits->len; i++) {
     const Hit *h = &g_array_index(p->hits, Hit, i);
     const guint c = h->chan;
@@ -1047,6 +884,230 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
       }
     }
   }
+}
+
+/* While the hold swallows the band, a backend that flushed at its start
+ * (decode.h hold_begin) still has text to hand over — and its inference may
+ * come back from a worker only now. process() with ZERO frames drains it
+ * through the normal dispatch; every 4th block (~43 ms) is plenty. */
+#define HOLD_PUMP_EVERY 4
+static void hold_pump(SkimPipeline *p, const IqBlock *b) {
+  const SkimDecodeBackend *cw = pipe_backend(p);
+  if (!cw->hold_begin || !p->dec || !p->bank || !p->hits)
+    return;
+  if (p->hold_pump++ % HOLD_PUMP_EVERY)
+    return;
+  SkimDecode d;
+  g_array_set_size(p->hits, 0);
+  for (guint c = 0; c < p->nchan; c++) {
+    SkimToneSplit *sp = p->split ? p->split[c] : NULL;
+    const gboolean insplit = sp && skim_tone_split_is_split(sp);
+    const guint ns = sp ? skim_tone_split_slots(sp) : 1;
+    for (guint s = 0; s < ns; s++) {
+      const guint lane = insplit ? s : WIDE_LANE;
+      gpointer dec = p->dec[SL(c, lane)];
+      if (!dec)
+        continue;
+      const gboolean got = cw->process(dec, NULL, 0, &d);
+      GArray *ops = hit_take_ops(cw, dec);
+      if (!got && !ops)
+        continue;
+      if (!got) { hit_placeholder(cw, dec, &d); }
+      Hit h = { .chan = c, .slot = lane,
+                .eff_off = (sp ? skim_tone_split_slot_hz(sp, s) : 0.0) +
+                           d.freq_offset_hz,
+                .contested = sp ? skim_tone_split_slot_contested(sp, s) : FALSE,
+                .d = d, .aux = NULL, .ops = ops };
+      g_array_append_val(p->hits, h);
+    }
+  }
+  if (p->hits->len) { dispatch_hits(p, b, cw); }
+}
+
+static void process_block(SkimPipeline *p, IqBlock *b) {
+  spec_feed(p, b);                             /* M8: the picture follows the
+                                                * data, not the hold below    */
+  /* TX hold (SCOPE: TX hold): while the operator's own TX deafens the RX
+   * (T/R relay + 31 dB TX attenuators), the band the decoders would see is
+   * self-inflicted silence — evaluating it releases every channel and the
+   * ANSWERING station is re-acquired seconds late (Richard, live
+   * 2026-08-15). Swallow the blocks instead: unfed decoders freeze all
+   * their time constants for free. Stream time keeps ticking (TTLs). */
+  const gboolean tx = g_atomic_int_get(&p->tx_now) != 0;
+  if (tx || p->holding) {
+    if (tx) {
+      if (!p->holding) {
+        p->holding     = TRUE;
+        p->hold_capped = FALSE;
+        p->hold_frames = 0;
+        p->hold_pump   = 0;
+        g_message("pipeline: TX hold — decode frozen (own transmission)");
+        hold_begin(p);
+      }
+      p->grace_frames = (guint64)(HOLD_GRACE_S * b->rate);
+      p->hold_frames += b->nframes;
+      if (p->hold_frames <= (guint64)(HOLD_CAP_S * b->rate)) {
+        p->frames += b->nframes;
+        p->stream_us = (gint64)((double)p->frames * G_USEC_PER_SEC /
+                                MAX(b->rate, 1.0));
+        hold_pump(p, b);
+        return;
+      }
+      if (!p->hold_capped) {
+        p->hold_capped = TRUE;
+        g_message("pipeline: TX hold cap (%.0f s) exceeded — decoding "
+                  "resumes on the live band", HOLD_CAP_S);
+      }
+      /* fall through: decode normally under a stuck/very long TX */
+    } else if (p->hold_capped) {
+      p->holding = FALSE;            /* already live-decoding since the cap */
+      p->grace_frames = 0;
+    } else if (p->grace_frames >= b->nframes) {
+      p->grace_frames -= b->nframes; /* post-TX settle: swallow the T/R glitch */
+      p->frames += b->nframes;
+      p->stream_us = (gint64)((double)p->frames * G_USEC_PER_SEC /
+                              MAX(b->rate, 1.0));
+      hold_pump(p, b);
+      return;
+    } else {
+      p->grace_frames = 0;
+      p->holding = FALSE;
+      hold_resume(p);
+      g_message("pipeline: TX hold released — decode resumed");
+    }
+  }
+
+  if (!p->bank || p->bank_rate != b->rate) { bank_build(p, b->rate); }
+  if (!p->bank)
+    return;
+
+  /* A dds/centre change (band switch, panadapter re-centre) invalidates
+   * every channel's ABSOLUTE meaning: the decoders' trackers describe
+   * signals that are no longer there, the extractors still hold the OLD
+   * band's callsign candidates — they age by TRAFFIC, not time, so the
+   * first decodes on the new band re-announced 20 m calls and the QSY
+   * logic teleported their spots onto 40 m (live-caught 2026-07-15).
+   * Flush all per-channel state; the station table keeps the old band's
+   * records (really heard — they age out via their own TTL). */
+  if (b->center_hz != p->center_hz) {
+    if (p->center_hz != 0) {
+      const SkimDecodeBackend *cwf = pipe_backend(p);
+      const double out_rate = skim_channelizer_out_rate(p->bank);
+      for (guint c = 0; c < p->nchan; c++) {
+        for (guint s = 0; s < NSLOT; s++) {
+          const guint i = SL(c, s);
+          if (p->dec[i]) { cwf->channel_free(p->dec[i]); }
+          /* The PERSISTENT passthrough lane must survive the flush with a
+           * fresh decoder — every drain calls set_freq on it before the
+           * splitter can engage. Narrow lanes are born in slot_sync().
+           * (Pre-reground this was slot 0; leaving it there left WIDE_LANE
+           * NULL and the first block after a centre change segfaulted —
+           * live-caught 2026-08-01, 45 min into a contest.) */
+          p->dec[i] = (s == WIDE_LANE) ? cwf->channel_new(out_rate) : NULL;
+          if (p->ext[i]) { skim_callsign_extractor_reset(p->ext[i]); }
+          p->sgen[i] = 0;
+        }
+        if (p->split) {                /* fresh detection: old carriers gone */
+          skim_tone_split_free(p->split[c]);
+          p->split[c] = skim_tone_split_new(out_rate);
+          if (p->focus_fc > 0) {
+            skim_tone_split_set_focus(p->split[c], p->focus_fc);
+          }
+        }
+      }
+      memset(p->flock, 0, p->nchan * NSLOT * sizeof(FreqLock));
+    }
+    p->center_hz = b->center_hz;
+  }
+
+  skim_channelizer_push(p->bank, b->iq, b->nframes);
+  p->frames += b->nframes;
+  p->stream_us = (gint64)((double)p->frames * G_USEC_PER_SEC /
+                          MAX(b->rate, 1.0));
+
+  const SkimDecodeBackend *cw = pipe_backend(p);
+  float buf[DRAIN_FRAMES * 2];
+  SkimDecode d;
+
+  /* Pass 1: drain every channel, collect its decodes (dispatch waits until
+   * all levels for this block are known — arbitration needs the neighbours).
+   * An armed splitter sits between the channel and the decoders: samples go
+   * through it and come back out per slot (verbatim while passthrough). */
+  g_array_set_size(p->hits, 0);
+  for (guint c = 0; c < p->nchan; c++) {
+    SkimToneSplit *sp = p->split ? p->split[c] : NULL;
+    const double chan_hz = cw->set_freq
+        ? b->center_hz + skim_channelizer_offset_hz(p->bank, c) : 0.0;
+    if (cw->set_freq && !sp) {
+      cw->set_freq(p->dec[SL(c, WIDE_LANE)], chan_hz);
+    }
+    guint n;
+    while ((n = skim_channelizer_read(p->bank, c, buf, DRAIN_FRAMES)) > 0) {
+      if (!sp) {
+        const gboolean got = cw->process(p->dec[SL(c, WIDE_LANE)], buf, n, &d);
+        char *aux = cw->take_aux_text
+                        ? cw->take_aux_text(p->dec[SL(c, WIDE_LANE)]) : NULL;
+        GArray *ops = hit_take_ops(cw, p->dec[SL(c, WIDE_LANE)]);
+        if (!got && !aux && !ops)
+          continue;
+        if (!got) { hit_placeholder(cw, p->dec[SL(c, WIDE_LANE)], &d); }
+        Hit h = { .chan = c, .slot = WIDE_LANE, .eff_off = d.freq_offset_hz,
+                  .contested = FALSE, .d = d, .aux = aux, .ops = ops };
+        g_array_append_val(p->hits, h);
+        continue;
+      }
+      skim_tone_split_push(sp, buf, n);
+      /* Narrow slots (split/focus) run lanes 0..ns-1 with generation
+       * resets; the wide passthrough runs the PERSISTENT wide lane — an
+       * engage parks it mid-state, a collapse resumes it (v2 reads the
+       * gap as a pause and reopens; the extractor keeps its candidates). */
+      const gboolean insplit = skim_tone_split_is_split(sp);
+      const guint ns = skim_tone_split_slots(sp);
+      for (guint s = 0; s < ns; s++) {
+        const guint lane = insplit ? s : WIDE_LANE;
+        if (insplit) { slot_sync(p, c, s, cw); }
+        if (cw->set_freq) {
+          cw->set_freq(p->dec[SL(c, lane)],
+                       chan_hz + skim_tone_split_slot_hz(sp, s));
+        }
+        float sbuf[DRAIN_FRAMES * 2];
+        guint m;
+        while ((m = skim_tone_split_read(sp, s, sbuf, DRAIN_FRAMES)) > 0) {
+          const gboolean got = cw->process(p->dec[SL(c, lane)], sbuf, m, &d);
+          if (got && d.speed > 0) {          /* focus cutoff rides the WPM   */
+            skim_tone_split_slot_hint_wpm(sp, s, d.speed);
+          }
+          /* Solid = elem_err under ~0.1 — a beat-garbled channel still
+           * emits CONFIDENT mutations around 0.6-0.7 (that is why beat
+           * text validates), so the bar sits where clean copy lives. */
+          if (!insplit && got && d.text[0] && d.confidence >= 0.85) {
+            skim_tone_split_hint_wide_solid(sp);
+          }
+          char *aux = cw->take_aux_text
+                          ? cw->take_aux_text(p->dec[SL(c, lane)]) : NULL;
+          GArray *ops = hit_take_ops(cw, p->dec[SL(c, lane)]);
+          if (!got && !aux && !ops)
+            continue;
+          if (!got) { hit_placeholder(cw, p->dec[SL(c, lane)], &d); }
+          Hit h = { .chan = c, .slot = lane,
+                    .eff_off = skim_tone_split_slot_hz(sp, s) +
+                               d.freq_offset_hz,
+                    .contested = skim_tone_split_slot_contested(sp, s),
+                    .d = d, .aux = aux, .ops = ops };
+          g_array_append_val(p->hits, h);
+        }
+      }
+    }
+    const gboolean c_split = sp && skim_tone_split_is_split(sp);
+    for (guint s = 0; s < NSLOT; s++) {
+      const gboolean live = c_split ? (s < skim_tone_split_slots(sp))
+                                    : (s == WIDE_LANE);
+      p->lvl[SL(c, s)] = (live && p->dec[SL(c, s)] && cw->level)
+                             ? cw->level(p->dec[SL(c, s)]) : 0.0;
+    }
+  }
+
+  dispatch_hits(p, b, cw);
 }
 
 static gpointer engine_thread(gpointer data) {

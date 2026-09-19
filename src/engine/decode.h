@@ -106,6 +106,17 @@ struct _SkimDecodeBackend {
    * accumulators, KEEP acquisition/tracking — the channel must decode the
    * answering station from its first characters. Optional. */
   void (*resync)(gpointer state);
+
+  /* The TX hold BEGINS: the audio ends here, for seconds. A backend that
+   * commits behind the live edge (DeepCW's tail guard) reads what it holds
+   * to its end NOW — the station the operator is answering finished its
+   * over a moment ago, and waiting for right context would wait out the
+   * whole transmission and then lose the tail to resync (gh#18). While the
+   * hold lasts the pipeline keeps calling process() with ZERO frames, so
+   * the flushed text (and its pane ops) drain through the normal dispatch.
+   * A backend without the hook is left alone through the hold, as before.
+   * Optional. */
+  void (*hold_begin)(gpointer state);
 };
 
 G_END_DECLS

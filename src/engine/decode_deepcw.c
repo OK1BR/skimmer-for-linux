@@ -53,6 +53,22 @@ typedef struct {
                       * 71 % at 384–512, ≥ 85 % beyond)                    */
   double draft_p;    /* SKIM_DEEPCW_DRAFT_P (0.9): min posterior of a draft
                       * spike; with the distance bar → 98 % right         */
+  gboolean flush;    /* SKIM_DEEPCW_FLUSH (1): a TX hold commits the tail guard
+                      * instead of dropping it, and closes the word (gh#18);
+                      * 0 = the behaviour before, for A/B replays           */
+  double flush_pad_s;/* SKIM_DEEPCW_FLUSH_PAD (0.5): dead air appended to the
+                      * flush window — the band IS dead for us from here on,
+                      * and the model wants right context for the last char */
+  double flush_quiet;/* SKIM_DEEPCW_FLUSH_QUIET (6): dits of silence at the
+                      * live end that prove the last word whole; under it the
+                      * flush stops at the last word gap (a call cut mid-word
+                      * by the operator's TX must not validate: OH2X / OH2XX) */
+  double flush_p;    /* SKIM_DEEPCW_FLUSH_P (0.5): min posterior of every spike
+                      * of the last flushed word inside the tail guard      */
+  double flush_k;    /* SKIM_DEEPCW_FLUSH_K (4): line over the noise beside it
+                      * that counts as keyed in the silence test            */
+  double only_lo, only_hi; /* SKIM_DEEPCW_ONLY="lo-hi" kHz: inference only on
+                      * channels inside (measurement runs on the CPU)       */
   char **gap_words;  /* SKIM_DEEPCW_GAP_WORDS: short words/prosigns that
                       * keep a weak gap before them (a 1–2 char RIGHT piece
                       * that is one of these is a word, not a torn tail)  */
@@ -84,6 +100,19 @@ static void tune_init(void) {
     g_tune.draft     = env_d("SKIM_DEEPCW_DRAFT", 1) != 0;
     g_tune.draft_min_s = env_d("SKIM_DEEPCW_DRAFT_MIN", 0.384);
     g_tune.draft_p   = env_d("SKIM_DEEPCW_DRAFT_P", 0.9);
+    g_tune.flush       = env_d("SKIM_DEEPCW_FLUSH", 1) != 0;
+    g_tune.flush_pad_s = env_d("SKIM_DEEPCW_FLUSH_PAD", 0.5);
+    g_tune.flush_quiet = env_d("SKIM_DEEPCW_FLUSH_QUIET", 6.0);
+    g_tune.flush_k     = env_d("SKIM_DEEPCW_FLUSH_K", 4.0);
+    g_tune.flush_p     = env_d("SKIM_DEEPCW_FLUSH_P", 0.5);
+    {
+      const char *only = g_getenv("SKIM_DEEPCW_ONLY");
+      const char *dash = only ? strchr(only, '-') : NULL;
+      if (dash) {
+        g_tune.only_lo = g_ascii_strtod(only, NULL) * 1000.0;
+        g_tune.only_hi = g_ascii_strtod(dash + 1, NULL) * 1000.0;
+      }
+    }
     {
       const char *gw = g_getenv("SKIM_DEEPCW_GAP_WORDS");
       g_tune.gap_words = g_strsplit(gw && gw[0] ? gw
@@ -411,6 +440,18 @@ typedef struct {
   float  *res_logp;             /* mailbox: logp[To][42] or NULL           */
   guint   res_T;
   guint64 res_w0;
+  /* TX-hold flush (decode.h hold_begin, gh#18): one more model run over the
+   * window as it stands when the hold begins, dead air appended, and its
+   * tail guard committed under the flush rule — see dcw_flush_try(). */
+  guint   flush_pad_f, fade_f;
+  gboolean flush_want;          /* hold began; goes out once no job flies  */
+  guint64 flush_w1;             /* window end when the hold began          */
+  gboolean flush_inflight;      /* the job in flight IS the flush          */
+  guint64 flush_livef;          /* live end of the flush window (abs frame) */
+  guint   flush_live;           /* frames of the flush window (no pad)      */
+  gboolean resync_due;          /* resync came while the flush was out     */
+  guint64 resync_at;
+  guint64 samples_abs;          /* channel samples seen (dump: frame ↔ time) */
 } DcwState;
 
 typedef struct {
@@ -615,6 +656,11 @@ static gpointer dcw_channel_new(double rate) {
   st->tail_f      = (guint)llround(g_tune.tail_s * fps);
   st->minconf_f   = (guint)llround(g_tune.minconf_s * fps);
   st->draft_min_f = (guint)llround(g_tune.draft_min_s * fps);
+  st->flush_pad_f = MIN((guint)llround(g_tune.flush_pad_s * fps), st->ring_frames / 4);
+  /* A mute on the wire reaches the frames through the channelizer prototype
+   * (8 taps per branch at 2× oversampling = 16 channel samples) and the DFT
+   * window (N): that many frames fade before they read exact zero. */
+  st->fade_f      = (16 + N + st->hop - 1) / st->hop;
   return st;
 }
 
@@ -767,6 +813,16 @@ static void window_stats(DcwState *st, guint64 w0, guint64 w1) {
                             MAX(MIN(st->env_lo, g_band_floor), 1e-12)) - 10.0;
 }
 
+/* Tail dump: one line per applied window, so a frame index maps to channel
+ * samples (frame F ended at sample s_last − (frames_abs − 1 − F)·hop; holds
+ * swallow audio, so frame numbers alone do not give stream time). */
+static void dump_window(const DcwState *st, char kind, guint64 w0, guint To) {
+  if (!g_taildump) return;
+  fprintf(g_taildump, "%c %.0f %" G_GUINT64_FORMAT " %u %" G_GUINT64_FORMAT
+          " %" G_GUINT64_FORMAT "\n", kind, st->freq_hz, w0, To,
+          st->frames_abs, st->samples_abs - st->since);
+}
+
 /* Commit a finished inference (engine thread only): the rule, then the
  * confidence and WPM bookkeeping of the newly pending text. */
 static void dcw_apply(DcwState *st, const float *logp, guint To, guint64 w0) {
@@ -775,6 +831,7 @@ static void dcw_apply(DcwState *st, const float *logp, guint To, guint64 w0) {
   const guint64 cursor0 = MAX(st->committed, w0);
   g_string_truncate(st->draft, 0);
   g_dump_hz = st->freq_hz;
+  dump_window(st, 'W', w0, To);
   const guint n = skim_deepcw_commit_ex(logp, To, w0, &st->committed,
                                         st->tail_f, st->margin_f,
                                         &st->last_space, &st->space_t,
@@ -806,8 +863,260 @@ static void dcw_apply(DcwState *st, const float *logp, guint To, guint64 w0) {
   }
 }
 
+static gboolean dcw_outside(const DcwState *st) {
+  return g_tune.only_hi > 0.0 &&
+         (st->freq_hz < g_tune.only_lo || st->freq_hz > g_tune.only_hi);
+}
+
+/* A TX hold is an over boundary for us whatever the band did meanwhile: the
+ * text after it starts a new word. The model emits no gap there (it never
+ * saw the pause), so "TU OH2BBM" + the answer "OK1BR 5NN" read OH2BBMOK1BR
+ * (live 2026-09-19). Only text still inside the window counts — a channel
+ * that fell silent long ago would just log a lone gap at every hold. */
+static void dcw_close_word(DcwState *st) {
+  if (!st->last_space && st->committed + st->ring_frames > st->frames_abs) {
+    g_string_append_c(st->out, ' ');
+    st->pane_dirty = TRUE;
+  }
+  st->last_space = TRUE;
+}
+
+/* The flush is over (applied, or there was nothing to run it on). The word
+ * closes only when it is WHOLE: the head of a word the hold cut, closed,
+ * would be a token of its own (OH2X); left open it fuses with whatever
+ * fragment the channel resumes on and validates as nothing — as it always
+ * did before gh#18. */
+static void dcw_flush_done(DcwState *st, gboolean whole) {
+  st->flush_inflight = FALSE;
+  if (st->draft->len) { g_string_truncate(st->draft, 0); st->pane_dirty = TRUE; }
+  if (whole) { dcw_close_word(st); }
+  st->last_space = TRUE;
+  if (st->resync_due) {              /* the hold ended while the flush flew */
+    st->resync_due = FALSE;
+    st->committed = MAX(st->committed, st->resync_at);
+    st->space_t = 0;
+  }
+}
+
+/* Noise beside the line in ONE frame: the inner bins (inside the channelizer
+ * passband) at least 2 off the line — dcw_frame's floor estimator. */
+static float frame_floor(const float *r, guint p) {
+  float sum = 0; guint n = 0;
+  for (guint b = DCW_HALF - 3; b <= DCW_HALF + 3; b++) {
+    if ((gint)b - (gint)p >= 2 || (gint)p - (gint)b >= 2) { sum += r[b]; n++; }
+  }
+  return n ? sum / n : r[p];
+}
+
+static int cmp_float(const void *a, const void *b) {
+  const float x = *(const float *)a, y = *(const float *)b;
+  return (x > y) - (x < y);
+}
+
+/* The quietest inner bin of a frame: noise whatever a CW line does beside
+ * it, and lifted with every other bin by a broadband click. */
+static float frame_quietest(const float *r) {
+  float m = r[DCW_HALF - 3];
+  for (guint b = DCW_HALF - 2; b <= DCW_HALF + 3; b++) m = MIN(m, r[b]);
+  return m;
+}
+
+/* Is the last word the flush read WHOLE? Every other channel is mid-over
+ * when the operator keys, and the head of a call cut there validates as a
+ * call of its own (OH2X where OH2XX was being sent). The word is whole when
+ * ITS line — the strongest bin over the word's own frames, not the window's
+ * (a louder station earlier in the window hid a weak caller's keying) — has
+ * been silent for flush_quiet dits at the live end: more than a character
+ * gap, so nothing of the word is still to come. */
+static gboolean flush_word_complete(DcwState *st, const float *logp, guint To,
+                                    guint64 w0) {
+  const guint64 live = st->flush_livef;
+  const double fps = st->rate / st->hop;
+  GArray *sp = ctc_collapse(logp, To, w0);
+  gint last = -1;
+  for (guint i = 0; i < sp->len; i++) {
+    const Spike *k = &g_array_index(sp, Spike, i);
+    if (k->cls != DCW_SPACE && k->t > st->committed + st->margin_f &&
+        k->t <= live) { last = (gint)i; }
+  }
+  /* The span the line is looked for in: the last pending word (its first
+   * spike, half a second of lead — a spike sits at its character's END), or
+   * with nothing pending the last second: a long character still being keyed
+   * has no spike yet, and the word before it is not whole either. */
+  guint64 t0 = live > (guint64)fps ? live - (guint64)(fps / 2) : w0;
+  gboolean weak = FALSE;
+  if (last >= 0) {
+    gint first = last;
+    while (first > 0 && g_array_index(sp, Spike, first - 1).cls != DCW_SPACE &&
+           g_array_index(sp, Spike, first).t - g_array_index(sp, Spike, first - 1).t < (guint64)fps) {
+      first--;
+    }
+    t0 = g_array_index(sp, Spike, first).t;
+    /* The model must be sure of what it read without right context: one
+     * spike of the last word under flush_p inside the tail guard and the
+     * word stays out whole (SAC fixture, 37 synthetic overs: 11 of 16 wrong
+     * last words fall under 0.5, against 5 of 77 right ones). */
+    for (gint i = first; i <= last; i++) {
+      const Spike *k = &g_array_index(sp, Spike, i);
+      if (k->t + st->tail_f > live && k->p < g_tune.flush_p) { weak = TRUE; }
+    }
+  }
+  const guint64 ta = MAX(w0, t0 > (guint64)(fps / 2) ? t0 - (guint64)(fps / 2) : 0);
+  g_array_free(sp, TRUE);
+  if (live <= ta) return FALSE;
+  double prof[DCW_KEEP] = { 0 };
+  for (guint64 f = ta; f < live; f++) {
+    const float *r = ring_row(st, f);
+    for (guint b = 0; b < DCW_KEEP; b++) prof[b] += r[b];
+  }
+  guint p = 1;
+  for (guint b = 1; b < DCW_KEEP - 1; b++) if (prof[b] > prof[p]) p = b;
+  /* Keyed = the line (±1 bin) over flush_k × the NOISE beside it: the lower
+   * quartile of the per-frame floor over the word — the frames between the
+   * marks; during a mark the keying sidebands lift it. A bar relative to the
+   * word's peak called a station in a QSB dip silent mid-character (KC1XX
+   * fading 12 dB inside one call: "KC1" went out as a whole word). */
+  float pk = 0.0f;
+  const guint nfl = (guint)(live - ta);
+  float *fls = g_new(float, nfl);
+  for (guint64 f = ta; f < live; f++) {
+    const float *r = ring_row(st, f);
+    pk = MAX(pk, r[p]);
+    fls[f - ta] = frame_floor(r, p);
+  }
+  qsort(fls, nfl, sizeof(float), cmp_float);
+  const double fl = fls[nfl / 4];
+  g_free(fls);
+  const double thr = g_tune.flush_k * fl;
+  guint quiet = 0;
+  for (guint64 f = live; f > ta; f--) {
+    const float *r = ring_row(st, f - 1);
+    if (MAX(r[p], MAX(r[p - 1], r[p + 1])) > thr) break;
+    quiet++;
+  }
+  const double wpm = st->wpm > 0 ? CLAMP(st->wpm, 15.0, 45.0) : 25.0;
+  const guint need = (guint)ceil(g_tune.flush_quiet * 1.2 / wpm * fps);
+  if (g_taildump) {
+    fprintf(g_taildump, "Q %.0f %" G_GUINT64_FORMAT " %" G_GUINT64_FORMAT
+            " %u %u %u %.0f %d\n", st->freq_hz, st->flush_w1, live, p, quiet, need,
+            st->wpm, (int)weak);
+    if (g_tune.debug > 1) {            /* the line against thr, oldest first */
+      fprintf(g_taildump, "V %.0f ta %" G_GUINT64_FORMAT " thr %.5f pk %.5f fl %.5f:",
+              st->freq_hz, ta, thr, pk, fl);
+      for (guint64 f = live > ta + 80 ? live - 80 : ta; f < st->flush_w1; f++) {
+        const float *r = ring_row(st, f);
+        fprintf(g_taildump, " %.0f", 100.0 * MAX(r[p], MAX(r[p - 1], r[p + 1])) / thr);
+      }
+      fprintf(g_taildump, "\n");
+    }
+  }
+  return quiet >= need && !weak;
+}
+
+/* The flush result (engine thread): commit through the live end of the
+ * window — the pad is no audio — and no draft. A last word the hold cut
+ * short stays out: its head may validate as a call of its own. */
+static void dcw_apply_flush(DcwState *st, const float *logp, guint To, guint64 w0) {
+  double conf = 0;
+  const gsize before = st->out->len;
+  const gboolean ls0 = st->last_space;
+  const guint dead = To > st->flush_live ? To - st->flush_live : 0;   /* the pad */
+  g_dump_hz = st->freq_hz;
+  dump_window(st, 'H', w0, To);
+  const gboolean complete = flush_word_complete(st, logp, To, w0);
+  guint n = skim_deepcw_commit_ex(logp, To, w0, &st->committed,
+                                  dead, st->margin_f,
+                                  &st->last_space, &st->space_t,
+                                  st->out, &conf, NULL, 0, 0.0);
+  guint dropped = 0;
+  if (n && !complete) {
+    gsize cut = before;
+    for (gsize i = st->out->len; i > before; i--) {
+      if (st->out->str[i - 1] == ' ') { cut = i; break; }
+    }
+    dropped = (guint)(st->out->len - cut);
+    g_string_truncate(st->out, cut);
+    st->last_space = cut > before ? TRUE : ls0;
+    n -= dropped;
+  }
+  if (n) {
+    const gsize tot = st->out->len;
+    st->out_conf = tot ? (st->out_conf * before + conf * n) / tot : conf;
+    st->pane_dirty = TRUE;
+  }
+  if (g_taildump) {
+    fprintf(g_taildump, "E %.0f %u %u |%s|\n", st->freq_hz,
+            (unsigned)complete, dropped, st->out->str + before);
+  }
+  if (g_tune.debug) {
+    g_printerr("deepcw: %.2f kHz T=%u FLUSH live %u %s commit %u dropped %u |%s|\n",
+               st->freq_hz / 1000.0, To, st->flush_live,
+               complete ? "complete" : "cut", n, dropped,
+               st->out->str + before);
+  }
+  dcw_flush_done(st, complete);
+}
+
+/* Tile of abs frames [w0, w1) + `pad` frames of dead air: channel bins at
+ * 27..37, peak-normalised, log1p; rest zero. */
+static void dcw_tile(DcwState *st, guint64 w0, guint64 w1, guint pad) {
+  const guint T = (guint)(w1 - w0);
+  float mx = 0.0f;
+  for (guint64 f = w0; f < w1; f++) {
+    const float *r = ring_row(st, f);
+    for (guint b = 0; b < DCW_KEEP; b++) mx = MAX(mx, r[b]);
+  }
+  const float g = mx > 0 ? DCW_PEAK_MAG / mx : 1.0f;
+  memset(st->tile, 0, (gsize)(T + pad) * DCW_BINS * sizeof(float));
+  for (guint t = 0; t < T; t++) {
+    const float *r = ring_row(st, w0 + t);
+    float *row = st->tile + (gsize)t * DCW_BINS + (DCW_CENTRE - DCW_HALF);
+    for (guint b = 0; b < DCW_KEEP; b++) row[b] = log1pf(r[b] * g);
+  }
+}
+
+/* st->tile[T] through the model: inline (replays) or to a worker. */
+static void dcw_submit(DcwState *st, guint T, guint64 w0, gboolean flush) {
+  if (g_tune.sync) {
+    float *logp = NULL; guint To = 0;
+    dcw_infer(st->tile, T, &logp, &To);
+    if (To) {
+      if (flush) { dcw_apply_flush(st, logp, To, w0); }
+      else       { dcw_apply(st, logp, To, w0); }
+    } else if (flush) {
+      dcw_flush_done(st, TRUE);
+    }
+    g_free(logp);
+    return;
+  }
+  /* Async: hand the window to a worker; the mailbox comes back through
+   * dcw_process on the engine thread. One job per channel in flight; a
+   * queue that keeps growing means the workers cannot keep up — skip the
+   * tick (the channel retries next tick) and say so once. A flush is never
+   * retried, so it always goes in. */
+  workers_ensure();
+  if (!flush && g_async_queue_length(g_jobs) > 256) {
+    if (!g_behind_warned) {
+      g_behind_warned = TRUE;
+      g_warning("deepcw: inference queue > 256 jobs — workers fall behind, "
+                "ticks skipped (SKIM_DEEPCW_WORKERS=%d)", g_tune.workers);
+    }
+    return;
+  }
+  st->flush_inflight = flush;
+  DcwJob *job = g_new0(DcwJob, 1);
+  job->st = st;
+  job->T = T;
+  job->w0 = w0;
+  job->tile = g_memdup2(st->tile, (gsize)T * DCW_BINS * sizeof(float));
+  g_atomic_int_inc(&st->refs);
+  st->inflight = TRUE;
+  g_async_queue_push(g_jobs, job);
+}
+
 static void dcw_tick(DcwState *st) {
   if (st->inflight) return;          /* async: one window at a time         */
+  if (dcw_outside(st)) return;
   const guint64 w1 = st->frames_abs;
   const guint64 w0 = w1 > st->ring_frames ? w1 - st->ring_frames : 0;
   if (w1 <= w0) return;
@@ -824,47 +1133,78 @@ static void dcw_tick(DcwState *st) {
     if (st->draft->len) { g_string_truncate(st->draft, 0); st->pane_dirty = TRUE; }
     return;
   }
-  /* Tile: channel bins at 27..37, peak-normalised, log1p; rest zero. */
-  float mx = 0.0f;
-  for (guint64 f = w0; f < w1; f++) {
-    const float *r = ring_row(st, f);
-    for (guint b = 0; b < DCW_KEEP; b++) mx = MAX(mx, r[b]);
+  dcw_tile(st, w0, w1, 0);
+  dcw_submit(st, T, w0, FALSE);
+}
+
+/* TX-hold flush (decode.h hold_begin, gh#18). The tail guard exists because
+ * the model reads the last second of a window badly: the audio there is
+ * usually cut mid-character and has no right context. When the operator
+ * starts to transmit, that context never comes — the pipeline swallows the
+ * band for seconds and resync then abandons the tail, which in search and
+ * pounce is the call of the very station being answered. So the window is
+ * read once more as it stands, with dead air appended (true: the band is
+ * dead for us from here on), and the tail is committed.
+ *
+ * What the flush may NOT do is mint a truncated call: every other channel
+ * is mid-over when the operator keys, and "OH2X" validates where OH2XX was
+ * being sent. The last word goes out only when the line has been silent for
+ * flush_quiet dits at the LIVE end of the window (more than a character
+ * gap: the word is whole); otherwise the flush stops at the last word gap.
+ * The live end is not the window end: sdr-for-linux mutes the wire at
+ * key-down and reports trx 0.04–0.43 s later (gh#17), so the window ends in
+ * exact-zero frames — silence that says nothing about the station —
+ * preceded by the mute's own transient: a band cut to zero from one sample
+ * to the next is a CLICK in every channel, fade_f frames wide (channelizer
+ * prototype + DFT window), and the model reads it as a dit with full
+ * confidence ("E", p 1.00, on channel after channel — SAC fixture). The
+ * model gets the window up to the live end and nothing behind it. */
+static void dcw_flush_try(DcwState *st) {
+  if (!st->flush_want || st->inflight) return;
+  st->flush_want = FALSE;
+  if (st->nomodel || dcw_outside(st)) { dcw_flush_done(st, TRUE); return; }
+  const guint64 wend = st->flush_w1;
+  const guint64 wmin = wend > st->ring_frames ? wend - st->ring_frames : 0;
+  if (wend - wmin < st->minconf_f) { dcw_flush_done(st, TRUE); return; }
+
+  /* The live end. Normal = a frame whose noise (the quietest inner bin — a
+   * CW line is narrow, the mute's click is not) sits within ×/÷ 3 of the
+   * reference below; everything abnormal at the very end is the mute (or a
+   * strong station still keying, whose last word is cut either way). */
+  const double fps = st->rate / st->hop;
+  const guint look = MIN((guint)(wend - wmin), (guint)llround(2.0 * fps));
+  float *q = g_new(float, look);
+  for (guint i = 0; i < look; i++) { q[i] = frame_quietest(ring_row(st, wend - look + i)); }
+  /* reference = the lower quartile of the frames that carry anything at
+   * all: the gaps between marks (a strong station's own keying lifts even
+   * its quietest bin), the muted frames left out */
+  float *qs = g_new(float, look);
+  guint nq = 0;
+  for (guint i = 0; i < look; i++) { if (q[i] > 0.0f) qs[nq++] = q[i]; }
+  if (nq < 16) { g_free(q); g_free(qs); dcw_flush_done(st, TRUE); return; }
+  qsort(qs, nq, sizeof(float), cmp_float);
+  const double ref = qs[nq / 4];
+  g_free(qs);
+  guint64 live = wend;
+  const guint64 lo = wend - MIN(look, (guint)llround(0.7 * fps) + st->fade_f);
+  while (live > lo) {
+    const double v = q[look - (guint)(wend - live) - 1];
+    if (v >= ref / 3.0 && v <= ref * 3.0) break;
+    live--;
   }
-  const float g = mx > 0 ? DCW_PEAK_MAG / mx : 1.0f;
-  memset(st->tile, 0, (gsize)T * DCW_BINS * sizeof(float));
-  for (guint t = 0; t < T; t++) {
-    const float *r = ring_row(st, w0 + t);
-    float *row = st->tile + (gsize)t * DCW_BINS + (DCW_CENTRE - DCW_HALF);
-    for (guint b = 0; b < DCW_KEEP; b++) row[b] = log1pf(r[b] * g);
-  }
-  if (g_tune.sync) {
-    float *logp = NULL; guint To = 0;
-    dcw_infer(st->tile, T, &logp, &To);
-    if (To) { dcw_apply(st, logp, To, w0); }
-    g_free(logp);
-    return;
-  }
-  /* Async: hand the window to a worker; the mailbox comes back through
-   * dcw_process on the engine thread. One job per channel in flight; a
-   * queue that keeps growing means the workers cannot keep up — skip the
-   * tick (the channel retries next tick) and say so once. */
-  workers_ensure();
-  if (g_async_queue_length(g_jobs) > 256) {
-    if (!g_behind_warned) {
-      g_behind_warned = TRUE;
-      g_warning("deepcw: inference queue > 256 jobs — workers fall behind, "
-                "ticks skipped (SKIM_DEEPCW_WORKERS=%d)", g_tune.workers);
-    }
-    return;
-  }
-  DcwJob *job = g_new0(DcwJob, 1);
-  job->st = st;
-  job->T = T;
-  job->w0 = w0;
-  job->tile = g_memdup2(st->tile, (gsize)T * DCW_BINS * sizeof(float));
-  g_atomic_int_inc(&st->refs);
-  st->inflight = TRUE;
-  g_async_queue_push(g_jobs, job);
+  g_free(q);
+  if (live < wend) { live = live > wmin + 2 ? live - 2 : wmin; }   /* its first frames look normal */
+
+  const guint pad = st->flush_pad_f;
+  const guint64 w0 = (live - wmin) + pad > st->ring_frames
+                         ? live + pad - st->ring_frames : wmin;
+  if (live <= w0 || (guint)(live - w0) < st->minconf_f) { dcw_flush_done(st, TRUE); return; }
+  window_stats(st, w0, live);
+  if (!st->gate) { dcw_flush_done(st, TRUE); return; }
+  st->flush_livef = live;
+  st->flush_live = (guint)(live - w0);
+  dcw_tile(st, w0, live, pad);
+  dcw_submit(st, (guint)(live - w0) + pad, w0, TRUE);
 }
 
 static void dcw_frame(DcwState *st) {
@@ -953,11 +1293,18 @@ static gboolean dcw_process(gpointer state, const float *iq, guint nframes,
     g_mutex_unlock(&g_res_lock);
     if (logp) {
       st->inflight = FALSE;
-      if (To) { dcw_apply(st, logp, To, w0); }
+      if (st->flush_inflight) {
+        if (To) { dcw_apply_flush(st, logp, To, w0); }
+        else    { dcw_flush_done(st, TRUE); }
+      } else if (To) {
+        dcw_apply(st, logp, To, w0);
+      }
       g_free(logp);
     }
   }
+  dcw_flush_try(st);                 /* a hold began while a tick was out  */
   for (guint i = 0; i < nframes; i++) {
+    st->samples_abs++;
     /* write position = oldest slot once the ring is full */
     const guint w = (st->spos + st->sfill) % st->N;
     st->sring[2 * w] = iq[2 * i];
@@ -997,16 +1344,38 @@ static double dcw_level(gpointer state) { return ((DcwState *)state)->lvl_ema; }
 static double dcw_tone_offset_hz(gpointer state) { return ((DcwState *)state)->off_ema; }
 static void dcw_set_freq(gpointer state, double freq_hz) { ((DcwState *)state)->freq_hz = freq_hz; }
 
-/* TX hold: the channel missed audio — start the window afresh, keep the
- * level/offset tracking and any text already committed. */
+/* TX hold begins: read the tail to its end now (dcw_flush_try). */
+static void dcw_hold_begin(gpointer state) {
+  DcwState *st = state;
+  if (st->dead || !g_tune.flush) return;
+  st->flush_want = TRUE;
+  st->flush_w1 = st->frames_abs;
+  dcw_flush_try(st);
+}
+
+/* TX hold ends: the channel missed audio — start the window afresh, keep
+ * the level/offset tracking and any text already committed. Nothing before
+ * this frame commits any more (the audio after the gap is no right context
+ * for the audio before it); a flush still in flight takes the cursor jump
+ * with it (dcw_flush_done). */
 static void dcw_resync(gpointer state) {
   DcwState *st = state;
   if (st->dead) return;
   st->sfill = 0; st->spos = 0; st->since = 0;
-  st->committed = st->frames_abs;
-  st->last_space = TRUE;
-  st->space_t = 0;
-  if (st->draft->len) { g_string_truncate(st->draft, 0); st->pane_dirty = TRUE; }
+  if (st->flush_want) {              /* a tick was out through the whole hold */
+    dcw_flush_try(st);
+    st->flush_want = FALSE;
+  }
+  if (st->inflight && st->flush_inflight) {
+    st->resync_due = TRUE;
+    st->resync_at = st->frames_abs;
+  } else {
+    if (g_tune.flush) { dcw_close_word(st); }   /* before the cursor moves */
+    st->committed = st->frames_abs;
+    st->last_space = TRUE;
+    st->space_t = 0;
+    if (st->draft->len) { g_string_truncate(st->draft, 0); st->pane_dirty = TRUE; }
+  }
   pane_compose(st);
 }
 
@@ -1040,6 +1409,7 @@ const SkimDecodeBackend *skim_decode_deepcw(void) {
     .take_aux_text  = NULL,
     .take_pane_op   = dcw_take_pane_op,
     .resync         = dcw_resync,
+    .hold_begin     = dcw_hold_begin,
   };
   return &backend;
 }

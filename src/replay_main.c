@@ -11,6 +11,17 @@
  * decoder versions over the same sample diff line by line; the run ends with
  * a station table and summary counters for quick before/after comparison.
  *
+ * SKIM_REPLAY_HOLDS="t0-t1,t0-t1,…" (stream seconds) replays the operator's
+ * own transmissions: the TX flag is raised over each interval exactly as the
+ * TCI trx broadcast would, so the pipeline's TX hold (and its grace) runs
+ * as it did live. Take the intervals from the "TX hold" lines of the live
+ * log of the same session. SKIM_REPLAY_MUTE (same format) zeroes the IQ
+ * over its intervals, to the sample — what sdr-for-linux puts on the wire
+ * from key-down on (gh#17), so a SYNTHETIC over can be laid anywhere into a
+ * recording: mute from the key, raise the flag a poll later.
+ * SKIM_REPLAY_FROM / SKIM_REPLAY_TO (stream seconds) replay a slice only;
+ * hold and mute times stay absolute.
+ *
  * The same MASTER.SCP the app uses (~/.config/skimmer-for-linux/master.scp)
  * is loaded when present — keep it that way for honest A/B against the app.
  *
@@ -93,6 +104,31 @@ static void spectrum_cb(const guint8 *row, guint nbins, double center_hz,
   trk_min = 255;
 }
 
+/* SKIM_REPLAY_HOLDS → [t0, t1) pairs in stream seconds. */
+static GArray *holds_parse(const char *spec) {
+  GArray *a = g_array_new(FALSE, FALSE, sizeof(double));
+  if (!spec || !spec[0]) { return a; }
+  char **parts = g_strsplit(spec, ",", -1);
+  for (char **q = parts; *q; q++) {
+    char *dash = strchr(*q, '-');
+    if (!dash) { continue; }
+    const double t0 = g_ascii_strtod(*q, NULL);
+    const double t1 = g_ascii_strtod(dash + 1, NULL);
+    if (t1 > t0) { g_array_append_val(a, t0); g_array_append_val(a, t1); }
+  }
+  g_strfreev(parts);
+  return a;
+}
+
+static gboolean holds_tx_at(const GArray *a, double t) {
+  for (guint i = 0; i + 1 < a->len; i += 2) {
+    if (t >= g_array_index(a, double, i) && t < g_array_index(a, double, i + 1)) {
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
 static int by_freq(gconstpointer a, gconstpointer b) {
   const SkimStation *sa = *(const SkimStation *const *)a;
   const SkimStation *sb = *(const SkimStation *const *)b;
@@ -171,17 +207,45 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  GArray *holds = holds_parse(g_getenv("SKIM_REPLAY_HOLDS"));
+  GArray *mutes = holds_parse(g_getenv("SKIM_REPLAY_MUTE"));
+  if (holds->len) { printf("TX holds replayed: %u\n", holds->len / 2); }
+  if (mutes->len) { printf("muted intervals: %u\n", mutes->len / 2); }
+
   gint64 t0 = g_get_monotonic_time();
   static float buf[BLK * 2];
   guint64 frames = 0;
   size_t n;
-  while ((n = fread(buf, 2 * sizeof(float), BLK, f)) > 0) {
+  {
+    const char *from = g_getenv("SKIM_REPLAY_FROM");
+    if (from && from[0]) {
+      frames = (guint64)(g_ascii_strtod(from, NULL) * rate) / BLK * BLK;
+      fseeko(f, (off_t)frames * 2 * (off_t)sizeof(float), SEEK_SET);
+    }
+  }
+  const char *to_env = g_getenv("SKIM_REPLAY_TO");
+  const guint64 frames_to = to_env && to_env[0]
+      ? (guint64)(g_ascii_strtod(to_env, NULL) * rate) : G_MAXUINT64;
+  const guint64 frames_from = frames;
+  while (frames < frames_to && (n = fread(buf, 2 * sizeof(float), BLK, f)) > 0) {
+    if (holds->len) {
+      skim_pipeline_set_tx_hold(p, holds_tx_at(holds, (double)frames / rate));
+    }
+    for (guint m = 0; m + 1 < mutes->len; m += 2) {
+      const double a = g_array_index(mutes, double, m) * rate - (double)frames;
+      const double z = g_array_index(mutes, double, m + 1) * rate - (double)frames;
+      if (z <= 0 || a >= (double)n) { continue; }
+      const gsize i0 = a > 0 ? (gsize)a : 0, i1 = z < (double)n ? (gsize)z : n;
+      memset(buf + 2 * i0, 0, (i1 - i0) * 2 * sizeof(float));
+    }
     skim_pipeline_feed(p, buf, (guint)n, rate, center);
     frames += n;
   }
   fclose(f);
+  g_array_free(holds, TRUE);
+  g_array_free(mutes, TRUE);
   double wall   = (double)(g_get_monotonic_time() - t0) / G_USEC_PER_SEC;
-  double stream = (double)frames / rate;
+  double stream = (double)(frames - frames_from) / rate;
 
   skim_pipeline_stop(p);
 
