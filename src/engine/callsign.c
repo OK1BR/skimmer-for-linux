@@ -149,6 +149,25 @@ gboolean skim_callsign_is_valid(const char *s) {
 
 static GHashTable *s_dict;                     /* call → itself (owned)      */
 
+/* One stripped dictionary line → TRUE when it carries a call. Blank lines,
+ * '#' comments and "!!" directives (Super Check Partial opens its files with
+ * "!!Order,1,1") carry none, and neither does anything holding a character
+ * no callsign has — whatever header the format grows next stays out too.
+ * Deliberately NOT skim_callsign_is_valid(): the list is the authority on
+ * who is on the air, the validator only knows the prefixes it was taught. */
+static gboolean dict_line_is_call(const char *s) {
+  if (!s[0] || s[0] == '#' || (s[0] == '!' && s[1] == '!'))
+    return FALSE;
+  gsize n = 0;
+  gboolean digit = FALSE, alpha = FALSE;
+  for (const char *p = s; *p; p++, n++) {
+    if (g_ascii_isdigit(*p)) { digit = TRUE; }
+    else if (g_ascii_isalpha(*p)) { alpha = TRUE; }
+    else if (*p != '/') { return FALSE; }
+  }
+  return digit && alpha && n >= 3 && n <= 15;
+}
+
 gboolean skim_callsign_dict_load(const char *path, GError **error) {
   char *data = NULL;
   if (!g_file_get_contents(path, &data, NULL, error))
@@ -158,7 +177,7 @@ gboolean skim_callsign_dict_load(const char *path, GError **error) {
   char **lines = g_strsplit(data, "\n", -1);
   for (char **l = lines; *l; l++) {
     char *call = g_strstrip(*l);
-    if (!call[0] || call[0] == '#')
+    if (!dict_line_is_call(call))
       continue;
     char *up = g_ascii_strup(call, -1);
     g_hash_table_add(s_dict, up);

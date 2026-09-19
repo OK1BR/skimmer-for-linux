@@ -26,7 +26,8 @@ G_BEGIN_DECLS
 gboolean skim_callsign_is_valid(const char *s);
 
 /* Optional known-call dictionary (MASTER.SCP style: one call per line, '#'
- * comments). Replaces any previously loaded dictionary. Load on the thread
+ * comments, "!!" directives and lines that cannot be a call are skipped).
+ * Replaces any previously loaded dictionary. Load on the thread
  * that owns the pipeline setup (no reload while readers run). */
 gboolean skim_callsign_dict_load(const char *path, GError **error);
 guint    skim_callsign_dict_size(void);
