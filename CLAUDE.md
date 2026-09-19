@@ -1177,6 +1177,15 @@ answer after it — an immediate `trx` broadcast in sdr-for-linux (parity with
 the `p2_set_frequency` kick) and/or a data-driven hold here; plausibly
 related to #18.
 
+**gh#17 LIVE-VERIFIED (Richard, 2026-09-19 ~18:10, SAC CW, 20 m).** His
+instance restarted on 1b5a9c4 at 18:06 (live34, DeepCW on CUDA; IQ back in
+0.8 s) and his own overs from 18:06:30 on: "vypadá to dobře, jen se pausne
+a vyčká, dokud TX neskončí" — no white-out, no black band, the picture waits
+and continues. The TX gap carries no marker and he did not ask for one.
+Still open from this work, as separate tickets on his word after the
+contest: the late `trx` flag on the DECODER side (immediate broadcast in
+sdr-for-linux; a data-driven hold here).
+
 ## Layout
 
 ```

@@ -543,7 +543,9 @@ M0…M8 are cited from source comments — keep them.
   release it would cost 0.3–0.8 s of live picture; rows without the edge cut — a chopped window smeared the
   strongest line across the row only 15 dB down and moved the floor 2.8 dB.
   A server that keeps sending a deafened band through TX (none seen) would
-  need the flag after all.
+  need the flag after all. Live-verified the same evening in the contest
+  (Richard): the picture pauses for the over and continues; the gap carries
+  no marker, and he did not ask for one.
   **The view (same day, headless-verified).** `src/app/wf_compose.c` is the
   GLib-only history + composer (gate-tested): full-resolution rows in a ring
   (`SKIM_WF_HISTORY_ROWS` 2048 ≈ 22 s, 16 MB at 192 k), a pannable/zoomable
