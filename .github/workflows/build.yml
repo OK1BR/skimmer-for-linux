@@ -123,13 +123,30 @@ jobs:
             --appdir AppDir \
             --output appimage
           ls -la *.AppImage
-      - name: Build .deb + .rpm (nfpm)
+      - name: Build the .deb (nfpm)
         run: |
           curl -sL https://github.com/goreleaser/nfpm/releases/download/v2.47.0/nfpm_2.47.0_Linux_x86_64.tar.gz \
             | tar xz -C /tmp nfpm
           mkdir -p dist
-          /tmp/nfpm package -f packaging/nfpm.yaml -p deb -t dist/
-          /tmp/nfpm package -f packaging/nfpm.yaml -p rpm -t dist/
+          STAGING=build-pkg/staging /tmp/nfpm package -f packaging/nfpm.yaml -p deb -t dist/
+          ls -la dist/
+      - name: Build the .rpm inside fedora:44 (nfpm)
+        run: |
+          # Fedora carries libwebsockets 4.5 while Ubuntu is still on 4.3, and
+          # the SONAME moved with it — an Ubuntu-built binary looks for
+          # libwebsockets.so.19, which no current Fedora has. Up to Fedora 40
+          # both distributions shipped .so.19 and one build served both
+          # packages; that coincidence is over, so the .rpm payload is compiled
+          # inside the image it targets. nfpm is a static binary, mounted in.
+          docker run --rm -v "$PWD:/src" -v /tmp/nfpm:/usr/local/bin/nfpm:ro \
+            -w /src -e SKIM_VERSION -e STAGING=build-rpm/staging fedora:44 bash -ec '
+            dnf install -y -q meson ninja-build gcc pkgconf-pkg-config \
+              gtk4-devel libadwaita-devel glib2-devel libwebsockets-devel \
+              fftw-devel libcurl-devel desktop-file-utils gtk-update-icon-cache
+            meson setup build-rpm --buildtype=release --prefix=/usr
+            meson compile -C build-rpm
+            DESTDIR=/src/build-rpm/staging meson install -C build-rpm
+            nfpm package -f packaging/nfpm.yaml -p rpm -t dist/'
           ls -la dist/
       - name: Install-test the .deb (ubuntu:26.04)
         run: |
