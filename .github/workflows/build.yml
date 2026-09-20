@@ -167,9 +167,13 @@ jobs:
             # --version links the libraries but never touches GTK. The window
             # has to come up on the target system too, so the app runs under a
             # throwaway X server and has to be ALIVE when the timeout fires:
-            # timeout returns 124 only if nothing aborted before it.
+            # timeout returns 124 only if nothing aborted before it. The cairo
+            # renderer is forced because a container has no GPU stack at all —
+            # GSK would abort on the missing libGLESv2, which says nothing
+            # about the package. What is under test here is the toolkit chain
+            # and the window, not the rendering path.
             set +e
-            timeout 15 xvfb-run -a skimmer-for-linux >/tmp/gui.log 2>&1
+            timeout 15 env GSK_RENDERER=cairo xvfb-run -a skimmer-for-linux >/tmp/gui.log 2>&1
             rc=$?
             set -e
             if [ $rc -ne 124 ]; then echo "GUI smoke test failed, rc=$rc"; cat /tmp/gui.log; exit 1; fi
@@ -185,7 +189,7 @@ jobs:
             dnf install -y -q xorg-x11-server-Xvfb
             # Same GUI smoke test as the .deb side, see there.
             set +e
-            timeout 15 xvfb-run -a skimmer-for-linux >/tmp/gui.log 2>&1
+            timeout 15 env GSK_RENDERER=cairo xvfb-run -a skimmer-for-linux >/tmp/gui.log 2>&1
             rc=$?
             set -e
             if [ $rc -ne 124 ]; then echo "GUI smoke test failed, rc=$rc"; cat /tmp/gui.log; exit 1; fi
