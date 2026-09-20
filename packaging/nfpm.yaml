@@ -51,8 +51,13 @@ overrides:
       - libadwaita-1-0 (>= 1.5)
       - libglib2.0-0t64
       - libwebsockets19t64
-      # the gnutls flavour: the one libadwaita's libappstream5 already loads
-      - libcurl3t64-gnutls
+      # The plain (OpenSSL) flavour, SONAME libcurl.so.4 -- the one name that
+      # exists on Debian/Ubuntu AND on Fedora, so one binary serves both
+      # packages. libadwaita -> libappstream5 pulls libcurl3t64-gnutls in
+      # anyway, so both flavours sit in the process; Debian's split SONAMEs
+      # and versioned symbols are made for that, and the install-tests run
+      # `--version` to prove it rather than assume it.
+      - libcurl4t64
       - libfftw3-single3
       - libfftw3-double3
   rpm:

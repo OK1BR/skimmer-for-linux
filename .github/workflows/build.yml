@@ -20,7 +20,7 @@ env:
   DEBIAN_FRONTEND: noninteractive
   APT_DEPS: >-
     meson ninja-build libgtk-4-dev libadwaita-1-dev libglib2.0-dev
-    libwebsockets-dev libfftw3-dev libcurl4-gnutls-dev desktop-file-utils
+    libwebsockets-dev libfftw3-dev libcurl4-openssl-dev desktop-file-utils
 
 jobs:
   gates:
@@ -131,6 +131,10 @@ jobs:
             apt-get install -yq /dist/*.deb
             if ldd /usr/bin/skimmer-for-linux | grep "not found"; then exit 1; fi
             test -f /usr/share/applications/cz.ok1br.skimmer_for_linux.desktop
+            # --version needs no display but loads the whole library chain,
+            # including libadwaita -> libappstream5 -> libcurl-gnutls, next to
+            # our own libcurl.so.4. Proves the two flavours coexist.
+            skimmer-for-linux --version
             echo "deb install OK"'
       - name: Install-test the .rpm (fedora:40)
         run: |
@@ -138,6 +142,7 @@ jobs:
             dnf install -y -q /dist/*.rpm
             if ldd /usr/bin/skimmer-for-linux | grep "not found"; then exit 1; fi
             test -f /usr/share/applications/cz.ok1br.skimmer_for_linux.desktop
+            skimmer-for-linux --version
             echo "rpm install OK"'
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
