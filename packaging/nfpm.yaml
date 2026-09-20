@@ -4,10 +4,14 @@
 #   meson compile -C build-pkg
 #   DESTDIR=$PWD/build-pkg/staging meson install -C build-pkg
 #   SKIM_VERSION=x.y.z nfpm package -f packaging/nfpm.yaml -p deb -t dist/
-#   SKIM_VERSION=x.y.z nfpm package -f packaging/nfpm.yaml -p rpm -t dist/
 #
-# Dependency names follow sdr-for-linux's packaging (verified there against
-# Ubuntu 24.04/Debian 13 and Fedora 40+), plus FFTW in both precisions: the
+# nfpm does not expand environment variables in `contents`, so both payloads
+# are staged at the same path and packaged one after the other: CI builds the
+# .deb from the Ubuntu install tree, then re-installs a Fedora build over it
+# and packages the .rpm (SONAME skew between the distributions, see build.yml).
+#
+# Dependency names follow sdr-for-linux's packaging (the t64 names, verified
+# against Ubuntu 26.04 and Fedora 44), plus FFTW in both precisions: the
 # channelizer runs single, WDSP's min-phase FIR designer double. CI
 # install-tests both packages in fresh containers and ldd-checks the binary
 # before a release artifact is attached, so a renamed distro package fails
@@ -44,9 +48,10 @@ contents:
 
 overrides:
   deb:
-    # Ubuntu 24.04+ / Debian 13+ (the t64 names post 64-bit time_t transition)
+    # Ubuntu 26.04+ — the glibc floor is the CI base the binary is built on
+    # (2.43), not a feature we use; see the header of .github/workflows/build.yml.
     depends:
-      - libc6 (>= 2.39)
+      - libc6 (>= 2.43)
       - libgtk-4-1
       - libadwaita-1-0 (>= 1.5)
       - libglib2.0-0t64
@@ -61,7 +66,7 @@ overrides:
       - libfftw3-single3
       - libfftw3-double3
   rpm:
-    # Fedora 40+
+    # Fedora 44+ (glibc 2.43, the CI base's floor)
     depends:
       - gtk4
       - libadwaita >= 1.5
