@@ -57,19 +57,6 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
-    <release version="0.5.1" date="2026-09-20">
-      <description>
-        <p>
-          A packaging release: the same application, built the way current
-          systems expect. The AppImage now carries GTK 4.22 instead of the
-          two-year-old 4.14 that could not read a desktop theme written for a
-          current GTK, so it no longer fills the log with stylesheet errors,
-          and the RPM package is compiled on Fedora itself, against the
-          libwebsockets the distribution actually ships. Ubuntu 26.04 and
-          Fedora 44 are the systems the packages are built and tested on.
-        </p>
-      </description>
-    </release>
     <release version="0.5.0" date="2026-09-20">
       <description>
         <p>
@@ -90,6 +77,13 @@
           waterfall white or drops the text being held, and a callsign keyed
           with gaps inside it is joined as a whole run instead of being spotted
           as its first fragment.
+        </p>
+        <p>
+          The packages are built on current systems: the AppImage carries GTK
+          4.22, which reads a desktop theme written for a current GTK instead
+          of filling the log with stylesheet errors, and the RPM package is
+          compiled on Fedora against the libwebsockets the distribution ships.
+          Ubuntu 26.04 and Fedora 44 are what they are built and tested on.
         </p>
       </description>
     </release>
