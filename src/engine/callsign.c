@@ -1,4 +1,4 @@
-/* callsign.c — callsign extraction + validation (M4, docs/SCOPE.md).
+/* callsign.c — callsign extraction + validation (M4).
  *
  * Validation = a structural parse against the shapes real callsigns take,
  * with the ITU allocation encoded where it discriminates:

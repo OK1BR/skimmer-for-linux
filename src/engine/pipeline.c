@@ -1,4 +1,4 @@
-/* pipeline.c — the engine assembled (M5, docs/SCOPE.md).
+/* pipeline.c — the engine assembled (M5).
  *
  * Threading: the TCI client's LWS thread copies each IQ block into a
  * GAsyncQueue (bounded — overload drops whole blocks and counts them,
@@ -175,7 +175,7 @@ struct _SkimPipeline {
   gint64            stream_us;                 /* stream time (offline clock) */
   volatile gint     cq_only;                   /* spot only CALLING stations */
 
-  /* TX hold (SCOPE: TX hold): own TX deafens the band — swallow blocks so
+  /* TX hold (TX hold): own TX deafens the band — swallow blocks so
    * decode state freezes instead of releasing every channel. */
   volatile gint     tx_now;                    /* TCI trx/tune, or the setter */
   gboolean          holding;                   /* feed side: swallowing       */
@@ -927,7 +927,7 @@ static void hold_pump(SkimPipeline *p, const IqBlock *b) {
 static void process_block(SkimPipeline *p, IqBlock *b) {
   spec_feed(p, b);                             /* M8: the picture follows the
                                                 * data, not the hold below    */
-  /* TX hold (SCOPE: TX hold): while the operator's own TX deafens the RX
+  /* TX hold (TX hold): while the operator's own TX deafens the RX
    * (T/R relay + 31 dB TX attenuators), the band the decoders would see is
    * self-inflicted silence — evaluating it releases every channel and the
    * ANSWERING station is re-acquired seconds late (Richard, live

@@ -24,7 +24,7 @@ feed**.
 > (two stations in one channel decode separately) and a **fist model** (the
 > decoder learns each operator's own spacing). Everything is gated offline —
 > `meson test`, 14 gates, plus a ~50× realtime replay harness for A/B runs on
-> recorded off-air IQ. See [`docs/SCOPE.md`](docs/SCOPE.md) for the full plan.
+> recorded off-air IQ.
 
 ![The decode pane during a contest evening](docs/screenshot-decode-pane.png)
 

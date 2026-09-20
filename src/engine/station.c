@@ -1,4 +1,4 @@
-/* station.c — per-frequency station tracker (M5, docs/SCOPE.md).
+/* station.c — per-frequency station tracker (M5).
  *
  * Storage: call → GSList of records. ONE record per call per band — a
  * transmitter is only ever in one place: a report within

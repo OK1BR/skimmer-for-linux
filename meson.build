@@ -40,7 +40,7 @@ engine_inc = include_directories('src/engine', 'vendor/onnxruntime')
 dl_dep = cc.find_library('dl', required : false)
 
 # --- Engine (headless, GLib-only) -------------------------------------------
-# Grows milestone by milestone (docs/SCOPE.md). M0: skeleton modules that build
+# Grows milestone by milestone. M0: skeleton modules that build
 # and expose the architecture; no pipeline wired yet.
 engine_sources = [
   'src/engine/tci_client.c',   # M1: WS client, IQ ingest, conjugate, outgoing SPOT

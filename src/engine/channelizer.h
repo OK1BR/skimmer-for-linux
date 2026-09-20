@@ -3,7 +3,7 @@
  * A 2×-oversampled polyphase filter bank splits the wideband TCI IQ stream
  * into M = in_rate/chan_bw_hz uniformly spaced, decimated complex channels
  * (output rate = 2·chan_bw_hz). Complex (phase-preserving) from day one
- * because RTTY/PSK backends need phase, not just magnitude (docs/SCOPE.md).
+ * because RTTY/PSK backends need phase, not just magnitude.
  * Prototype filter by WDSP's fir_bandpass; the M-point FFT is fftw3f.
  *
  * Threading contract: push() and read() are single-threaded (the engine

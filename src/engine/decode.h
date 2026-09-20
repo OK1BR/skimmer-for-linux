@@ -101,8 +101,8 @@ struct _SkimDecodeBackend {
   gboolean (*take_pane_op)(gpointer state, SkimPaneOp *op);
 
   /* Resynchronize after a gap the channel did NOT see (the pipeline's TX
-   * hold swallows blocks while the operator's own TX deafens the band —
-   * SCOPE: TX hold): drop mid-character framer state and sub-bit
+   * hold swallows blocks while the operator's own TX deafens the band):
+   * drop mid-character framer state and sub-bit
    * accumulators, KEEP acquisition/tracking — the channel must decode the
    * answering station from its first characters. Optional. */
   void (*resync)(gpointer state);

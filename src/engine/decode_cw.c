@@ -1,4 +1,4 @@
-/* decode_cw.c — CW decode backend (M3, docs/SCOPE.md).
+/* decode_cw.c — CW decode backend (M3).
  *
  * Per channel: |IQ| envelope (3-tap MA) → dual-rate level trackers (instant
  * attack / slow release peak, slow-rise noise floor) → Schmitt-trigger keying

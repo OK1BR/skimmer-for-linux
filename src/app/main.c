@@ -1894,8 +1894,8 @@ static void prefs_open(GtkButton *btn, gpointer user) {
 }
 
 /* --- about --------------------------------------------------------------------------------
- * The GNOME-correct About every app of the family owes its user (SCOPE,
- * Richard 2026-08-04): the version must be findable FROM THE UI, the strings
+ * The GNOME-correct About every app of the family owes its user
+ * (Richard 2026-08-04): the version must be findable FROM THE UI, the strings
  * must agree with the .desktop entry and the AppStream metainfo, and
  * vendored code is acknowledged. Field set per sdr-for-linux's About,
  * debug_info per log-for-linux's. */
@@ -2058,7 +2058,7 @@ static char *pane_call_at(App *app, double wx, double wy) {
 /* A click on a decoded callsign behaves like a panadapter spot click in
  * sdr-for-linux: tune the radio to the station and announce the click over
  * TCI — the server relays it and log-for-linux prefills its Call entry
- * (SCOPE, Richard 2026-08-01). The exact station frequency (pinned slot)
+ * (Richard 2026-08-01). The exact station frequency (pinned slot)
  * beats the 100 Hz-stepped VFO: the logger's QSY staleness check gets the
  * carrier the station actually sits on. */
 static void on_pane_click(GtkGestureClick *g, gint n_press, double x, double y,
@@ -2360,7 +2360,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
 
 /* --version prints and exits in the LOCAL instance, before GApplication
  * uniqueness would forward to (or disturb) a running one. On top of the
- * About dialog, never instead (the UI rule, SCOPE 2026-08-04). */
+ * About dialog, never instead (the UI rule, 2026-08-04). */
 static gint on_local_options(GApplication *a, GVariantDict *opts,
                              gpointer user) {
   (void)a; (void)user;

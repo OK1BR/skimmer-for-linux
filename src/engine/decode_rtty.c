@@ -1,4 +1,4 @@
-/* decode_rtty.c — RTTY decode backend (M7, docs/SCOPE.md).
+/* decode_rtty.c — RTTY decode backend (M7).
  *
  * Per channel (complex baseband, 500 Hz from the 250 Hz-spaced wide-passband
  * bank):
@@ -612,7 +612,7 @@ static void rtty_set_freq(gpointer state, double freq_hz) {
   ((RttyState *)state)->freq_hz = freq_hz;
 }
 
-/* TX-hold resume (SCOPE: TX hold): the channel slept through the operator's
+/* TX-hold resume (TX hold): the channel slept through the operator's
  * own over — bit-level state spans the gap and is meaningless (a framer
  * mid-character would seam pre-TX bits onto the answering station), while
  * the ACQUISITION layer (psd EMA, centre, pair quality, lost_s) is exactly

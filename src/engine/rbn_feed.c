@@ -1,5 +1,5 @@
 /* rbn_feed.c — the CW-Skimmer-dialect telnet server behind the RBN feed
- * (M6, docs/SCOPE.md).
+ * (M6).
  *
  * All socket work lives on one dedicated thread running a private
  * GMainContext: the GSocketService accept sources and every client's

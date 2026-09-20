@@ -1,4 +1,4 @@
-/* spot_out.c — spot output policy + sinks (M5, docs/SCOPE.md).
+/* spot_out.c — spot output policy + sinks (M5).
  *
  * Per-call dedup: a spot goes out when the call is new, when it moved by
  * more than the QSY threshold (a real frequency change must repaint the

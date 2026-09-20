@@ -1,7 +1,7 @@
 /* dup_query — ask the logbook whether a call is already worked.
  *
  * log-for-linux runs a read-only UDP lookup service on 127.0.0.1:2238 while
- * it is open (docs/SCOPE.md, 2026-08-01): request `DUP? <call> <freq_hz>
+ * it is open (2026-08-01): request `DUP? <call> <freq_hz>
  * <mode>` in one datagram, answer `NEW <call>` / `B4 <call>` / `DUP <call>`
  * / `INV <call>` (malformed requests get silence). The verdict colours our
  * spots and the decode-pane highlight so the operator never clicks a

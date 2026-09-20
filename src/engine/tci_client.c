@@ -48,7 +48,7 @@ struct _SkimTciClient {
   gpointer    iq_cb_data;
   SkimTciVfoCb    vfo_cb;       /* fires on the LWS thread                     */
   gpointer        vfo_cb_data;
-  SkimTciTxCb     tx_cb;        /* fires on the LWS thread (SCOPE: TX hold)    */
+  SkimTciTxCb     tx_cb;        /* fires on the LWS thread (TX hold)           */
   gpointer        tx_cb_data;
   SkimTciClosedCb closed_cb;    /* fires on the LWS thread                     */
   gpointer        closed_cb_data;
@@ -165,7 +165,7 @@ static void handle_command(SkimTciClient *c, char *cmd) {
     /* trx:<rx>,<bool> / tune:<rx>,<bool> — rx 0. sdr-for-linux ≥ cc470af
      * reports the REAL keyed state (CW/RTTY text keying included); tune is
      * OR-ed in for servers where a tune carrier does not raise trx. The
-     * combined value drives the pipeline's TX hold (SCOPE: TX hold). */
+     * combined value drives the pipeline's TX hold (TX hold). */
     char *comma = strchr(args, ',');
     if (comma && strtol(args, NULL, 10) == 0) {
       const gboolean v = g_ascii_strncasecmp(comma + 1, "true", 4) == 0;

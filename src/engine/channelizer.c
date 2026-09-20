@@ -1,4 +1,4 @@
-/* channelizer.c — 2×-oversampled polyphase filter bank (M2, docs/SCOPE.md).
+/* channelizer.c — 2×-oversampled polyphase filter bank (M2).
  *
  * Geometry: M = in_rate/chan_bw channels, prototype lowpass of K·M taps
  * (WDSP fir_bandpass, Blackman-Harris 4-term, cutoff ±chan_bw/2 by default,

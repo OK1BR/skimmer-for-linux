@@ -10,8 +10,8 @@ A native **GTK4 multi-channel skimmer** for Linux — CW first, then RTTY and PS
 (BPSK31/63). It is a **TCI client**: it pulls a wideband IQ stream from the
 **TCI server in [`sdr-for-linux`](https://github.com/OK1BR/sdr-for-linux)**,
 channelizes it, decodes every signal in the segment in parallel, and feeds spots
-back to the radio panadapter and to the RBN. The full plan is in
-[`docs/SCOPE.md`](docs/SCOPE.md) — read it first.
+back to the radio panadapter and to the RBN. What is still to do lives in
+GitHub Issues.
 
 ## Ground rules
 
@@ -134,5 +134,4 @@ src/app/      GTK4/libadwaita: main.c (window: waterfall + callsign column over 
               scp_update.c (GLib + libcurl, GTK-free: MASTER.SCP background updater)
 vendor/wdsp/  in-tree WDSP copy (FFT + resampler)
 vendor/onnxruntime/  ONNX Runtime C API header only (MIT) — dlopen at run time
-docs/SCOPE.md the plan
 ```
