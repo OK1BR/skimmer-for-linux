@@ -1282,6 +1282,26 @@ log says `scp: … updated — release …` ~15 s in and About shows the new
 release; no radio needed.** Build lesson: his live instance runs from
 `builddir`, so this work was built in `/var/tmp/skimmer-issue15/build`.
 
+**gh#15 LIVE-VERIFIED and CLOSED (Richard, 2026-09-20 ~11:27, SAC CW, 20 m).**
+His instance relaunched on 7cb1fbe against the running sdr: the check went out
+15 s after launch, against the real site, and replaced the hand-copied July
+file — `scp: 2026-09-20 11:27 updated — release 2026.09.18, 50003 calls (was
+50014)`. The reload-under-readers path ran while the extractor and the pane
+were reading the table, at full contest load and through his own overs: no
+warning, no crash, the engine kept decoding. About: `(50003 calls, release
+2026.09.18)` + `auto-update: on, last completed check 2026-09-20 11:27` — and
+that line is itself the evidence the swap reached the engine, because
+`skim_callsign_dict_size()`/`_release()` read the live table under the reader
+lock, the one the extractor queries through `dict_has()`. Preferences →
+Decoding → "Callsign dictionary" (the switch + a read-only "Loaded list —
+Release 2026.09.18 · 50003 calls" row) renders as intended. His July
+`master.scp` was overwritten; a copy was taken first
+(`~/.config/skimmer-for-linux/master.scp.2026-07-15.bak`). Left open, NOT part
+of the issue: TLS from inside an AppImage (CA bundle under
+`$APPIMAGE`/`$APPDIR`) — a release check, to be made when the next tag builds
+one; and a ticket of its own for `skim_callsign_is_valid` rejecting 72 of the
+list's calls (C4W, D4C, C5A, D2A …), not filed yet.
+
 ## Layout
 
 ```
