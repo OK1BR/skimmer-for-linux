@@ -73,15 +73,15 @@ the RBN network.
 Every release ships prebuilt packages on the
 [Releases page](https://github.com/OK1BR/skimmer-for-linux/releases):
 
-- **AppImage** (any distribution): download, `chmod +x Skimmer_for_Linux-*.AppImage`, run.
-- **Ubuntu 24.04+ / Debian 13+**: `sudo apt install ./skimmer-for-linux_*.deb`
-- **Fedora 40+**: `sudo dnf install ./skimmer-for-linux-*.rpm`
+- **AppImage** (any current distribution, glibc 2.43+): download, `chmod +x Skimmer_for_Linux-*.AppImage`, run.
+- **Ubuntu 26.04+**: `sudo apt install ./skimmer-for-linux_*.deb`
+- **Fedora 44+**: `sudo dnf install ./skimmer-for-linux-*.rpm`
 - **Arch Linux (AUR)** — [`skimmer-for-linux`](https://aur.archlinux.org/packages/skimmer-for-linux):
   `paru -S skimmer-for-linux`. Without a helper:
   `git clone https://aur.archlinux.org/skimmer-for-linux.git && cd skimmer-for-linux && makepkg -si`.
   The same recipe is in this repo as [`packaging/PKGBUILD`](packaging/PKGBUILD).
 
-The newest release is **0.5.0**.
+The newest release is **0.5.1**.
 
 ## Build from source
 
