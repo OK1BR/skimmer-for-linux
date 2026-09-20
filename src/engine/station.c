@@ -14,6 +14,8 @@
  */
 #include "station.h"
 
+#include "callsign.h"
+
 #include <math.h>
 #include <string.h>
 
@@ -71,12 +73,26 @@ static gboolean call_is_clip(const char *shorter, const char *longer) {
          strcmp(longer + (ll - ls), shorter) == 0;
 }
 
+/* The other reading of the same pair — gh#21. "Longer is the real call" is
+ * wrong when the longer one is the call with the text that FOLLOWS it glued
+ * on: a station sending "5NN 78 OL1B I C BK" was tabled as OL1BIC, and the
+ * clip rules fed every right OL1B report into that record (80 m contest
+ * fixture: OL1B 71 reports, OL1BI 57, OL1BIC 50 — the table showed OL1BIC
+ * with 128). The signal cannot tell a torn call from a call plus a stray
+ * letter; the dictionary can: it knows the short call and not the long one.
+ * Then the short one is the station and the long one the garble. */
+static gboolean call_is_glue(const char *shorter, const char *longer) {
+  return call_is_clip(shorter, longer) &&
+         skim_callsign_dict_has(shorter) && !skim_callsign_dict_has(longer);
+}
+
 /* A confident report of a DIFFERENT call on the same frequency evicts records
  * that have been silent past the takeover age — someone else settled there;
  * without this the old call stayed listed (and kept being re-reported by its
  * channel's extractor) for the whole 10-minute TTL (Richard, 2026-07-15).
  * A record whose call is a CLIP of the incoming one goes immediately — it
- * was never a station, just a torn decode of this very signal. */
+ * was never a station, just a torn decode of this very signal; and so does
+ * a record that is the incoming call with text GLUED on. */
 static void takeover_sweep(SkimStationTable *t, const SkimStation *st) {
   GHashTableIter it;
   gpointer key, val;
@@ -89,13 +105,16 @@ static void takeover_sweep(SkimStationTable *t, const SkimStation *st) {
     while (l) {
       SkimStation *e = l->data;
       GSList *next = l->next;
+      const gboolean clip = call_is_clip(e->call, st->call) &&
+                            !call_is_glue(e->call, st->call);
+      const gboolean glue = call_is_glue(st->call, e->call);
       if (fabs(e->freq_hz - st->freq_hz) <= SKIM_STATION_MERGE_HZ &&
           (st->last_heard - e->last_heard > SKIM_STATION_TAKEOVER_US ||
-           call_is_clip(e->call, st->call))) {
+           clip || glue)) {
         if (st_debug()) {
           g_printerr("station: EVICT %s @ %.0f Hz by %s @ %.0f Hz (%s)\n",
                      e->call, e->freq_hz, st->call, st->freq_hz,
-                     call_is_clip(e->call, st->call) ? "clip" : "silent");
+                     clip ? "clip" : glue ? "glue" : "silent");
         }
         if (t->gone_cb) { t->gone_cb(e, t->gone_user); }
         list = g_slist_remove(list, e);
@@ -117,21 +136,27 @@ static void takeover_sweep(SkimStationTable *t, const SkimStation *st) {
 
 /* The reverse clip direction: a report of "M0K" while a fresh "M0KKB" sits on
  * the frequency is a torn decode of that station — fold it into the longer
- * record instead of creating a phantom. Returns the record it fed, or NULL. */
+ * record instead of creating a phantom. The same for glue: "OL1BIC" while a
+ * fresh "OL1B" the dictionary knows sits there feeds OL1B. Returns the record
+ * it fed, or NULL. */
 static SkimStation *clip_fold(SkimStationTable *t, const SkimStation *st) {
   GHashTableIter it;
   gpointer key, val;
   g_hash_table_iter_init(&it, t->by_call);
   while (g_hash_table_iter_next(&it, &key, &val)) {
-    if (!call_is_clip(st->call, key))
+    /* either the report is a clip of the record, or the report is the
+     * record's call with text glued on — the record is the station */
+    const gboolean clip = call_is_clip(st->call, key) &&
+                          !call_is_glue(st->call, key);
+    if (!clip && !call_is_glue(key, st->call))
       continue;
     for (GSList *l = val; l; l = l->next) {
       SkimStation *e = l->data;
       if (fabs(e->freq_hz - st->freq_hz) <= SKIM_STATION_MERGE_HZ &&
           st->last_heard - e->last_heard <= SKIM_STATION_TAKEOVER_US) {
         if (st_debug()) {
-          g_printerr("station: FOLD %s into %s @ %.0f Hz\n", st->call, e->call,
-                     e->freq_hz);
+          g_printerr("station: FOLD %s into %s @ %.0f Hz%s\n", st->call,
+                     e->call, e->freq_hz, clip ? "" : " (glue)");
         }
         e->last_heard = st->last_heard;
         e->reports++;

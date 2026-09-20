@@ -18,11 +18,13 @@
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <libwebsockets.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "engine/callsign.h"
 #include "engine/pipeline.h"
 #include "engine/spot_out.h"
 #include "engine/station.h"
@@ -370,6 +372,79 @@ int main(void) {
     check("prune drops idle stations",
           skim_station_table_prune(t, g_get_monotonic_time(), 0) == 1 && skim_station_table_size(t) == 0);
     skim_station_table_free(t);
+  }
+
+  /* -- clip or glue: which of two calls on one frequency is the station (gh#21) -- */
+  {
+    const gint64 S = G_USEC_PER_SEC;
+    SkimStation r = { .mode = "CW", .freq_hz = 3535410, .snr_db = 28,
+                      .score = 0.90, .speed = 24 };
+#define REPORT(tab, c, sec) \
+  (g_strlcpy(r.call, (c), sizeof(r.call)), \
+   r.first_heard = r.last_heard = (sec) * S, skim_station_table_report((tab), &r))
+
+    /* no dictionary: the longer call is the station, the shorter a torn
+     * decode of it — what the table did before gh#21 */
+    SkimStationTable *t = skim_station_table_new();
+    REPORT(t, "M0K", 1);
+    REPORT(t, "M0KKB", 2);
+    check("clip: the longer call evicts its own torn head",
+          skim_station_table_size(t) == 1 &&
+          skim_station_table_lookup(t, "M0KKB") != NULL);
+    const SkimStation *m = REPORT(t, "M0K", 3);
+    check("clip: a later torn head feeds the longer record",
+          skim_station_table_size(t) == 1 && strcmp(m->call, "M0KKB") == 0 &&
+          m->reports == 2);
+    skim_station_table_free(t);
+
+    /* the 80 m contest fixture: "5NN 78 OL1B I C BK" — the dictionary knows
+     * OL1B and knows neither OL1BI nor OL1BIC */
+    char *dict = g_build_filename(g_get_tmp_dir(), "skimmer-spot-dict.txt", NULL);
+    g_file_set_contents(dict, "# gate dict\nOL1B\nOK1C\nOK1CZ\n", -1, NULL);
+    GError *derr = NULL;
+    check("gate dictionary loads", skim_callsign_dict_load(dict, &derr));
+    g_clear_error(&derr);
+    t = skim_station_table_new();
+    REPORT(t, "OL1B", 72);
+    REPORT(t, "OL1B", 120);
+    m = REPORT(t, "OL1BI", 121);
+    check("glue: the known call is not evicted by itself with a letter glued on",
+          skim_station_table_size(t) == 1 && strcmp(m->call, "OL1B") == 0);
+    m = REPORT(t, "OL1BIC", 122);
+    check("glue: the glued reading feeds the known call's record",
+          skim_station_table_size(t) == 1 && strcmp(m->call, "OL1B") == 0 &&
+          m->reports == 4);
+    skim_station_table_free(t);
+
+    t = skim_station_table_new();                /* the garble heard first   */
+    REPORT(t, "OL1BIC", 10);
+    m = REPORT(t, "OL1B", 11);
+    check("glue: the known call evicts its glued reading at once",
+          skim_station_table_size(t) == 1 && strcmp(m->call, "OL1B") == 0 &&
+          skim_station_table_lookup(t, "OL1BIC") == NULL);
+    skim_station_table_free(t);
+
+    t = skim_station_table_new();                /* both known: clip as ever */
+    REPORT(t, "OK1CZ", 170);
+    m = REPORT(t, "OK1C", 199);
+    check("both calls known: the shorter still feeds the longer",
+          skim_station_table_size(t) == 1 && strcmp(m->call, "OK1CZ") == 0);
+    skim_station_table_free(t);
+
+    t = skim_station_table_new();                /* elsewhere on the band    */
+    REPORT(t, "OL1B", 10);
+    r.freq_hz = 3560000;
+    REPORT(t, "OL1BIC", 11);
+    check("glue applies on one frequency only",
+          skim_station_table_size(t) == 2);
+    r.freq_hz = 3535410;
+    skim_station_table_free(t);
+#undef REPORT
+    /* back to no dictionary for the rest of the gate */
+    g_file_set_contents(dict, "# empty\n", -1, NULL);
+    skim_callsign_dict_load(dict, NULL);
+    g_remove(dict);
+    g_free(dict);
   }
 
   /* -- spot policy units -------------------------------------------------------- */
