@@ -144,6 +144,8 @@ typedef struct {
                                   * it (DUP/B4 — Richard, 2026-08-01)         */
   GtkTextTag     *kw_tag[SKIM_CW_WORD_N_ROLES]; /* protocol words by role
                                   * (CQ / DE / 5NN / TU…); [NONE] stays NULL  */
+  gboolean        kw_colours;    /* persisted [ui] keyword_colours, default
+                                  * on                                       */
   GtkTextView    *tuned_view;
   gboolean        pane_hand;     /* hand cursor currently shown over the pane */
   GtkLabel       *tuned_label;
@@ -437,7 +439,8 @@ static void mark_tokens(App *app, gsize back, gboolean fresh) {
        * / TU are the band's commonest tokens — no dictionary trip for them. */
       char kw[8] = "";
       if (p - tok_p < (gssize)sizeof(kw)) { memcpy(kw, tok_p, (gsize)(p - tok_p)); }
-      const SkimCwWordRole role = skim_cw_word_role(kw);
+      const SkimCwWordRole role = app->kw_colours ? skim_cw_word_role(kw)
+                                                  : SKIM_CW_WORD_NONE;
       if (role != SKIM_CW_WORD_NONE) {
         kw_tag_token(app, role, tok_start, off);
       } else if (have_dict) {
@@ -1078,6 +1081,20 @@ static int settings_load_decode_font(void) {
   return CLAMP(v, 8, 32);
 }
 
+/* Protocol words tinted by role (gh#12): ON unless the user switched it off. */
+static gboolean settings_load_kw_colours(void) {
+  char *path = settings_file();
+  GKeyFile *kf = g_key_file_new();
+  gboolean v = TRUE;
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL) &&
+      g_key_file_has_key(kf, "ui", "keyword_colours", NULL)) {
+    v = g_key_file_get_boolean(kf, "ui", "keyword_colours", NULL);
+  }
+  g_key_file_free(kf);
+  g_free(path);
+  return v;
+}
+
 static int settings_load_palette(void) {
   char *path = settings_file();
   GKeyFile *kf = g_key_file_new();
@@ -1227,6 +1244,7 @@ static void settings_save(const App *app) {
   g_key_file_set_boolean(kf, "scp", "auto_update", app->scp_auto);
   g_key_file_set_integer(kf, "ui", "decode_font_pt", app->decode_font);
   g_key_file_set_integer(kf, "ui", "palette", app->palette);
+  g_key_file_set_boolean(kf, "ui", "keyword_colours", app->kw_colours);
   g_key_file_set_string(kf, "ui", "view",
                         app->view == VIEW_WF ? "waterfall" : "none");
   g_key_file_remove_key(kf, "ui", "station_list", NULL);   /* pre-M8 key   */
@@ -1591,6 +1609,26 @@ static void on_pref_palette(AdwComboRow *r, GParamSpec *ps, gpointer user) {
   settings_save(app);
 }
 
+/* Keyword colours apply live: off strips the role tints from the whole pane
+ * (dictionary calls keep their mark), on marks the text that is there. */
+static void on_pref_kw_colours(AdwSwitchRow *r, GParamSpec *ps, gpointer user) {
+  (void)ps;
+  App *app = user;
+  const gboolean on = adw_switch_row_get_active(r);
+  if (on == app->kw_colours) { return; }
+  app->kw_colours = on;
+  if (on) {
+    mark_tokens(app, (gsize)gtk_text_buffer_get_char_count(app->tuned), FALSE);
+  } else {
+    GtkTextIter s, e;
+    gtk_text_buffer_get_bounds(app->tuned, &s, &e);
+    for (guint i = SKIM_CW_WORD_NONE + 1; i < SKIM_CW_WORD_N_ROLES; i++) {
+      gtk_text_buffer_remove_tag(app->tuned, app->kw_tag[i], &s, &e);
+    }
+  }
+  settings_save(app);
+}
+
 /* Engine row → the Device row shows only for DeepCW. */
 static void on_pref_engine(AdwComboRow *r, GParamSpec *ps, gpointer user) {
   (void)ps;
@@ -1915,6 +1953,15 @@ static void prefs_open(GtkButton *btn, gpointer user) {
                                 "Decode pane font size (pt)");
   adw_spin_row_set_value(ADW_SPIN_ROW(frow), app->decode_font);
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(ugrp), frow);
+  GtkWidget *kwrow = adw_switch_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(kwrow),
+                                "Colour protocol words");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(kwrow),
+                              "CQ / TEST, DE, 5NN, TU / 73 tinted by their "
+                              "role in the decode pane");
+  adw_switch_row_set_active(ADW_SWITCH_ROW(kwrow), app->kw_colours);
+  g_signal_connect(kwrow, "notify::active", G_CALLBACK(on_pref_kw_colours), app);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(ugrp), kwrow);
   /* Colour scheme — the same palette table as sdr-for-linux's waterfall, so
    * the two apps can be set alike; applies live, the whole history
    * recolours at once (Richard, 2026-09-05). */
@@ -2265,6 +2312,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   app->decode_font  = settings_load_decode_font();
   app->view         = settings_load_view();
   app->palette      = settings_load_palette();
+  app->kw_colours   = settings_load_kw_colours();
   settings_load_rbn(app);
   rbn_apply(app);                /* the telnet server is up before the radio */
   app->scp_auto = settings_load_scp_auto();

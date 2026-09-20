@@ -142,6 +142,7 @@ worked), and the protocol words take a colour by their role: calling (`CQ`,
 `TEST`, `QRZ`) amber, `DE` blue, the report (`5NN`, `599`, `ENN`) violet,
 closing (`TU`, `73`, `K`, `BK`, `KN`, `SK`, `AR`) coral. Only whole words are
 coloured, and only once the text has firmed up — a draft tail stays gray.
+Preferences → Display switches the word colours off.
 
 ## Preferences
 
@@ -180,6 +181,7 @@ the key for each row is given here so the file can be edited directly.
 | Row | Key | Notes |
 | --- | --- | --- |
 | Decode pane font size | `[ui] decode_font_pt` | |
+| Colour protocol words | `[ui] keyword_colours` | On by default; off leaves the decode text plain, validated calls stay marked. Applies at once |
 | Colour scheme | `[ui] palette` | Waterfall palette: Classic, Mono white, Mono green, Mono amber, Inferno, Turbo |
 
 `[ui] view` remembers whether the waterfall is shown (`waterfall` or `none`).
