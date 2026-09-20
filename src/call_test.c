@@ -272,6 +272,99 @@ int main(void) {
     skim_callsign_extractor_free(x);
   }
 
+  /* -- the torn call (gh#3) ----------------------------------------------------- */
+  {
+    /* 14039 kHz, 2026-09-11 18:49-18:57, eight minutes of pane text as the
+     * decoder wrote it: a fist that leaves a word gap after every group.
+     * Fed token by token, the way the pipeline asks after every token —
+     * the head UA6H must never be the best candidate, not for one token. */
+    static const char LIVE[] =
+      "\xC2\xB7" "  \xC2\xB7" "  Z \xC2\xB7" " T U T U S K EE EE \xC2\xB7" "  NC N T \xC2\xB7" " C Q C Q + Q CQ C Q \xC2\xB7" " C Q "
+      "\xC2\xB7" " CQ CQ DE \xC2\xB7" " UA 6 H NU \xC2\xB7" " UA 6 H NU E UA 6 H NU CQ CQ CQ CQ RQDE \xC2\xB7" " "
+      "UA6 H NU \xC2\xB7" " UA6 H NU \xC2\xB7" " EA6 H NU PSEK \xC2\xB7" " C Q \xC2\xB7" " C Q C Q C M C Q C Q \xC2\xB7" " "
+      "C Q CQ C Q DE \xC2\xB7" " UA 6 H NU \xC2\xB7" " UA 6 H \xC2\xB7" " T \xC2\xB7" " UA E\xC2\xB7" " H  N U \xC2\xB7" " U\xC2\xB7" " 6\xC2\xB7" " N U "
+      "F\xC2\xB7" " Q CQ D\xC2\xB7" " T 6 H N U \xC2\xB7" " UA 6 H NU \xC2\xB7" " UA 6 H NU PSEK \xC2\xB7" " CQ \xC2\xB7" " CQ \xC2\xB7" " CQ "
+      "\xC2\xB7" " CN E\xC2\xB7" " CQ CQ CQ CQ DE \xC2\xB7" " UA6 H NU \xC2\xB7" " TUA6 H NU \xC2\xB7" " UA6 H NU CQ CQ CQ "
+      "CQTCQDE \xC2\xB7" " UA 6 H NU \xC2\xB7" " UA6 H NU \xC2\xB7" " UA 6 H NU PSEK \xC2\xB7" " ? EE \xC2\xB7" " CQ CQ CQ "
+      "CQ DE \xC2\xB7" " UA6 H NU \xC2\xB7" " UA6 5 NU \xC2\xB7" " UA6 H NU PSEK \xC2\xB7" " C Q \xC2\xB7" " C Q \xC2\xB7" " C Q C Q "
+      "C Q C Q D E \xC2\xB7" " T 6 H N U \xC2\xB7" " U A 6 H NU \xC2\xB7" " UA 6 H NU CQ CQ CQ \xC2\xB7" " CQ DE "
+      "\xC2\xB7" " UA6 H NU \xC2\xB7" " UA\xC2\xB7" " H NU \xC2\xB7" " UA6 H NU \xC2\xB7" " UA \xC2\xB7" " I N U PSEK \xC2\xB7" " CQ \xC2\xB7" " CQ \xC2\xB7" " CQ "
+      "\xC2\xB7" " CQ \xC2\xB7" " CQ DE \xC2\xB7" " UA 6 H NU \xC2\xB7" " UA 6 H NU \xC2\xB7" " UA 6 H NU \xC2\xB7" " UA 6 H NU PSEK "
+      "\xC2\xB7" " CQ CQ CQ CQ CQ DE \xC2\xB7" " UA6 H NU \xC2\xB7" " I UKH\xC2\xB7" " A6X B IKN U5 N\xC2\xB7" " XB A \xC2\xB7" " A "
+      "6 K5HN XN B U IKC5  \xC2\xB7" " Q CQ CQ O C\xC2\xB7" " Q CQ DE \xC2\xB7" " UA 6 H NU \xC2\xB7" " UA 6 H "
+      "NU \xC2\xB7" " UA6 H NU \xC2\xB7" " UA B \xC2\xB7" " N U \xC2\xB7" " UA 6 H NU PSEK \xC2\xB7" " ";
+    SkimCallsignExtractor *x = skim_callsign_extractor_new();
+    char   got[32];
+    guint  head = 0, other = 0, whole = 0;
+    gchar **tok = g_strsplit(LIVE, " ", -1);
+    for (gchar **t = tok; *t; t++) {
+      if (!**t) { continue; }
+      skim_callsign_extractor_feed(x, *t);
+      skim_callsign_extractor_feed(x, " ");
+      if (skim_callsign_extractor_best(x, got, sizeof(got)) <= 0) { continue; }
+      if (strcmp(got, "UA6HNU") == 0) { whole++; }
+      else if (strcmp(got, "UA6H") == 0) { head++; }
+      else { other++; }
+    }
+    g_strfreev(tok);
+    skim_callsign_extractor_free(x);
+    printf("       live stream: UA6HNU best at %u tokens, UA6H at %u, other at %u\n",
+           whole, head, other);
+    check("live torn fist: UA6HNU is the call", whole >= 100);
+    check("live torn fist: the head UA6H is never the best candidate", head == 0);
+    check("live torn fist: nothing else is either", other == 0);
+
+    static const struct { const char *text, *want, *what; } TORN[] = {
+      { "CQ CQ DE UA6 H NU UA6 H NU PSE K ", "UA6HNU",
+        "three pieces, twice, one over" },
+      { "CQ CQ DE UA 6 H NU UA 6 H NU PSE K ", "UA6HNU",
+        "four pieces, twice — no edge between the repeats" },
+      { "CQ DE U A 6 H N U \xC2\xB7 U A 6 H N U PSE K ", "UA6HNU",
+        "letter by letter, an over break between the repeats" },
+      { "DE UA 6 H NU\xC2\xB7 UA 6 H NU\xC2\xB7 K ", "UA6HNU",
+        "the over mark glued onto the last piece" },
+      { "5NN 7 79 OL7 ABS K 5NN 79 OL7 ABS K ", "OL7ABS",
+        "a serial in front of the call is an edge, not a piece" },
+      { "DE LZ67 \xC2\xB7 PP K ", "LZ67PP",
+        "an over break INSIDE a call still joins (2026-07-15)" },
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(TORN); i++) {
+      double s = skim_callsign_extract(TORN[i].text, got, sizeof(got));
+      if (strcmp(got, TORN[i].want) != 0) {
+        printf("       \"%s\" → \"%s\" %.2f\n", TORN[i].text, got, s);
+      }
+      check(TORN[i].what,
+            s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, TORN[i].want) == 0);
+    }
+
+    /* what must NOT be glued — "" = nothing reaches the spot threshold */
+    static const struct { const char *text, *want, *what; } PHANTOM[] = {
+      { "CQ DE UA6 H NU I UKH A6X CQ DE UA6 H NU I XB A ", "",
+        "stray pieces after the call: the run is not a call, no UA6HNUI" },
+      { "DE UA 6 H NU K ", "",
+        "three and more pieces heard ONCE are not believed yet" },
+      { "CQ SP 6OS SP 6OS SP K CQ SP 6OS SP 6OS SP K ", "",
+        "the first piece of a repeat is no tail (no SP6OSSP)" },
+      { "OK1BR PSE K UA6 H OK1BR PSE K UA6 H ", "OK1BR",
+        "a run never crosses a stop word or a whole call" },
+      { "I A N S M 5 S I A N M 5 S I A N S M 5 S I A ", "",
+        "thirteen and more pieces are babble, whatever they spell" },
+      { "TEST E A2 D DC E A2 D DC E A2 D DC ", "",
+        "a lone E before the run may be its first letter (EA2DDC, not A2DDC)" },
+      { "DE F 4 I K C F 4 I K C ", "",
+        "a lone K after a SPELLED run may be a letter of the call (F4IKC)" },
+      { "CQ DE UA 6 H K CQ DE UA 6 H K ", "UA6H",
+        "control: a short call keyed the same way IS glued" },
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(PHANTOM); i++) {
+      double s = skim_callsign_extract(PHANTOM[i].text, got, sizeof(got));
+      if (strcmp(got, PHANTOM[i].want) != 0) {
+        printf("       \"%s\" → \"%s\" %.2f\n", PHANTOM[i].text, got, s);
+      }
+      check(PHANTOM[i].what, strcmp(got, PHANTOM[i].want) == 0);
+    }
+  }
+
   /* -- dictionary boost -------------------------------------------------------- */
   {
     char got[32];

@@ -280,6 +280,8 @@ gboolean skim_callsign_dict_has(const char *call) {
 #define MAX_CAND    24
 #define CALL_MAX    16
 #define CQ_WINDOW   3                          /* tokens after CQ that count */
+#define RUN_MAX     12                         /* fragments between two edges */
+#define RUN_PARTS   6                          /* a torn call: ≤ 6 of them   */
 
 /* A candidate goes STALE this many processed tokens after its last hit —
  * the frequency changed hands and the new occupant must win immediately;
@@ -297,6 +299,7 @@ typedef struct {
   char     call[CALL_MAX];
   guint    count;
   guint    last_tok;                           /* x->tok_n at the last hit   */
+  guint    parts;                              /* fewest tokens it came in   */
   gboolean de_marked;
   gboolean cq_context;
 } Cand;
@@ -312,6 +315,13 @@ struct _SkimCallsignExtractor {
   gboolean prev_valid;                         /* it was a valid call itself */
   gboolean prev_de;                            /* DE applied to it           */
   gboolean prev_cq;                            /* CQ window applied to it    */
+  gboolean prev_gap;                           /* an over break came after it */
+  GString *run;                                /* fragments since the last   */
+  guint    run_n;                              /* edge, glued (torn call)    */
+  gboolean run_de, run_cq;
+  char     run_hit[CALL_MAX];                  /* its join counted on arrival */
+  char     run_lead;                           /* lone E/T/K/R right before  */
+  gboolean run_spelled;                        /* every piece one character  */
   Cand     cand[MAX_CAND];
   guint    ncand;
 };
@@ -319,6 +329,7 @@ struct _SkimCallsignExtractor {
 SkimCallsignExtractor *skim_callsign_extractor_new(void) {
   SkimCallsignExtractor *x = g_new0(SkimCallsignExtractor, 1);
   x->tok = g_string_new(NULL);
+  x->run = g_string_new(NULL);
   x->cq_recent = CQ_WINDOW + 1;
   return x;
 }
@@ -327,7 +338,17 @@ void skim_callsign_extractor_free(SkimCallsignExtractor *x) {
   if (!x)
     return;
   g_string_free(x->tok, TRUE);
+  g_string_free(x->run, TRUE);
   g_free(x);
+}
+
+static void run_clear(SkimCallsignExtractor *x) {
+  g_string_set_size(x->run, 0);
+  x->run_n  = 0;
+  x->run_de = x->run_cq = FALSE;
+  x->run_hit[0] = '\0';
+  x->run_lead = '\0';
+  x->run_spelled = TRUE;
 }
 
 void skim_callsign_extractor_reset(SkimCallsignExtractor *x) {
@@ -339,7 +360,8 @@ void skim_callsign_extractor_reset(SkimCallsignExtractor *x) {
   x->tok_n      = 0;
   x->ncand      = 0;
   x->prev_tok[0] = '\0';
-  x->prev_valid = x->prev_de = x->prev_cq = FALSE;
+  x->prev_valid = x->prev_de = x->prev_cq = x->prev_gap = FALSE;
+  run_clear(x);
 }
 
 static double cand_score(const SkimCallsignExtractor *x, const Cand *c) {
@@ -354,7 +376,7 @@ static double cand_score(const SkimCallsignExtractor *x, const Cand *c) {
   return MIN(s, 1.0);
 }
 
-static void cand_add(SkimCallsignExtractor *x, const char *call,
+static void cand_add(SkimCallsignExtractor *x, const char *call, guint parts,
                      gboolean de_marked, gboolean cq_context) {
   Cand *c = NULL;
   for (guint i = 0; i < x->ncand; i++) {
@@ -377,7 +399,9 @@ static void cand_add(SkimCallsignExtractor *x, const char *call,
     }
     memset(c, 0, sizeof(*c));
     g_strlcpy(c->call, call, sizeof(c->call));
+    c->parts = parts;
   }
+  c->parts = MIN(c->parts, parts);
   c->count++;
   c->last_tok = x->tok_n;
   if (de_marked)  { c->de_marked  = TRUE; }
@@ -419,12 +443,116 @@ static gboolean cq_run_token(const char *s) {
   return TRUE;
 }
 
+/* The torn call — gh#3. An operator who leaves a word gap after EVERY group
+ * sends "UA 6 H NU" (live 2026-09-11, 14039: four tokens in 16 of 28 overs,
+ * three in the rest, six when it got worse). Gluing neighbours token by
+ * token cannot work there: "UA6 H" validates one token before "UA6 H NU"
+ * does, the pipeline reports the best candidate after every token, and the
+ * head went to the panadapter as the call. So the fragments between two
+ * EDGES — DE, a calling marker, a stop word, a token that is a call by
+ * itself, the decoder's over break — are glued as a WHOLE: all of the run
+ * or nothing, or the same call keyed two or three times over. No head, no
+ * tail, no call plus the first letter of its own repeat ("SP6OS SP"). */
+
+/* A serial or a report ("79", "001") and a lone "/" are never a piece of a
+ * call — a single digit may be ("UA 6 H NU"). Without this the exchange in
+ * front of a torn call joined its run and killed it ("5NN 7 79 OL7 ABS",
+ * 80 m contest fixture). */
+static gboolean run_edge_token(const char *tok) {
+  if (strcmp(tok, "/") == 0)
+    return TRUE;
+  gsize n = 0;
+  for (; tok[n]; n++) {
+    if (tok[n] < '0' || tok[n] > '9')
+      return FALSE;
+  }
+  return n >= 2;
+}
+
+static void run_take(SkimCallsignExtractor *x, const char *tok,
+                     gboolean de, gboolean cq) {
+  if (x->run_n > RUN_MAX)
+    return;                                    /* babble — wait for an edge  */
+  x->run_n++;
+  g_string_append(x->run, tok);
+  if (tok[1] != '\0') { x->run_spelled = FALSE; }
+  if (de) { x->run_de = TRUE; }
+  if (cq) { x->run_cq = TRUE; }
+}
+
+/* E, T, K and R are stop words because noise and procedure are full of
+ * them — and they are letters of calls. Next to a run, with no break in
+ * between, a lone one may be either: "E A2 D DC" is EA2DDC keyed letter by
+ * letter, not A2DDC after a stray dit; "F 4 I K C" is not F4I and a K. When
+ * the call reads with that letter glued on as well, the run is ambiguous
+ * and counts as nothing — what the extractor made of such text before.
+ * After the run this applies to spelled-out runs only: "UA 6 H NU K" ends
+ * in a real K, and UA6HNUK would validate too. */
+static gboolean run_ambiguous(const SkimCallsignExtractor *x, const char *call,
+                              char trail) {
+  char with[CALL_MAX + 2];
+  if (x->run_lead) {
+    g_snprintf(with, sizeof(with), "%c%s", x->run_lead, call);
+    if (skim_callsign_is_valid(with)) { return TRUE; }
+  }
+  if (trail && x->run_spelled) {
+    g_snprintf(with, sizeof(with), "%s%c", call, trail);
+    if (skim_callsign_is_valid(with)) { return TRUE; }
+  }
+  return FALSE;
+}
+
+static char lone_stop_letter(const char *tok) {
+  return (tok[1] == '\0' && strchr("ETKR", tok[0])) ? tok[0] : '\0';
+}
+
+/* TRUE when the run read as a call (and counted). `trail` = the lone stop
+ * letter that ended it, or 0. */
+static gboolean run_close(SkimCallsignExtractor *x, char trail) {
+  const gsize len = x->run->len;
+  gboolean hit = FALSE;
+  if (x->run_n >= 2 && x->run_n <= RUN_MAX) {
+    for (guint r = 3; r >= 1 && !hit; r--) {
+      if (len % r != 0 || x->run_n < 2 * r || x->run_n > RUN_PARTS * r)
+        continue;
+      const gsize l = len / r;
+      if (l >= CALL_MAX)
+        continue;
+      char call[CALL_MAX];
+      memcpy(call, x->run->str, l);
+      call[l] = '\0';
+      gboolean same = TRUE;
+      for (guint i = 1; i < r && same; i++) {
+        same = memcmp(x->run->str + i * l, call, l) == 0;
+      }
+      if (!same || !skim_callsign_is_valid(call))
+        continue;
+      if (run_ambiguous(x, call, trail))
+        break;
+      hit = TRUE;
+      /* the two-token join the dictionary knows was counted on arrival */
+      if (r == 1 && strcmp(call, x->run_hit) == 0)
+        break;
+      for (guint i = 0; i < r; i++) {
+        cand_add(x, call, (x->run_n + r - 1) / r, x->run_de, x->run_cq);
+      }
+    }
+  }
+  return hit;
+}
+
 static void take_token(SkimCallsignExtractor *x, const char *tok) {
   if (strcmp(tok, "\xC2\xB7") == 0) {
     /* The decoder's over-break mark ("·") is metadata, not received text —
-     * fully transparent here: it must not eat a DE marker and must not
-     * break prev_tok, or a QSB dip inside a call kills the join hypothesis
-     * ("LZ67 · PP" never reassembled into LZ67PP; live-caught 2026-07-15). */
+     * transparent for the two-token join: it must not eat a DE marker and
+     * must not break prev_tok, or a QSB dip inside a call kills the join
+     * hypothesis ("LZ67 · PP" never reassembled into LZ67PP; live-caught
+     * 2026-07-15). A RUN of fragments ends here: pieces from two overs are
+     * not one call ("M7· O ·" read M7O, which the dictionary knows — a new
+     * station from one hearing of two scraps, SAC fixture). */
+    run_close(x, 0);
+    run_clear(x);
+    x->prev_gap = x->prev_tok[0] != '\0';
     return;
   }
   x->tok_n++;
@@ -445,6 +573,8 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
     x->cq_pairs = 0;
   }
   if (strcmp(tok, "DE") == 0) {
+    run_close(x, 0);
+    run_clear(x);
     x->de_pending = 2;
     x->prev_tok[0] = '\0';                     /* a call never straddles DE  */
     return;
@@ -458,6 +588,8 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
      * one that follows. TU is LEADING-only: "TU M0NGN" is the runner
      * closing a QSO and re-announcing (Richard, 2026-07-15), but in
      * "<call> TU" the thanks may go to the OTHER station. */
+    run_close(x, 0);
+    run_clear(x);
     x->cq_recent = 0;
     if (strcmp(tok, "TU") != 0 && x->prev_tok[0]) {
       for (guint i = 0; i < x->ncand; i++) {
@@ -482,15 +614,45 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
    * accept when the JOIN is a structurally valid call and it explains
    * something the parts do not (a dictionary hit, or a fragment that is no
    * call by itself). Repetition then outscores the torn variants, and the
-   * station table's clip fold retires them. */
-  if (x->prev_tok[0] && !join_stop_word(x->prev_tok) && !join_stop_word(tok)) {
+   * station table's clip fold retires them. Two FRAGMENTS are a different
+   * matter — they may be the head of a longer torn call, so that join
+   * belongs to the run (above), unless the dictionary knows it or an over
+   * break sits between the two (no run crosses one). */
+  const gboolean stop = join_stop_word(tok);
+  if (x->prev_tok[0] && !join_stop_word(x->prev_tok) && !stop) {
     char join[CALL_MAX];
     if (strlen(x->prev_tok) + strlen(tok) < CALL_MAX) {
       g_snprintf(join, sizeof(join), "%s%s", x->prev_tok, tok);
+      const gboolean known = dict_has(join);
       if (skim_callsign_is_valid(join) &&
-          (dict_has(join) || !valid || !x->prev_valid)) {
-        cand_add(x, join, x->prev_de || de_now, x->prev_cq || cq_now);
+          (known || valid != x->prev_valid || x->prev_gap)) {
+        cand_add(x, join, 2, x->prev_de || de_now, x->prev_cq || cq_now);
+        if (!valid && !x->prev_valid) {
+          g_strlcpy(x->run_hit, join, sizeof(x->run_hit));
+        }
       }
+    }
+  }
+  /* The over-break mark arrives GLUED to a character the decoder committed
+   * together with it ("NU·", "R·"): for the run that is the bare token,
+   * then the mark. */
+  const gboolean de_glued = !valid && strlen(tok) >= 5 && tok[0] == 'D' &&
+                            tok[1] == 'E' && skim_callsign_is_valid(tok + 2);
+  char  bare[CALL_MAX];
+  gsize bl = strlen(tok);
+  const gboolean marked = bl > 2 && strcmp(tok + bl - 2, "\xC2\xB7") == 0;
+  g_strlcpy(bare, tok, sizeof(bare));
+  if (marked) { bare[bl - 2] = '\0'; }
+  if (stop || valid || de_glued || run_edge_token(bare) ||
+      (marked && (join_stop_word(bare) || skim_callsign_is_valid(bare)))) {
+    run_close(x, marked ? '\0' : lone_stop_letter(tok));   /* an edge    */
+    run_clear(x);
+    if (!marked) { x->run_lead = lone_stop_letter(tok); }
+  } else {
+    run_take(x, bare, de_now, cq_now);
+    if (marked) {
+      run_close(x, 0);
+      run_clear(x);
     }
   }
 
@@ -501,13 +663,13 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
    * whole, and so does every cleanly keyed token) and the remainder
    * validates; the call inherits the full DE marker, exactly as if the gap
    * had been keyed. */
-  if (!valid && strlen(tok) >= 5 && tok[0] == 'D' && tok[1] == 'E' &&
-      skim_callsign_is_valid(tok + 2)) {
-    cand_add(x, tok + 2, TRUE, cq_now);
+  if (de_glued) {
+    cand_add(x, tok + 2, 1, TRUE, cq_now);
     g_strlcpy(x->prev_tok, tok + 2, sizeof(x->prev_tok));
     x->prev_valid = TRUE;
     x->prev_de    = TRUE;
     x->prev_cq    = cq_now;
+    x->prev_gap   = FALSE;
     x->de_pending = 0;
     return;
   }
@@ -516,6 +678,7 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
   x->prev_valid = valid;
   x->prev_de    = de_now;
   x->prev_cq    = cq_now;
+  x->prev_gap   = FALSE;
 
   if (!valid) {
     /* A garbled token between DE and the call must not eat the marker
@@ -524,7 +687,7 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
     return;
   }
 
-  cand_add(x, tok, de_now, cq_now);
+  cand_add(x, tok, 1, de_now, cq_now);
   x->de_pending = 0;
 }
 
@@ -549,6 +712,12 @@ double skim_callsign_extractor_best_ex(SkimCallsignExtractor *x,
   double best = 0.0;
   const Cand *bc = NULL;
   for (guint i = 0; i < x->ncand; i++) {
+    /* A call glued from three or more fragments has to REPEAT before it is
+     * believed: a torn fist tears every time, a garble does not — and the
+     * run carries its DE/CQ markers, so a one-off would go straight out.
+     * Two-token joins keep their old standing. */
+    if (x->cand[i].parts > 2 && x->cand[i].count < 2)
+      continue;
     double s = cand_score(x, &x->cand[i]);
     /* Tie goes to the LONGER call: a torn fragment ("EA3I") and its join
      * ("EA3IXQ") both max the score once repeated — the join is the call. */
@@ -576,6 +745,7 @@ double skim_callsign_extract(const char *text, char *out, gsize out_size) {
   SkimCallsignExtractor *x = skim_callsign_extractor_new();
   skim_callsign_extractor_feed(x, text);
   skim_callsign_extractor_feed(x, " ");        /* flush the last token       */
+  run_close(x, 0);                             /* the end of the text: an edge */
   double s = skim_callsign_extractor_best(x, out, out_size);
   skim_callsign_extractor_free(x);
   return s;
