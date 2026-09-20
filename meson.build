@@ -160,7 +160,13 @@ skimmer_deepcw_test = executable('skimmer-deepcw-test',
   dependencies : engine_deps,
   link_with : engine_lib,
 )
-test('deepcw-decode', skimmer_deepcw_test, timeout : 300)
+# SKIM_DEEPCW_SYNC=1: the backend batches inference on worker threads, so in
+# async mode it is the scheduler that decides whether a character was already
+# committed when the TX hold cuts in -- the "flush" checks then compare two
+# snapshots that both move, and the gate failed 17 runs in 20. Inference
+# inline makes the gate a test of the decode logic, which is what it asserts.
+test('deepcw-decode', skimmer_deepcw_test, timeout : 300,
+  env : ['SKIM_DEEPCW_SYNC=1'])
 
 # Tone splitter: offline gate — sideband immunity, Δf 50/30 Hz splits with
 # both texts copied, Δf 15 Hz contested, slot TTL collapse/re-engage, and the

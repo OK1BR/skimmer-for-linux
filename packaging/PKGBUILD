@@ -23,7 +23,12 @@ build() {
 }
 
 check() {
-  meson test -C build --print-errorlogs
+  # SKIM_DEEPCW_SYNC=1: v0.5.0's meson.build does not yet set it for the
+  # deepcw gate, and without it the gate's TX-hold checks race the backend's
+  # inference workers (17 failures in 20 runs). Set here so `makepkg` is
+  # reproducible on the released tarball; from the next tag the gate carries
+  # the setting itself and this line can go.
+  SKIM_DEEPCW_SYNC=1 meson test -C build --print-errorlogs
 }
 
 package() {
