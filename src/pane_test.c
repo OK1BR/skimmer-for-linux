@@ -5,6 +5,8 @@
  *   - SkimPaneLog unit semantics: append / OPEN / SET / CLOSE / head trim,
  *     self-sync of a SET whose OPEN was lost, appends landing BEFORE an
  *     open over region.
+ *   - CW word roles (the pane tints CQ / DE / 5NN / TU… by role): whole
+ *     tokens only — a glued over or a call holding a keyword stays plain.
  *   - stream positions: push_pos/flush_pos text is bit-identical to read()
  *     and every committed char carries a monotone in-range run index.
  *   - the WHOLE offline pipeline (SKIM_CW_V2=1 + SKIM_CW_READER=blob):
@@ -24,6 +26,7 @@
 #include <unistd.h>
 
 #include "engine/cw_reader.h"
+#include "engine/cw_words.h"
 #include "engine/decode.h"
 #include "engine/pane_log.h"
 #include "engine/pipeline.h"
@@ -88,6 +91,47 @@ static void run_pane_log_units(void) {
   skim_pane_log_free(pl);
 }
 
+/* --- CW word roles ----------------------------------------------------------------
+ * The pane tints protocol words by role. Whole tokens only: a glued over or
+ * a callsign that merely contains a keyword must stay plain. */
+
+static void run_word_role_units(void) {
+  printf("--- CW word roles ---\n");
+  check("CQ / TEST / QRZ call",
+        skim_cw_word_role("CQ") == SKIM_CW_WORD_CALLING &&
+            skim_cw_word_role("TEST") == SKIM_CW_WORD_CALLING &&
+            skim_cw_word_role("QRZ") == SKIM_CW_WORD_CALLING);
+  check("DE is its own role", skim_cw_word_role("DE") == SKIM_CW_WORD_DE);
+  check("5NN / 599 / cut ENN report",
+        skim_cw_word_role("5NN") == SKIM_CW_WORD_REPORT &&
+            skim_cw_word_role("599") == SKIM_CW_WORD_REPORT &&
+            skim_cw_word_role("ENN") == SKIM_CW_WORD_REPORT);
+  check("TU / 73 / K / BK / KN / SK / AR close",
+        skim_cw_word_role("TU") == SKIM_CW_WORD_CLOSING &&
+            skim_cw_word_role("73") == SKIM_CW_WORD_CLOSING &&
+            skim_cw_word_role("K") == SKIM_CW_WORD_CLOSING &&
+            skim_cw_word_role("BK") == SKIM_CW_WORD_CLOSING &&
+            skim_cw_word_role("KN") == SKIM_CW_WORD_CLOSING &&
+            skim_cw_word_role("SK") == SKIM_CW_WORD_CLOSING &&
+            skim_cw_word_role("AR") == SKIM_CW_WORD_CLOSING);
+  check("a glued over is no keyword",
+        skim_cw_word_role("CQTESTSF6W") == SKIM_CW_WORD_NONE &&
+            skim_cw_word_role("CQTEST") == SKIM_CW_WORD_NONE &&
+            skim_cw_word_role("TU5NN") == SKIM_CW_WORD_NONE);
+  check("a call holding a keyword stays plain",
+        skim_cw_word_role("DE1ABC") == SKIM_CW_WORD_NONE &&
+            skim_cw_word_role("SK5AA") == SKIM_CW_WORD_NONE &&
+            skim_cw_word_role("K1AR") == SKIM_CW_WORD_NONE);
+  check("noise fragments R / E / T / EE carry no role",
+        skim_cw_word_role("R") == SKIM_CW_WORD_NONE &&
+            skim_cw_word_role("E") == SKIM_CW_WORD_NONE &&
+            skim_cw_word_role("T") == SKIM_CW_WORD_NONE &&
+            skim_cw_word_role("EE") == SKIM_CW_WORD_NONE);
+  check("empty and NULL are safe",
+        skim_cw_word_role("") == SKIM_CW_WORD_NONE &&
+            skim_cw_word_role(NULL) == SKIM_CW_WORD_NONE);
+}
+
 /* --- stream positions -------------------------------------------------------------
  * Perfectly timed runs for a short text; the v3 blob must stream the same
  * chars read() produces, each with a sane, monotone run index. */
@@ -137,6 +181,7 @@ static void runs_of(const char *text, double dit, GArray *key, GArray *dur) {
 int main(void) {
   printf("=== decode pane gate (SkimPaneLog units) ===\n");
   run_pane_log_units();
+  run_word_role_units();
   printf("=== %d checks, %d failures ===\n", checks, fails);
   return fails ? 1 : 0;
 }

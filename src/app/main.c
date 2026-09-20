@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "callsign.h"
+#include "cw_words.h"
 #include "pane_log.h"
 #include "spot_out.h"
 #include "decode_deepcw.h"
@@ -141,6 +142,8 @@ typedef struct {
                                   * call (Richard, 2026-07-19)                */
   GtkTextTag     *scp_dup_tag;   /* gray+underline: the logbook already has
                                   * it (DUP/B4 — Richard, 2026-08-01)         */
+  GtkTextTag     *kw_tag[SKIM_CW_WORD_N_ROLES]; /* protocol words by role
+                                  * (CQ / DE / 5NN / TU…); [NONE] stays NULL  */
   GtkTextView    *tuned_view;
   gboolean        pane_hand;     /* hand cursor currently shown over the pane */
   GtkLabel       *tuned_label;
@@ -332,7 +335,7 @@ static void tail_append(GtkTextView *view, GtkTextBuffer *buf, const char *text)
   buffer_trim_scroll(view, buf);
 }
 
-/* --- dictionary call marking -------------------------------------------------------
+/* --- token marking: dictionary calls and protocol words ---------------------------
  * Underline-green every COMPLETED token the MASTER.SCP dictionary knows,
  * scanning the last `back` chars of the tuned pane (Richard, 2026-07-19 —
  * calls the dictionary vouches for stand out from the decode flow). The
@@ -376,24 +379,72 @@ static void scp_tag_token(App *app, gint s_off, gint e_off) {
   g_free(tok);
 }
 
-static void scp_highlight(App *app, gsize back) {
-  if (!skim_callsign_dict_size())
+/* Protocol words (CQ, DE, 5NN, TU…) take their role's tint. A keyword's
+ * role never changes, so the same no-churn guard is the whole job. */
+static void kw_tag_token(App *app, SkimCwWordRole role, gint s_off, gint e_off) {
+  GtkTextIter s, e;
+  gtk_text_buffer_get_iter_at_offset(app->tuned, &s, s_off);
+  if (gtk_text_iter_has_tag(&s, app->kw_tag[role]))
     return;
+  gtk_text_buffer_get_iter_at_offset(app->tuned, &e, e_off);
+  gtk_text_buffer_apply_tag(app->tuned, app->kw_tag[role], &s, &e);
+  app->ctr_retag++;
+}
+
+/* Mark the completed tokens in the last `back` chars of the pane.
+ *
+ * `fresh` is for the paths that rewrite the live tail. DeepCW commits text
+ * in pieces, in the middle of a word ("JN1T" lands while the draft still
+ * reads "HL "): a piece inserted inside a marked token inherits the mark,
+ * the token it then forms is a different one, and the no-churn guard — it
+ * trusts a token's first char — would leave half a word marked for good.
+ * So there the window's marks are dropped and set again from the text; the
+ * window is one word and one over, and its lines re-layout anyway. */
+static void mark_tokens(App *app, gsize back, gboolean fresh) {
   const gsize total = (gsize)gtk_text_buffer_get_char_count(app->tuned);
   GtkTextIter it, end;
   gtk_text_buffer_get_end_iter(app->tuned, &end);
   it = end;
   gtk_text_iter_backward_chars(&it, (gint)MIN(back + 16, total));
+  /* Open the window on a token boundary: the visible rest of a cut token is
+   * not a word ("OH7K" cut before its K would tint as a closing K). A run
+   * longer than this is no word either — the `cut` flag below skips it. */
+  gboolean cut = FALSE;
+  for (guint i = 0; ; i++) {
+    GtkTextIter prev = it;
+    if (!gtk_text_iter_backward_char(&prev) ||
+        !scp_token_char(gtk_text_iter_get_char(&prev))) { break; }
+    if (i == 64) { cut = TRUE; break; }
+    it = prev;
+  }
+  if (fresh) {
+    for (guint r = SKIM_CW_WORD_NONE + 1; r < SKIM_CW_WORD_N_ROLES; r++) {
+      gtk_text_buffer_remove_tag(app->tuned, app->kw_tag[r], &it, &end);
+    }
+    gtk_text_buffer_remove_tag(app->tuned, app->scp_tag, &it, &end);
+    gtk_text_buffer_remove_tag(app->tuned, app->scp_dup_tag, &it, &end);
+  }
   char *slice = gtk_text_buffer_get_text(app->tuned, &it, &end, FALSE);
   gint off = gtk_text_iter_get_offset(&it);
   gint tok_start = -1;
+  const char *tok_p = NULL;
+  const gboolean have_dict = skim_callsign_dict_size() > 0;
   for (const char *p = slice; *p; p = g_utf8_next_char(p), off++) {
     const gboolean t = scp_token_char(g_utf8_get_char(p));
-    if (t && tok_start < 0) { tok_start = off; }
-    if (!t && tok_start >= 0) {
-      scp_tag_token(app, tok_start, off);
-      tok_start = -1;
+    if (t && tok_start < 0) { tok_start = off; tok_p = p; }
+    if (!t && tok_start >= 0 && !cut) {
+      /* Keywords first: the vocabulary is closed, never a call, and CQ / 5NN
+       * / TU are the band's commonest tokens — no dictionary trip for them. */
+      char kw[8] = "";
+      if (p - tok_p < (gssize)sizeof(kw)) { memcpy(kw, tok_p, (gsize)(p - tok_p)); }
+      const SkimCwWordRole role = skim_cw_word_role(kw);
+      if (role != SKIM_CW_WORD_NONE) {
+        kw_tag_token(app, role, tok_start, off);
+      } else if (have_dict) {
+        scp_tag_token(app, tok_start, off);
+      }
     }
+    if (!t) { tok_start = -1; cut = FALSE; }
   }
   g_free(slice);                         /* a trailing token is still open   */
 }
@@ -419,7 +470,7 @@ static void tuned_pane_reload(App *app) {
   }
   if (fl && skim_pane_log_len(fl->log)) {
     tail_append(app->tuned_view, app->tuned, skim_pane_log_text(fl->log));
-    scp_highlight(app, (gsize)gtk_text_buffer_get_char_count(app->tuned));
+    mark_tokens(app, (gsize)gtk_text_buffer_get_char_count(app->tuned), FALSE);
     const gsize over = skim_pane_log_over_len(fl->log);
     const gsize fin  = skim_pane_log_final_len(fl->log);
     app->pane_over = over;             /* over text is ASCII: bytes == chars */
@@ -601,6 +652,9 @@ static void apply_text(App *app, double freq_hz, const char *text,
       gtk_text_iter_backward_chars(&it, (gint)app->pane_over);
       gtk_text_buffer_insert(app->tuned, &it, text, -1);
       buffer_trim_scroll(app->tuned_view, app->tuned);
+      /* This path bypasses pane_flush: mark the word now, or its tint
+       * waits for the next age_tick and pops in up to 2 s late. */
+      mark_tokens(app, strlen(text) + app->pane_over, TRUE);
     } else {
       g_string_append(pane, text);
     }
@@ -673,6 +727,7 @@ static void apply_over(App *app, double freq_hz, SkimPaneOpKind kind,
                                      NULL);
   }
   buffer_trim_scroll(app->tuned_view, app->tuned);
+  mark_tokens(app, tlen, TRUE);          /* the re-inserted region lost its marks */
   app->pane_over = kind == SKIM_PANE_OP_CLOSE ? 0 : tlen;
   pane_debug_tails(app, fl, "after-over");
 }
@@ -732,7 +787,7 @@ static void pane_flush(App *app, GString *pane) {
     const gsize n = pane->len;           /* bytes ≥ chars — scan margin      */
     tail_append(app->tuned_view, app->tuned, pane->str);
     g_string_truncate(pane, 0);
-    scp_highlight(app, n);
+    mark_tokens(app, n, FALSE);
     app->ctr_append++;
   }
 }
@@ -926,7 +981,7 @@ static gboolean age_tick(gpointer data) {
   /* Re-tint the recent pane tail with fresh logbook verdicts — a call
    * logged a moment ago must gray out in place, not only in new text.
    * The no-churn guard in scp_tag_token makes an unchanged pass free. */
-  scp_highlight(app, 2000);
+  mark_tokens(app, 2000, FALSE);
   wf_stations_sync(app);                       /* verdict recolours          */
   return G_SOURCE_CONTINUE;
 }
@@ -2268,6 +2323,25 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   GtkTextIter end;
   gtk_text_buffer_get_end_iter(app->tuned, &end);
   gtk_text_buffer_create_mark(app->tuned, "tail", &end, FALSE);
+  /* Protocol words by role (gh#12). Created BEFORE the draft tag — a later
+   * tag outranks an earlier one, so a live draft stays evenly dim and the
+   * role tint appears when the word firms up, instead of four colours
+   * flickering under every draft rewrite. */
+  static const char *const KW_COLOUR[SKIM_CW_WORD_N_ROLES] = {
+    [SKIM_CW_WORD_CALLING] = "#D9A441",        /* CQ TEST QRZ — amber        */
+    [SKIM_CW_WORD_DE]      = "#5AA9E6",        /* DE — blue                  */
+    [SKIM_CW_WORD_REPORT]  = "#B08CE8",        /* 5NN 599 ENN — violet       */
+    [SKIM_CW_WORD_CLOSING] = "#E07B6A",        /* TU 73 K BK… — coral        */
+  };
+  static const char *const KW_NAME[SKIM_CW_WORD_N_ROLES] = {
+    [SKIM_CW_WORD_CALLING] = "kw-calling", [SKIM_CW_WORD_DE] = "kw-de",
+    [SKIM_CW_WORD_REPORT] = "kw-report", [SKIM_CW_WORD_CLOSING] = "kw-closing",
+  };
+  for (guint r = SKIM_CW_WORD_NONE + 1; r < SKIM_CW_WORD_N_ROLES; r++) {
+    app->kw_tag[r] = gtk_text_buffer_create_tag(app->tuned, KW_NAME[r],
+                                                "foreground", KW_COLOUR[r],
+                                                NULL);
+  }
   /* Live draft the reader may still rewrite renders dim; committed text is
    * plain — the over "firms up" in place (phase B, Richard 2026-07-18). */
   app->draft_tag = gtk_text_buffer_create_tag(app->tuned, "draft",

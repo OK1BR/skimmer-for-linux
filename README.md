@@ -137,6 +137,11 @@ in gray instead of green, both in the column and on the panadapter.
 
 **Decode pane** — below the waterfall, it follows the tuned station and shows
 its text as it is decoded, with the station's speed and SNR in the header.
+Calls the Super Check Partial list knows are underlined green (gray once
+worked), and the protocol words take a colour by their role: calling (`CQ`,
+`TEST`, `QRZ`) amber, `DE` blue, the report (`5NN`, `599`, `ENN`) violet,
+closing (`TU`, `73`, `K`, `BK`, `KN`, `SK`, `AR`) coral. Only whole words are
+coloured, and only once the text has firmed up — a draft tail stays gray.
 
 ## Preferences
 

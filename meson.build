@@ -52,6 +52,7 @@ engine_sources = [
   'src/engine/decode_deepcw.c',# DeepCW neural CW backend (Conformer + CTC)
   'src/engine/cw_reader.c',    # neural over re-reader (TCN+CTC, pane-only)
   'src/engine/pane_log.c',     # phase B: pane text + live over region (ops)
+  'src/engine/cw_words.c',     # role of a whole CW token (pane tints by it)
   'src/engine/tone_split.c',   # per-channel carrier splitter (multi-signal)
   'src/engine/station.c',      # M5: per-frequency station tracker
   'src/engine/callsign.c',     # M4: extraction + validation
