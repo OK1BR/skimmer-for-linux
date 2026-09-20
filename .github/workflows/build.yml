@@ -48,7 +48,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Determine version (tag must match meson.build)
         run: |
-          MESON_VER=$(grep -Po "version : '\K[^']+" meson.build)
+          # Anchored + first match only: since the libcurl dependency line
+          # (d07d444) a bare "version : '...'" also matches '>=7.85'.
+          MESON_VER=$(grep -Pom1 "^\s*version : '\K[^']+" meson.build)
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             TAG_VER="${GITHUB_REF_NAME#v}"
             if [[ "$TAG_VER" != "$MESON_VER" ]]; then
