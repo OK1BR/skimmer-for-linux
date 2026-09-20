@@ -2054,6 +2054,13 @@ static void on_wf_call_clicked(const char *call, double hz, gpointer user) {
     skim_pipeline_tune(app->pipeline, hz);
     skim_pipeline_spot_clicked(app->pipeline, call, hz);
   }
+  /* A replay (SKIM_IQ_FILE) has no radio to echo the tune back as its VFO —
+   * and with none the resolver drops the fixation on its next pass, so the
+   * pane never held a word there. The click IS the VFO in that mode. */
+  if (app->replay_thread && hz != app->vfo_hz) {
+    app->vfo_hz = hz;
+    if (app->wf) { skim_wf_view_set_vfo(app->wf, hz); }
+  }
   g_strlcpy(app->tuned_call, call, sizeof(app->tuned_call));
   app->tuned_slot_hz = hz;
   SkimRow *r = g_hash_table_lookup(app->row_by_call, call);
