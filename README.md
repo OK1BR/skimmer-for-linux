@@ -81,8 +81,7 @@ Every release ships prebuilt packages on the
   `git clone https://aur.archlinux.org/skimmer-for-linux.git && cd skimmer-for-linux && makepkg -si`.
   The same recipe is in this repo as [`packaging/PKGBUILD`](packaging/PKGBUILD).
 
-The newest release is **0.4.1**. The DeepCW engine and the automatic
-MASTER.SCP update are newer than that — build from source to get them.
+The newest release is **0.5.0**.
 
 ## Build from source
 

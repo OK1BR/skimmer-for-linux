@@ -57,6 +57,29 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.5.0" date="2026-09-20">
+      <description>
+        <p>
+          The skimmer got a third CW decoder: the neural DeepCW engine, a
+          Conformer + CTC model run through ONNX Runtime and chosen under
+          Preferences, on the CPU or on a CUDA GPU. It decides on the rhythm of
+          the keying rather than on a threshold, and on the two test recordings
+          it tabled 10 stations where the classical decoder found 7, and 33
+          where it found 28; the runtime and the model are installed separately
+          and without them the classical decoder, still the default, carries
+          on. Its reading runs a word or two behind the keying, so the
+          unconfirmed tail of the text is drawn dim until it firms up. The
+          callsign dictionary now keeps itself current — a background download
+          from supercheckpartial.com, at most once a day, swapped into the
+          running decoder without a reconnect. Ctrl+wheel zooms the waterfall
+          about the mouse pointer, protocol words in the decoded text take a
+          colour by their role, your own transmission no longer washes the
+          waterfall white or drops the text being held, and a callsign keyed
+          with gaps inside it is joined as a whole run instead of being spotted
+          as its first fragment.
+        </p>
+      </description>
+    </release>
     <release version="0.4.1" date="2026-09-11">
       <description>
         <p>
