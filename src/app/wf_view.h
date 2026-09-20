@@ -9,7 +9,7 @@
  * label's tooltip — a click on a label tunes the radio).
  * Pixels come from wf_compose.c; this file owns the texture, the scale, the
  * marker, the column and the mouse: the wheel pans the frequency window,
- * Ctrl+wheel zooms it, and the scale strip can be GRABBED and dragged. A retune of the radio moves ONLY the green marker — the
+ * Ctrl+wheel zooms it about the pointer, and the scale strip can be GRABBED and dragged. A retune of the radio moves ONLY the green marker — the
  * window never jumps under the operator's eyes (Richard, 2026-09-05); when
  * the marker leaves the window a small arrow on the scale says which way.
  */

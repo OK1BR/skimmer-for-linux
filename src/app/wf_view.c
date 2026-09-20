@@ -48,6 +48,7 @@ struct _SkimWfView {
   int            lab_h;                        /* height the layout is for   */
   double         lab_pitch;                    /* label pitch of that layout */
   int            hover;                        /* label under the pointer/−1 */
+  double         ptr_y;                        /* pointer y, −1 = not over us*/
   double         press_x, press_y;             /* where the primary went down*/
   SkimWfViewClickCb click_cb;
   gpointer       click_user;
@@ -362,7 +363,17 @@ static gboolean on_scroll(GtkEventControllerScroll *ctl, double dx, double dy,
   const GdkModifierType st = gtk_event_controller_get_current_event_state(
       GTK_EVENT_CONTROLLER(ctl));
   if (st & GDK_CONTROL_MASK) {
+    /* About the pointer: the signal under it keeps its pixel. The span is
+     * clamped FIRST — the centre must be worked out for the span that will
+     * really be shown, or the anchor slips at either end of the zoom range. */
+    SkimWfWindow win;
+    window_of(v, &win);
+    const int h = gtk_widget_get_height(GTK_WIDGET(v));
     v->span_hz *= pow(1.25, dy);               /* wheel down = zoom out      */
+    clamp_window(v);
+    if (h > 0 && v->ptr_y >= 0.0) {
+      v->centre_hz = skim_wf_zoom_centre(&win, h, v->ptr_y, v->span_hz);
+    }
   } else {
     v->centre_hz -= dy * v->span_hz * 0.1;     /* wheel down = lower freqs   */
   }
@@ -412,6 +423,7 @@ static void on_drag_end(GtkGestureDrag *g, double dx, double dy, gpointer user) 
 static void on_motion(GtkEventControllerMotion *m, double x, double y, gpointer user) {
   (void)m;
   SkimWfView *v = user;
+  v->ptr_y = y;
   const int hit = label_hit(v, x, y);
   if (hit != v->hover) {
     v->hover = hit;
@@ -424,6 +436,7 @@ static void on_motion(GtkEventControllerMotion *m, double x, double y, gpointer 
 static void on_leave(GtkEventControllerMotion *m, gpointer user) {
   (void)m;
   SkimWfView *v = user;
+  v->ptr_y = -1.0;
   if (v->hover >= 0) {
     v->hover = -1;
     gtk_widget_queue_draw(GTK_WIDGET(v));
@@ -742,6 +755,7 @@ static void skim_wf_view_init(SkimWfView *v) {
   v->need_full   = TRUE;
   v->tex_stale   = TRUE;
   v->hover       = -1;
+  v->ptr_y       = -1.0;
   v->labels_stale = TRUE;
   gtk_widget_set_has_tooltip(GTK_WIDGET(v), TRUE);
   g_signal_connect(v, "query-tooltip", G_CALLBACK(on_query_tooltip), NULL);

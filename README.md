@@ -125,7 +125,7 @@ radio is tuned. Retuning the radio moves the marker, not the window.
 | Action | Effect |
 | --- | --- |
 | Wheel over the waterfall | Pan up and down the band |
-| Ctrl + wheel | Zoom in and out |
+| Ctrl + wheel | Zoom in and out around the pointer — the signal under it stays put |
 | Drag the kHz scale strip | Pan |
 | Click a callsign in the column | Tune the radio to that station, fix the decode pane on it, pre-fill the logbook |
 | Click a callsign in the decode pane | The same |

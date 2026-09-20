@@ -87,6 +87,13 @@ typedef struct {
 double skim_wf_y_of_hz(const SkimWfWindow *win, int hgt, double hz);
 double skim_wf_hz_of_y(const SkimWfWindow *win, int hgt, double y);
 
+/* Centre of a window new_span_hz wide that keeps the frequency under pixel y
+ * of `win` on that same pixel: a zoom about the POINTER. About the window's
+ * middle (y = hgt / 2, the centre stays) the signal being aimed at slides
+ * away with every step and has to be panned back. */
+double skim_wf_zoom_centre(const SkimWfWindow *win, int hgt, double y,
+                           double new_span_hz);
+
 /* Compose the rightmost `cols` columns (cols = w composes everything) of a
  * w×hgt buffer of 0xAARRGGBB pixels (native endian — B8G8R8A8 bytes on
  * little-endian). Newest time at x = w − 1. Pixels outside the band or

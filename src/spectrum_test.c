@@ -794,6 +794,34 @@ static void labels_section(void) {
   check("hit: a hidden label is never hit", o[0].y < 0 && skim_wf_label_at(o, 40, P, 5.0) != 0);
 }
 
+/* --- zoom about the pointer: the frequency under it keeps its pixel ------------- */
+
+static void zoom_section(void) {
+  printf("[zoom] Ctrl+wheel about the pointer\n");
+  const int H = 600;
+  const SkimWfWindow win = { 14020000.0, 14000000.0, SKIM_WF_ROWS_PER_PX };
+  const double y = 150.0;                                  /* 14015 kHz       */
+  const double under = skim_wf_hz_of_y(&win, H, y);
+
+  const double in_span = 16000.0;
+  const double c_in = skim_wf_zoom_centre(&win, H, y, in_span);
+  const SkimWfWindow zin = { c_in + in_span / 2.0, c_in - in_span / 2.0, win.rows_per_px };
+  check("zoom in: the frequency under the pointer keeps its pixel",
+        fabs(skim_wf_hz_of_y(&zin, H, y) - under) < 1e-6);
+  check("zoom in: the window closes in TOWARDS the pointer", fabs(c_in - 14011000.0) < 1e-6);
+
+  const double c_back = skim_wf_zoom_centre(&zin, H, y, 20000.0);
+  check("zoom out again from the same pixel restores the window",
+        fabs(c_back - 14010000.0) < 1e-6);
+
+  check("pointer on the middle row: the centre stays (the old zoom)",
+        fabs(skim_wf_zoom_centre(&win, H, H / 2.0, 5000.0) - 14010000.0) < 1e-6);
+
+  const double c_top = skim_wf_zoom_centre(&win, H, 0.0, 50000.0);
+  check("pointer on the top edge: the top frequency stays the top",
+        fabs((c_top + 25000.0) - win.f_top_hz) < 1e-6);
+}
+
 /* --- callsign column tooltip: the station list's cell formats, pinned ---------- */
 
 static void text_section(void) {
@@ -824,6 +852,7 @@ int main(void) {
   pipeline_section();
   compose_section();
   labels_section();
+  zoom_section();
   text_section();
   printf("=== %d checks, %d failed ===\n", checks, fails);
   return fails ? 1 : 0;

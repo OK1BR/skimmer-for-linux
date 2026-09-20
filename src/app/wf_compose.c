@@ -248,6 +248,12 @@ double skim_wf_hz_of_y(const SkimWfWindow *win, int hgt, double y) {
   return win->f_top_hz + (win->f_bot_hz - win->f_top_hz) * (y / (double)hgt);
 }
 
+double skim_wf_zoom_centre(const SkimWfWindow *win, int hgt, double y,
+                           double new_span_hz) {
+  /* y sits (0.5 − y/hgt) of a span above the centre, in any window. */
+  return skim_wf_hz_of_y(win, hgt, y) - new_span_hz * (0.5 - y / (double)hgt);
+}
+
 /* -------- compose ---------------------------------------------------------------- */
 
 void skim_wf_compose(const SkimWfHistory *h, const SkimWfWindow *win,
