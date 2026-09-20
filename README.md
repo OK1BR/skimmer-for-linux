@@ -18,10 +18,13 @@ sdr-for-linux (TCI server) ──IQ──► skimmer-for-linux ──► channel
                                    also ──► local telnet cluster feed (loggers)
 ```
 
-![The decode pane](docs/screenshot-decode-pane.png)
+![The window during a CW contest](docs/screenshot-window.png)
 
-*The decode pane following the tuned station. Callsigns that validate are
-underlined — gray instead of green once the logbook says you have worked them.*
+*Twenty metres during SAC CW: 1536 channels of 125 Hz off a 192 kHz IQ stream,
+59 stations tracked and 1987 spots sent. The waterfall carries a callsign
+column — a dot on each station's frequency, "CQ" where the station is calling —
+and the decode pane below follows the tuned one. Callsigns that validate are
+underlined; the tuned station's call is bold in the column.*
 
 ## What it does
 

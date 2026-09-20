@@ -47,8 +47,8 @@
   <url type="vcs-browser">https://github.com/OK1BR/skimmer-for-linux</url>
   <screenshots>
     <screenshot type="default">
-      <image>https://raw.githubusercontent.com/OK1BR/skimmer-for-linux/main/docs/screenshot-decode-pane.png</image>
-      <caption>The decode pane on a contest evening, validated callsigns highlighted</caption>
+      <image>https://raw.githubusercontent.com/OK1BR/skimmer-for-linux/main/docs/screenshot-window.png</image>
+      <caption>The waterfall, the callsign column and the decode pane during a CW contest</caption>
     </screenshot>
   </screenshots>
   <categories>
