@@ -1,259 +1,85 @@
 # Skimmer for Linux
 
-**A native GTK4 multi-channel CW/RTTY/PSK skimmer for Linux — decode every
-signal in a band segment at once, and spot it.** The free-software counterpart
-of CW Skimmer / SDC, built as a **TCI client** for
+**A native GTK4 multi-channel CW/RTTY skimmer for Linux — decode every signal
+in a band segment at once, and spot it.** The free-software counterpart of
+CW Skimmer / SDC, built as a **TCI client** for
 [`sdr-for-linux`](https://github.com/OK1BR/sdr-for-linux).
 
-`skimmer-for-linux` connects to the ExpertSDR-compatible **TCI server** in
-`sdr-for-linux` (or, in principle, any other TCI server — see
-[Requirements](#requirements)), pulls a wideband IQ stream straight from the
-radio, splits it into hundreds of narrow channels, and decodes them in
-parallel. Valid callsigns
-are pushed back as **spots** onto the `sdr-for-linux` panadapter (click to
-tune) and served to local loggers over a **CW-Skimmer-dialect telnet cluster
-feed**.
-
-> **Status: the skimmer skims, live.** TCI client (M1) → polyphase channelizer
-> (M2: −109 dBc isolation, ~1 % of a core per 192 kHz segment) → CW decoder
-> (the soft-decision Viterbi **v2**, default since 2026-08-04; the classical
-> v1 stays as a fallback) → RBN-grade callsign validation
-> (M4: corpus precision 1.0) → station tracker + spot feeder (M5) → local
-> telnet spot feed (M6) → RTTY decoder (M7) → an in-app **waterfall** with
-> a callsign column, click to tune (M8). Fresh off the bench: a per-channel **tone splitter**
-> (two stations in one channel decode separately) and a **fist model** (the
-> decoder learns each operator's own spacing). Everything is gated offline —
-> `meson test`, 14 gates, plus a ~50× realtime replay harness for A/B runs on
-> recorded off-air IQ.
-
-![The decode pane during a contest evening](docs/screenshot-decode-pane.png)
-
-*Following the tuned station at 32 WPM, 37 dB. Callsigns that validate are
-highlighted — gray instead of green once the logbook says you have worked
-them. The status line counts the whole segment behind it: 107 stations and
-2383 spots off 1536 channels at 192 kHz.*
-
-The top of the window is a **waterfall** in CW Skimmer's layout — frequency
-vertical, time flowing sideways, a kHz scale, the SDR's colour schemes — with
-a **callsign column** beside it: a dot on every tracked station's frequency,
-its call next to it, speed / SNR / heard / age in the tooltip. A click on a
-call tunes the radio (and pre-fills `log-for-linux`); the decode pane below
-follows the tuned station. `SKIM_IQ_FILE=<capture.cf32>` replays a recording
-into the window at real-time pace, the way to look at it without a radio.
-
-## How it works
+It connects to an ExpertSDR-compatible **TCI server**, pulls a wideband IQ
+stream straight from the radio, splits it into hundreds of narrow channels and
+decodes them in parallel. Callsigns that validate are pushed back as **spots**
+onto the radio's panadapter (click one to tune) and served to local loggers
+over a **CW-Skimmer-dialect telnet cluster feed**.
 
 ```
-sdr-for-linux (TCI server) ──IQ──► skimmer-for-linux ──► channelizer ──► CW/RTTY/PSK decode
-        ▲                                                                        │
-        └──────────────────────── SPOT (callsign @ freq) ◄───────────────────────┘
+sdr-for-linux (TCI server) ──IQ──► skimmer-for-linux ──► channelizer ──► CW / RTTY decode
+        ▲                                                                       │
+        └──────────────────────── SPOT (callsign @ freq) ◄──────────────────────┘
                                    also ──► local telnet cluster feed (loggers)
 ```
 
-The hard half — clean, correctly-oriented wideband IQ out of the radio — already
-exists and is live-verified in `sdr-for-linux` (its TCI IQ stream was tested
-against SDC and CW Skimmer). This project is the decoder and the spot pipeline.
+![The decode pane](docs/screenshot-decode-pane.png)
 
-## Not just another skimmer
+*The decode pane following the tuned station. Callsigns that validate are
+underlined — gray instead of green once the logbook says you have worked them.*
 
-The interesting problems in a skimmer are not the happy path — they are QSB,
-sloppy fists, crowded slots and mutated callsigns. These are the design
-decisions that set this one apart, and why each was made:
+## What it does
 
-### A soft-decision semi-Markov Viterbi CW decoder
+- **Decodes the whole segment at once.** A 192 kHz IQ stream becomes 1536
+  channels at 125 Hz spacing in CW, or 768 at 250 Hz in RTTY; every channel
+  runs its own decoder, squelch and frequency lock.
+- **CW**, with a choice of engine: the soft-decision Viterbi decoder (default)
+  or the neural **DeepCW** model when an ONNX Runtime is installed. The older
+  classical decoder is still in the binary, one environment variable away.
+- **RTTY**, 45.45 Bd / 170 Hz shift Baudot: matched filters with automatic
+  threshold correction, automatic polarity, unshift-on-space.
+- **Spots to the radio.** A validated callsign goes back over TCI and appears
+  on the `sdr-for-linux` panadapter; clicking it there tunes the VFO.
+- **A local telnet cluster feed** in the CW Skimmer dialect, so a logger on the
+  same machine sees the spots as an ordinary cluster.
+- **A waterfall with a callsign column**: frequency vertical, time flowing
+  sideways, a dot and a call on every tracked station, click to tune.
+- **Logbook integration** with [`log-for-linux`](https://github.com/OK1BR/log-for-linux):
+  stations you have already worked are spotted in gray, and clicking a call
+  pre-fills the logbook's entry row.
+- **The Super Check Partial call list keeps itself current** in the background.
 
-Classical skimmer decoders (including our own v1, kept as a fallback) make a
-**hard** mark/space decision per sample — envelope, threshold, Schmitt trigger —
-and only then classify runs into dits and dahs. That pipeline has a blind spot:
-**deep QSB pulls a faded element under the threshold and the evidence is gone.**
-The decoder tears the callsign apart exactly where the fade sits; off-air we
-watched `9A170NT` come out as a mutilated `9A1G` for minutes at a time.
+PSK (BPSK31/63) is planned, not implemented.
 
-The v2 decoder never makes that early decision. Every sample keeps a
-**log-likelihood ratio** built from two views that fail differently:
-
-- a **span discriminator** — where does the sample sit between the tracked
-  mark and space levels? It *follows* QSB down a fade, but cannot tell a
-  −18 dB notch inside a dash from a real space;
-- a **noise-anchored Rayleigh term** — how plausible is the sample as pure
-  noise? A notch bottoms out several times above the noise floor ("not
-  noise"), a real space sits on it. Anchored, so it is blind to fading.
-
-Their average feeds a **semi-Markov Viterbi lattice** over
-{dit, dah, element/char/word space} segments with log-normal duration priors
-tied to the adaptive dit clock: a faded element is *weak evidence, not no
-evidence*, and the timing prior carries it through the trough. A lag-committed
-traceback emits text live, with the lag itself adaptive — short on healthy
-signals (half the latency), full through a fade where late evidence still
-rescues drowned elements. On the recorded corpus v2 reads the true `9A170NT`
-where v1 tables the mutilation, and E/T noise drops measurably; the same gate
-suite runs both backends, so v1 is always one env var away (`SKIM_CW_V1=1`).
-
-v2 has been the default since 2026-08-04, after a full contest day on the air.
-The 600 s YOTA-contest replay says why: v2 tables **19** stations, v1 **12** —
-and among v1's misses is the loudest signal in the segment (LZ5R, 39 dB,
-673 reports for v2), while v1 mutates `SN1T` into `IN1T` and mints a phantom
-`TM00TFR`. The lattice costs about 50 % more CPU (52× realtime vs 79×).
-
-### A fist model — spacing is personal
-
-Keying is the rigid part of a fist; **spacing is the sloppy part**. Real
-operators run character gaps anywhere from 2.5 to 5+ dits and word gaps from
-5 to 11 — any *fixed* char/word boundary misreads somebody. Live we caught a
-station calling CQ with ~5-dit character gaps: the gap between C and Q filed
-as a word space, the text read `C Q`, no CQ marker matched, and the station
-was never spotted as calling.
-
-The decoder therefore **learns each operator's own two space centres** from
-the last two dozen committed gaps: 2-means in the log domain, seeded from the
-ring's *quantiles* rather than the model's own labels (label-seeded learning
-self-reinforces: a stretched char gap misfiled as a word space teaches the
-word centre down, never the char centre up). An accepted fit moves the
-duration priors, the lattice search windows and the live-emission clocks
-together; forgetting the dit clock forgets the spacing with it. Converges
-within one CQ call.
-
-### A clock that jumps — QSO turnarounds
-
-A per-mark EMA is the textbook dit tracker, and it has a textbook failure:
-the **other side of a QSO comes back at their own speed**. Within the short
-turnaround gap the fist memory rightly survives, so the new over rides a
-stale clock — and past the 2-dit class boundary the EMA is not just slow,
-it is pulled the **wrong way**: a slower op's dits classify as clean dahs,
-the per-element error stays low, and the misread is self-consistent (live
-on 40 m, an entire ragchew over degenerated before the watchdog caught it).
-
-So the clock doesn't glide, it **re-locks**: a ring of recent raw mark
-durations is re-clustered with the bootstrap's own splitter on every
-commit, and a bimodal ring whose dit cluster leaves the ±25 % band is a
-*new speed*, adopted in one jump. A dit-only stretch is genuinely
-ambiguous ("EEE" at one speed *is* "TTT" at a third of it) — there the
-**spaces testify**: element gaps run 1:1 with dits but 1:3 with dahs, so
-the smallest space class with three consistent members settles which class
-the marks are. Not the minimum (a torn dah drops glitch-length spaces
-below the real gaps) and not the median (dah-heavy text holds more char
-gaps than element gaps and flips it). Loose clusters never jump — that is
-a ragged fist, not a speed change — and matching one-class watchdogs
-(16 dahs / 24 dits) re-bootstrap the rare read that still wedges. On a
-recorded 20 m QSO pair sharing one frequency, the re-lock multiplied
-decoded reports from the turnaround-heavy side sevenfold.
-
-### A tone splitter — two stations in one channel
-
-Two stations closer than ~60 Hz land in one 125 Hz channel. Their envelopes
-add, beat at Δf, and an envelope decoder mutates *both* calls — classic
-crowded-contest behaviour. The splitter watches each channel's Welch-averaged
-spectrum; when it resolves two or three distinct carriers ≥ 20 Hz apart it
-opens a **slot per carrier** — phase-continuous NCO mix plus a narrow FIR
-whose cutoff rides the live carrier spacing — and the pipeline runs a separate
-decoder, callsign extractor and frequency lock per slot.
-
-Two details matter more than the happy path:
-
-- **Keying sidebands masquerade as carriers.** Hard 50 %-duty keying puts the
-  first sideband pair only ~4 dB under the carrier — naive peak-picking would
-  split every loud station against itself. Sidebands come in symmetric pairs
-  about their carrier; a real second station has no mirror twin. Peaks with a
-  comparable-power mirror about a stronger carrier never become slots.
-- **Below ~20 Hz separation the keying spectra overlap** and no linear filter
-  can part them (that is joint-demodulation / SIC territory, a possible later
-  stage). Instead of pretending, the slot goes **contested**: its text still
-  reaches the log and the monitor panes, but it breeds no callsign candidates
-  — the beat mutations stop at the tracker instead of reaching the spot wire.
-
-Single-carrier channels ride a sample-exact passthrough, so the feature costs
-nothing until it is needed.
-
-### One signal, one frequency
-
-Per-decode tone estimates breathe — noise pulls band-edge estimates toward the
-channel centre, and a signal midway between two overlapping channels decodes
-in both. Left alone, every consumer (decode log, monitor panes, tracker,
-spots) sees the wobble. Three mechanisms pin it down: **per-signal frequency
-locks** (a dispatched signal locks; estimates only nudge it, a neighbouring
-channel taking over *adopts* the existing lock), **cross-channel ghost
-arbitration** (a +6 dB neighbour kills a splatter decode; a same-tone
-tie-break stops midway signals from double-decoding), and a station tracker
-that folds ghosts and clipped calls (`M0K` → `M0KKB`) before anything is
-spotted.
-
-### An RBN-grade callsign pipeline
-
-Decoded text is not callsigns. The extractor ages its candidates **by
-traffic, not by time** (a quiet channel forgets nothing), builds join
-hypotheses for calls split across overs (`EA3I` + `XQ` → `EA3IXQ`) behind a
-prosign/QSO-vocabulary stop-list, and tags stations as *calling* only on
-explicit CQ/TEST/QRZ markers. The spot policy is CQ-only by default — an S&P
-answer does not own the frequency — and the telnet feed is stricter still
-(score ≥ 0.85, sparse re-spots). The hard rule inherited from the RBN world:
-**no unvalidated callsign ever reaches a wire.**
-
-### A headless engine and gates for everything
-
-The engine is GLib-only — no GTK anywhere near DSP — so every milestone ships
-an **offline gate binary**: mock TCI server round-trips, synthetic-keying
-decoder suites (run for *both* CW backends), two-tone splitter fixtures, a
-full offline pipeline over a real WebSocket asserting spot frequencies exact
-to the Hz. Fourteen gates run in `meson test`; a replay harness pushes recorded
-off-air IQ through the real pipeline at ~60× realtime, which is how every
-decoder change gets an A/B against yesterday's build on the same corpus
-before it ships.
-
-### Read-only against the radio
-
-The skimmer consumes IQ and sends spots. It never keys, never changes radio
-state on its own; the single deliberate exception is tuning the VFO when the
-*user* clicks a callsign in the waterfall column or the decode pane. The telnet feed is a **local** cluster source
-for loggers — by decision there is no uplink to the RBN network (the only
-sanctioned path is a closed Windows-only aggregator), though the dialect stays
-compatible should that ever change.
-
-## Modes
-
-1. **CW** — shipping (the v2 Viterbi decoder is the default; the classical v1
-   is one env var away, `SKIM_CW_V1=1`; tone splitter still opt-in behind
-   `SKIM_TONE_SPLIT=1` / `SKIM_TONE_FOCUS=1` pending its live validation).
-2. **RTTY** — shipping (45.45 Bd / 170 Hz shift Baudot: mark/space matched
-   filters with ATC, automatic polarity, unshift-on-space; Preferences →
-   Decoding → Mode switches the whole segment between CW and RTTY).
-3. **PSK** — BPSK31/63 (Costas loop, varicode).
-
-The channelizer is mode-agnostic and phase-preserving from day one, so each
-mode is a pluggable decode backend on shared infrastructure.
+The skimmer is **read-only towards the radio**: it never keys and never changes
+radio state on its own. The one exception is tuning the VFO when *you* click a
+callsign. The telnet feed is a local source for loggers — there is no uplink to
+the RBN network.
 
 ## Requirements
 
-- A running [`sdr-for-linux`](https://github.com/OK1BR/sdr-for-linux) with its
-  **TCI server enabled** (Prefs → Radio → TCI), reachable over the network.
-  Host and port are set in Preferences → Radio (40001 unless the server says
-  otherwise). Since 0.4.1 the TCI client makes no sdr-for-linux-only
-  assumptions, so other TCI servers should work in principle — one
-  SunSDR / ExpertSDR3 run has been reported so far
-  ([#2](https://github.com/OK1BR/skimmer-for-linux/issues/2)); they are not
-  yet a tested, supported target.
-- Linux, GTK4 + libadwaita, GLib, libwebsockets, libcurl, FFTW (single +
-  double).
-- Build: `meson` + `ninja`.
+- A running TCI server with an IQ stream. [`sdr-for-linux`](https://github.com/OK1BR/sdr-for-linux)
+  is the tested one (Preferences → Radio → TCI). The client is written to the
+  TCI specification rather than to that server's habits, so other servers
+  should work in principle; one SunSDR / ExpertSDR3 run has been reported
+  ([#2](https://github.com/OK1BR/skimmer-for-linux/issues/2)), which is not yet
+  a supported target.
+- Linux with GTK4, libadwaita, GLib/GIO, libwebsockets, libcurl ≥ 7.85 and
+  FFTW (single and double precision).
+- To build: `meson` and `ninja`.
+- Optional, for the DeepCW engine only: an ONNX Runtime shared library. It is
+  opened at run time, never linked, so the app runs without it.
 
 ## Install
 
-Pick whichever fits your distribution — every release ships prebuilt
-packages on the [Releases page](https://github.com/OK1BR/skimmer-for-linux/releases):
+Every release ships prebuilt packages on the
+[Releases page](https://github.com/OK1BR/skimmer-for-linux/releases):
 
-- **AppImage** (any distro): download, `chmod +x Skimmer_for_Linux-*.AppImage`,
-  run. Everything bundled, nothing to install.
+- **AppImage** (any distribution): download, `chmod +x Skimmer_for_Linux-*.AppImage`, run.
 - **Ubuntu 24.04+ / Debian 13+**: `sudo apt install ./skimmer-for-linux_*.deb`
 - **Fedora 40+**: `sudo dnf install ./skimmer-for-linux-*.rpm`
-- **Arch Linux (AUR)** —
-  [`skimmer-for-linux`](https://aur.archlinux.org/packages/skimmer-for-linux):
-  `paru -S skimmer-for-linux` (or `yay -S skimmer-for-linux`). Without a
-  helper: `git clone https://aur.archlinux.org/skimmer-for-linux.git &&
-  cd skimmer-for-linux && makepkg -si`. The same recipe lives in this repo
-  as [`packaging/PKGBUILD`](packaging/PKGBUILD) — it builds the tagged
-  release tarball and runs the fourteen gates in `check()` before packaging.
+- **Arch Linux (AUR)** — [`skimmer-for-linux`](https://aur.archlinux.org/packages/skimmer-for-linux):
+  `paru -S skimmer-for-linux`. Without a helper:
+  `git clone https://aur.archlinux.org/skimmer-for-linux.git && cd skimmer-for-linux && makepkg -si`.
+  The same recipe is in this repo as [`packaging/PKGBUILD`](packaging/PKGBUILD).
 
-Both distro packages are install-tested in clean containers before they are
-attached to a release.
+The newest release is **0.4.1**. The DeepCW engine and the automatic
+MASTER.SCP update are newer than that — build from source to get them.
 
 ## Build from source
 
@@ -264,8 +90,8 @@ meson test -C build             # 14 offline gates, no radio needed
 ./build/skimmer-for-linux
 ```
 
-Install into the user prefix (desktop file, icon and AppStream metainfo
-included — the app shows up in the app grid):
+To install into your user prefix, with the desktop entry, icon and AppStream
+metainfo, so the app appears in the app grid:
 
 ```sh
 meson setup builddir --prefix=$HOME/.local
@@ -273,34 +99,172 @@ meson compile -C builddir
 meson install -C builddir
 ```
 
-A plain launch runs the v2 decoder. Two switches are still opt-in until their
-live validation: `SKIM_TONE_SPLIT=1` (two stations in one channel decode
-separately) and `SKIM_TONE_FOCUS=1` (a narrow slot on a lone carrier; it arms
-the splitter machinery too). `SKIM_CW_V1=1` falls back to the classical
-decoder.
+`skimmer-for-linux --version` prints the version and exits.
 
-The extractor uses the Super Check Partial call list
-(`~/.config/skimmer-for-linux/master.scp`) as a dictionary boost, and the app
-keeps that file current by itself: in the background it asks
-[supercheckpartial.com](https://www.supercheckpartial.com) at most once a day
-whether a new `MASTER.SCP` is out, downloads it only when it changed, checks
-it (checksum, size, content that looks like a call list) and swaps it in
-without a reconnect. No network, a slow or broken server: the file on disk
-stays as it is and the app carries on. Preferences → Decoding → "Keep
-MASTER.SCP current" switches it off — do that to keep a list of your own:
-with the switch on, a file you copy in by hand is replaced by the site's at
-the next check. Settings live in
-`~/.config/skimmer-for-linux/settings.ini`; decode logs in
-`~/.local/share/skimmer-for-linux/`.
+## Connecting to the radio
 
-## Relationship to sdr-for-linux
+Start the TCI server first, then the skimmer. Host and port go in
+**Preferences → Radio** (port 40001 unless your server says otherwise) and the
+toggle in the header bar connects. The IQ sample rate is radio state: the
+server announces it and the skimmer follows, so a segment is as wide as the
+radio's IQ stream (48, 96, 192 or 384 kHz with `sdr-for-linux`).
 
-Same author (OK1BR), same house style: native GTK4/C, GPLv3, in-tree vendoring
-of proven DSP (WDSP). This is a separate repo because the skimmer is a distinct
-tool that talks to the radio only over TCI — it could in principle run against
-any ExpertSDR-compatible TCI server, and since 0.4.1 its TCI client is written
-to the spec rather than to `sdr-for-linux`'s habits (one block per WebSocket
-message, receiver filter, acknowledged extensions only, configurable port).
+No radio at hand? `SKIM_IQ_FILE=<capture.cf32>` replays a recorded IQ file
+through the whole pipeline at real-time pace, looping, and draws it in the
+window.
+
+## Using the window
+
+**Waterfall** — frequency runs vertically, time flows sideways, the kHz scale
+sits between the picture and the callsign column, and a marker shows where the
+radio is tuned. Retuning the radio moves the marker, not the window.
+
+| Action | Effect |
+| --- | --- |
+| Wheel over the waterfall | Pan up and down the band |
+| Ctrl + wheel | Zoom in and out |
+| Drag the kHz scale strip | Pan |
+| Click a callsign in the column | Tune the radio to that station, fix the decode pane on it, pre-fill the logbook |
+| Click a callsign in the decode pane | The same |
+| Hover a callsign in the column | Tooltip: frequency, speed, SNR, how often heard, age |
+
+A station calling CQ carries a `CQ ` prefix in the column. A call the logbook
+reports as already worked — or as not scoring in the current contest — is drawn
+in gray instead of green, both in the column and on the panadapter.
+
+**Decode pane** — below the waterfall, it follows the tuned station and shows
+its text as it is decoded, with the station's speed and SNR in the header.
+
+## Preferences
+
+Four tabs. Everything is stored in `~/.config/skimmer-for-linux/settings.ini`;
+the key for each row is given here so the file can be edited directly.
+
+**Radio**
+
+| Row | Key | Notes |
+| --- | --- | --- |
+| Host | `[tci] host` | TCI server address, default `127.0.0.1` |
+| Port | `[tci] port` | 1–65535, default `40001` |
+
+**Decoding**
+
+| Row | Key | Notes |
+| --- | --- | --- |
+| Mode | `[decode] mode` | `cw` or `rtty` — the whole segment decodes as one mode; changing it reconnects |
+| CW engine | `[decode] engine` | `v2` — "Classical (v2)", the soft-decision Viterbi decoder, default — or `deepcw` — "DeepCW (neural)" |
+| Device | `[decode] device` | `cpu` or `cuda`, shown for DeepCW only |
+| Keep MASTER.SCP current | `[scp] auto_update` | Default on; see below |
+| Loaded list | — | Read-only: release and call count of the list in use |
+
+**Spots**
+
+| Row | Key | Notes |
+| --- | --- | --- |
+| CQ only | `[spots] cq_only` | Default on: only stations calling CQ are spotted, an S&P answer does not own the frequency |
+| Frequency step | `[spots] round_hz` | `0` exact, or 10 / 20 / 50 / 100 Hz — snaps outgoing spots to a grid, the measured value stays exact inside the app |
+| Telnet feed → Enable | `[rbn] enabled` | Default off |
+| Telnet feed → Operator call | `[rbn] call` | Announced in the feed's spot lines |
+| Telnet feed → Telnet port | `[rbn] port` | Default 7300 |
+
+**Display**
+
+| Row | Key | Notes |
+| --- | --- | --- |
+| Decode pane font size | `[ui] decode_font_pt` | |
+| Colour scheme | `[ui] palette` | Waterfall palette: Classic, Mono white, Mono green, Mono amber, Inferno, Turbo |
+
+`[ui] view` remembers whether the waterfall is shown (`waterfall` or `none`).
+
+## The telnet spot feed
+
+Enable it in Preferences → Spots, then point a logger at the machine:
+
+```
+$ telnet localhost 7300
+skimmer-for-linux telnet feed
+Please enter your call: OK1BR
+OK1BR-#: Hello OK1BR, spots follow.
+DX de OK1BR-#:   14043.0  UN8PT        CW    20 dB   0 WPM  CQ      0928Z
+DX de OK1BR-#:   14025.6  OH3KAV       CW    31 dB  35 WPM  CQ      0928Z
+```
+
+The feed is stricter than the panadapter: a callsign reaches the panadapter at
+a confidence of 0.70, the feed at 0.85, and the feed always sends CQ callers
+only. A station is repeated no more often than every 600 s unless it moves.
+The server is app-owned, so client sessions survive a reconnect to the radio.
+
+## Logbook integration
+
+[`log-for-linux`](https://github.com/OK1BR/log-for-linux) answers a read-only
+UDP service on `127.0.0.1:2238`. The skimmer asks it about every call it is
+about to spot and colours the spot by the answer: new stations green, stations
+already in the log — or invalid for the running contest — gray. Logging a QSO
+recolours the call within seconds, without a re-spot.
+
+Clicking a callsign, in the column or in the pane, sends the call to the
+logbook as well, which pre-fills its entry row.
+
+Nothing here is required: if the logbook is not running, every answer is
+"unknown", every spot is green and spotting is unaffected.
+
+## The callsign dictionary
+
+The extractor uses the Super Check Partial list at
+`~/.config/skimmer-for-linux/master.scp` as a dictionary boost — a decoded call
+found in the list gains confidence.
+
+With **Keep MASTER.SCP current** on (the default), the app asks
+[supercheckpartial.com](https://www.supercheckpartial.com) in the background,
+at most once a day, whether a newer list is out; it downloads only a file that
+changed, checks it (checksum, call count, how much of it looks like callsigns)
+and swaps it into the running dictionary without a reconnect. A missing
+network, a slow server or a bad file changes nothing — the copy on disk stays
+and the app carries on. Switch it off to keep a list of your own: with the
+switch on, a file copied in by hand is replaced at the next check.
+
+## The DeepCW engine
+
+`decode_deepcw` runs the published [DeepCW](https://github.com/e04/deepcw-engine)
+model (a Conformer + CTC network, AGPL-3.0-only, not part of this repository)
+through ONNX Runtime. To use it:
+
+1. Install an ONNX Runtime with a C API — on Arch, `onnxruntime` or
+   `onnxruntime-cuda` for the GPU. `SKIM_ORT_LIB=<path>` points at a library
+   that is not on the loader path.
+2. Put the model at
+   `~/.local/share/skimmer-for-linux/models/deepcw/model.onnx`.
+3. Preferences → Decoding → CW engine → DeepCW. The subtitle of that row says
+   whether the engine is available on this machine.
+
+The model reads whole words a second or two behind the keying, so its text
+arrives later than the classical decoder's; the uncommitted tail is shown in
+gray until it firms up. Without the runtime or the model the app says so in the
+log and keeps decoding with v2.
+
+## Files
+
+| Path | What |
+| --- | --- |
+| `~/.config/skimmer-for-linux/settings.ini` | All settings |
+| `~/.config/skimmer-for-linux/master.scp` | Super Check Partial call list (`.state` records the update rate limits) |
+| `~/.local/share/skimmer-for-linux/` | Decode logs, one file per day |
+| `~/.local/share/skimmer-for-linux/models/deepcw/` | DeepCW model, if installed |
+
+## Environment variables
+
+Everything that matters day to day is in Preferences. These are the few
+switches that are not:
+
+| Variable | Effect |
+| --- | --- |
+| `SKIM_IQ_FILE=<file.cf32>` | Replay a recorded IQ file into the window instead of connecting (`SKIM_IQ_RATE`, `SKIM_IQ_CENTER` override the sidecar) |
+| `SKIM_CW_V1=1` | Use the classical CW decoder |
+| `SKIM_CW_ENGINE=v1\|v2\|deepcw` | Pick the CW engine for this run |
+| `SKIM_TONE_SPLIT=1` | Decode two stations in one channel separately — opt-in, awaiting its live validation |
+| `SKIM_TONE_FOCUS=1` | Narrow the channel filter onto a lone carrier (implies the splitter) — same status |
+| `SKIM_ORT_LIB=<path>` | ONNX Runtime library for DeepCW |
+| `SKIM_SCP_URL=<url>` | Take the call list from somewhere else |
 
 ## Licence
 
