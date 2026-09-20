@@ -3,12 +3,12 @@
 #   meson setup build-pkg --buildtype=release --prefix=/usr
 #   meson compile -C build-pkg
 #   DESTDIR=$PWD/build-pkg/staging meson install -C build-pkg
-#   SKIM_VERSION=x.y.z STAGING=build-pkg/staging \
-#     nfpm package -f packaging/nfpm.yaml -p deb -t dist/
+#   SKIM_VERSION=x.y.z nfpm package -f packaging/nfpm.yaml -p deb -t dist/
 #
-# $STAGING points at the install tree to package, because the two payloads are
-# no longer the same build: the .deb comes from the Ubuntu CI job, the .rpm is
-# compiled inside a Fedora container (SONAME skew, see build.yml).
+# nfpm does not expand environment variables in `contents`, so both payloads
+# are staged at the same path and packaged one after the other: CI builds the
+# .deb from the Ubuntu install tree, then re-installs a Fedora build over it
+# and packages the .rpm (SONAME skew between the distributions, see build.yml).
 #
 # Dependency names follow sdr-for-linux's packaging (the t64 names, verified
 # against Ubuntu 26.04 and Fedora 44), plus FFTW in both precisions: the
@@ -37,13 +37,13 @@ description: |
   local loggers. Read-only against the radio.
 
 contents:
-  - src: ${STAGING}/usr/bin/skimmer-for-linux
+  - src: build-pkg/staging/usr/bin/skimmer-for-linux
     dst: /usr/bin/skimmer-for-linux
-  - src: ${STAGING}/usr/share/applications/cz.ok1br.skimmer_for_linux.desktop
+  - src: build-pkg/staging/usr/share/applications/cz.ok1br.skimmer_for_linux.desktop
     dst: /usr/share/applications/cz.ok1br.skimmer_for_linux.desktop
-  - src: ${STAGING}/usr/share/icons/hicolor/scalable/apps/cz.ok1br.skimmer_for_linux.svg
+  - src: build-pkg/staging/usr/share/icons/hicolor/scalable/apps/cz.ok1br.skimmer_for_linux.svg
     dst: /usr/share/icons/hicolor/scalable/apps/cz.ok1br.skimmer_for_linux.svg
-  - src: ${STAGING}/usr/share/metainfo/cz.ok1br.skimmer_for_linux.metainfo.xml
+  - src: build-pkg/staging/usr/share/metainfo/cz.ok1br.skimmer_for_linux.metainfo.xml
     dst: /usr/share/metainfo/cz.ok1br.skimmer_for_linux.metainfo.xml
 
 overrides:
