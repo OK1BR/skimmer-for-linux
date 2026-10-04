@@ -272,6 +272,63 @@ int main(void) {
     skim_callsign_extractor_free(x);
   }
 
+  /* -- a whole over keyed as ONE token (gh#4) ----------------------------------- */
+  {
+    SkimCallsignExtractor *x = skim_callsign_extractor_new();
+    char got[32];
+    gboolean cq = FALSE;
+    /* EA5JQF, IQ fixture 2026-09-11, 14040.00 — fed the way cw-v2 hands it
+     * over: character by character, the word space, then the over break. */
+    static const char *V2[] = { "C", "Q", "C", "Q", "C", "Q", "D", "E", "E",
+                                "A", "5", "J", "Q", "F", "E", "A", "5", "J",
+                                "Q", "F", "K", " ", "\xC2\xB7 " };
+    for (guint i = 0; i < G_N_ELEMENTS(V2); i++) {
+      skim_callsign_extractor_feed(x, V2[i]);
+    }
+    double s = skim_callsign_extractor_best_ex(x, got, sizeof(got), &cq);
+    check("fused over: CQCQCQDEEA5JQFEA5JQFK → EA5JQF in one hearing, calling",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "EA5JQF") == 0 && cq);
+    skim_callsign_extractor_free(x);
+
+    /* the CQ chain keyed apart, the rest of the over in one piece — and the
+     * over break glued to its last character */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "CQCQCQ DEEA1EYLEA1EYLEA1EYLPSEK\xC2\xB7 ");
+    s = skim_callsign_extractor_best_ex(x, got, sizeof(got), &cq);
+    check("fused over from DE on: CQCQCQ DEEA1EYLEA1EYLEA1EYLPSEK → EA1EYL",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "EA1EYL") == 0 && cq);
+    skim_callsign_extractor_free(x);
+
+    /* the shortest call that fits: K1A twice, never the structurally valid
+     * K1AK1A the DE-strip would make of it */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "CQDEK1AK1A ");
+    s = skim_callsign_extractor_best(x, got, sizeof(got));
+    check("fused over of a short call: CQDEK1AK1A → K1A, not K1AK1A",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "K1A") == 0);
+    skim_callsign_extractor_free(x);
+
+    /* strict shape, the whole token or nothing: the call must repeat
+     * exactly, the head must carry DE, the tail must be a closing word */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "CQCQCQDEEA5JQFEA5JQXK CQCQCQDEEA5JQFK "
+                                    "EA5JQFEA5JQFK CQCQEA5JQFEA5JQFK "
+                                    "CQDEEA5JQFEA5JQFXYZ CQCQCQDEEA5JQFEA5JQ ");
+    s = skim_callsign_extractor_best(x, got, sizeof(got));
+    check("fused over: no exact repeat / no DE / stray tail never spot",
+          s == 0.0);
+    skim_callsign_extractor_free(x);
+
+    /* a token too long to be anything is dropped WHOLE — its last few
+     * characters are not a token of their own */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "DE EISH5TEEISH5TEETOK1BR "
+                                    "EISH5TEEISH5TEETOK1BR ");
+    s = skim_callsign_extractor_best(x, got, sizeof(got));
+    check("the tail of an overlong token is not a call (…OK1BR)", s == 0.0);
+    skim_callsign_extractor_free(x);
+  }
+
   /* -- the torn call (gh#3) ----------------------------------------------------- */
   {
     /* 14039 kHz, 2026-09-11 18:49-18:57, eight minutes of pane text as the

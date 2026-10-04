@@ -16,9 +16,9 @@
  * strongest marker, tokens shortly after CQ get a weaker one, repetitions
  * accumulate, and an optional known-call dictionary (MASTER.SCP) boosts.
  * A degenerate fist can close the gaps AROUND the markers ("CQCQCQ
- * DEEA1EYL"); two strictly-shaped fallbacks recover those tokens, and both
- * fire only where the normal path fails — cleanly keyed streams never
- * enter them.
+ * DEEA1EYL") or every gap of the over ("CQCQCQDEEA5JQFEA5JQFK"); three
+ * strictly-shaped fallbacks recover those tokens, and all of them fire only
+ * where the normal path fails — cleanly keyed streams never enter them.
  * Scores: 0.55 structural+allocation, +0.25 DE, +0.10 CQ, +0.20 repeated
  * (+0.05 at ≥3), +0.15 dictionary — capped at 1.0. The spot threshold 0.70
  * means a lone structurally-valid token is never spotted (the RBN rule).
@@ -279,6 +279,7 @@ gboolean skim_callsign_dict_has(const char *call) {
  * hearing could lift it over the spot threshold (live, 2026-07-15). */
 #define MAX_CAND    24
 #define CALL_MAX    16
+#define OVER_MAX    48                         /* a whole over in one token  */
 #define CQ_WINDOW   3                          /* tokens after CQ that count */
 #define RUN_MAX     12                         /* fragments between two edges */
 #define RUN_PARTS   6                          /* a torn call: ≤ 6 of them   */
@@ -691,18 +692,94 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
   x->de_pending = 0;
 }
 
+/* A whole over keyed as ONE token — gh#4: the degenerate fist with EVERY gap
+ * closed (EA5JQF, IQ fixture of 2026-09-11, 14040.00: the pane read
+ * "CQCQCQDEEA5JQFEA5JQFK" twice in 180 s and the station never reached the
+ * table). Strict shape, the whole token or nothing: an optional CQ chain,
+ * DE, ONE valid call keyed at least twice back to back, then nothing or a
+ * closing word. The repeat is what makes it safe — "DEEA5JQFK" reads as
+ * EA5JQF and a K just as well as EA5JQFK, a doubled call reads one way
+ * only — and the shortest call that fits is the call ("DEK1AK1A" is K1A
+ * twice, not the structurally valid K1AK1A). The words then go through
+ * take_token() one by one: the call scores exactly as if the gaps had been
+ * keyed. */
+static gboolean take_fused_over(SkimCallsignExtractor *x, const char *tok) {
+  static const char *CLOSE[] = { "K", "KN", "AR", "ARK", "+", "+K", "PSEK" };
+  char  buf[OVER_MAX + 1];
+  gsize n = g_strlcpy(buf, tok, sizeof(buf));
+  /* the over-break mark glued to the last character, as in take_token() */
+  const gboolean marked = n > 2 && strcmp(buf + n - 2, "\xC2\xB7") == 0;
+  if (marked) { buf[n - 2] = '\0'; }
+  if (skim_callsign_is_valid(buf))
+    return FALSE;                              /* a real call stays whole    */
+  const char *p = buf;
+  gboolean cq = FALSE;
+  for (; p[0] == 'C' && p[1] == 'Q'; p += 2) { cq = TRUE; }
+  if (p[0] != 'D' || p[1] != 'E')
+    return FALSE;
+  p += 2;
+  const gsize len = strlen(p);
+  for (gsize l = 3; l < CALL_MAX && 2 * l <= len; l++) {
+    char call[CALL_MAX];
+    memcpy(call, p, l);
+    call[l] = '\0';
+    guint r = 1;
+    while (strncmp(p + r * l, call, l) == 0) { r++; }
+    if (r < 2 || !skim_callsign_is_valid(call))
+      continue;
+    const char *close = p + r * l;
+    gboolean closed = close[0] == '\0';
+    for (guint i = 0; i < G_N_ELEMENTS(CLOSE) && !closed; i++) {
+      closed = strcmp(close, CLOSE[i]) == 0;
+    }
+    if (!closed)
+      continue;
+    if (cq) { take_token(x, "CQ"); }
+    take_token(x, "DE");
+    for (guint i = 0; i < r; i++) { take_token(x, call); }
+    if (close[0]) { x->prev_tok[0] = '\0'; }   /* nothing joins across it    */
+    if (marked) { take_token(x, "\xC2\xB7"); }
+    return TRUE;
+  }
+  return FALSE;
+}
+
+/* A token too long to be a call, and no over either, is babble (a carrier
+ * chopped by QSB, two stations on one tone): nothing in it counts, and no
+ * join or run reaches across it. It is dropped WHOLE — cut at CALL_MAX, its
+ * last few characters used to arrive as a token of their own, and a tail
+ * that happened to read as a call was a candidate. */
+static void take_babble(SkimCallsignExtractor *x) {
+  x->tok_n++;
+  x->cq_half  = FALSE;
+  x->cq_pairs = 0;
+  run_close(x, 0);
+  run_clear(x);
+  x->prev_tok[0] = '\0';
+  if (x->cq_recent <= CQ_WINDOW) { x->cq_recent++; }
+  if (x->de_pending > 0) { x->de_pending--; }
+}
+
 void skim_callsign_extractor_feed(SkimCallsignExtractor *x, const char *text) {
   for (const char *p = text; *p; p++) {
     const char c = *p;
     if (c == ' ' || c == '\n' || c == '\t') {
       if (x->tok->len) {
-        if (x->tok->len < CALL_MAX) { take_token(x, x->tok->str); }
+        if (x->tok->len <= OVER_MAX && take_fused_over(x, x->tok->str)) {
+          /* its words went through take_token() one by one */
+        } else if (x->tok->len < CALL_MAX) {
+          take_token(x, x->tok->str);
+        } else {
+          take_babble(x);
+        }
         g_string_set_size(x->tok, 0);
       }
       continue;
     }
-    g_string_append_c(x->tok, g_ascii_toupper(c));
-    if (x->tok->len > CALL_MAX) { g_string_set_size(x->tok, 0); }
+    /* one character past the cap says "too long"; the rest is not kept */
+    if (x->tok->len <= OVER_MAX) {
+      g_string_append_c(x->tok, g_ascii_toupper(c));
+    }
   }
 }
 
