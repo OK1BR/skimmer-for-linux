@@ -25,6 +25,22 @@ without review, regardless of quality.
 - **Feature requests** — especially from real operating experience
   (contesting, DXing, digimodes).
 
+## Questions and conversation: Discussions
+
+Not everything is a bug report. For the rest, use
+[Discussions](https://github.com/OK1BR/skimmer-for-linux/discussions):
+
+- **Q&A** — setup and operating questions: connecting to your TCI server,
+  bands and modes, why a station did or did not get spotted. Not sure whether
+  something is a bug? Start here. An answered question stays findable for the
+  next operator with the same problem.
+- **Ideas** — something you'd like to talk through before it becomes a
+  concrete feature request.
+- **Show and tell** — your station, your spot screens, the contest you
+  skimmed with it.
+
+Issues stay for concrete bugs and requests.
+
 ## Why so strict?
 
 The decoder is measured, not argued about: 11 offline gates plus a replay
