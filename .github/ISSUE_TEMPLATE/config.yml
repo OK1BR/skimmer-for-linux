@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question, idea or your station
+    url: https://github.com/OK1BR/skimmer-for-linux/discussions
+    about: Setup and operating questions, ideas to talk through, show and tell — please use Discussions. Issues are for concrete bugs and requests.
