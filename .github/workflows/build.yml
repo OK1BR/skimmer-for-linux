@@ -71,7 +71,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y $APT_DEPS \
-            patchelf librsvg2-common gsettings-desktop-schemas \
+            patchelf librsvg2-common librsvg2-bin gsettings-desktop-schemas \
             adwaita-icon-theme file wget
       - name: Build (release, prefix /usr)
         run: |
@@ -118,6 +118,14 @@ jobs:
           # windows' WM_CLASS to the .desktop entry, so the app shows a generic
           # gear in the dash/Alt-Tab. GDK autodetects x11 on X11 sessions.
           sed -i '/^export GDK_BACKEND=x11/d' AppDir/apprun-hooks/linuxdeploy-plugin-gtk.sh
+          # appimagetool (continuous build 340, 2026-10-31) refuses an AppDir
+          # whose root icon is not PNG or XPM. linuxdeploy always prefers the
+          # SVG and only ever symlinks it into the root, so the SVG we install
+          # is all it leaves there — accepted until that build, now an error
+          # (#40). Render a 256x256 PNG from the SVG into the root under the
+          # .desktop Icon= name; appimagetool derives .DirIcon from it.
+          rsvg-convert -w 256 -h 256 data/cz.ok1br.skimmer_for_linux.svg \
+            -o AppDir/cz.ok1br.skimmer_for_linux.png
           # Phase 2: pack the AppImage
           ./linuxdeploy-x86_64.AppImage --appimage-extract-and-run \
             --appdir AppDir \
