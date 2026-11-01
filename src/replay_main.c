@@ -22,6 +22,19 @@
  * SKIM_REPLAY_FROM / SKIM_REPLAY_TO (stream seconds) replay a slice only;
  * hold and mute times stay absolute.
  *
+ * gh#28 bench — a recording by skimmer-iq-record carries a <file>.events
+ * sidecar: the DDC centre per frame (retunes), the holes the server left
+ * (packet counter) and the radio's TX edges. The replay applies them all,
+ * so it sees what the live pipeline saw; SKIM_REPLAY_HOLDS, when given,
+ * replaces the sidecar's TX edges. Every record the RBN feed would have
+ * broadcast (the feed's own policy: CQ only, score bar, ham bands, dedup,
+ * rate budget) lands in <file>.rbn.log, one per line:
+ *   <UTC>  <stream s>  <call>  <kHz>  <mode>  <dB>  <wpm>
+ * UTC = the .meta start_unix_us + stream time (holes included); "-" for a
+ * recording without it. SKIM_REPLAY_OUT=<prefix> writes <prefix>.decodes.log
+ * and <prefix>.rbn.log instead — two runs over one recording side by side.
+ * SKIM_REPLAY_RBN_MIN overrides the feed's score bar (default 0.85).
+ *
  * The same MASTER.SCP the app uses (~/.config/skimmer-for-linux/master.scp)
  * is loaded when present — keep it that way for honest A/B against the app.
  *
@@ -129,6 +142,71 @@ static gboolean holds_tx_at(const GArray *a, double t) {
   return FALSE;
 }
 
+/* ---- gh#28: the .events sidecar (skimmer-iq-record) ------------------------- */
+
+typedef enum { EV_CENTRE, EV_GAP, EV_TX, EV_CLOSED } EvKind;
+typedef struct {
+  guint64 frame;                       /* applies from this file frame on    */
+  EvKind  kind;
+  double  v;
+} Ev;
+
+/* "<frame> centre <hz>" / "<frame> gap <n>" / "<frame> tx 0|1" /
+ * "<frame> closed" — in file order, which is frame order. */
+static GArray *events_load(const char *path) {
+  GArray *a = g_array_new(FALSE, FALSE, sizeof(Ev));
+  char *body = NULL;
+  if (!g_file_get_contents(path, &body, NULL, NULL)) { return a; }
+  char **lines = g_strsplit(body, "\n", -1);
+  for (char **l = lines; *l; l++) {
+    char **w = g_strsplit_set(g_strstrip(*l), " \t", -1);
+    if (g_strv_length(w) >= 2) {
+      Ev e = { .frame = g_ascii_strtoull(w[0], NULL, 10) };
+      const double v = w[2] ? g_ascii_strtod(w[2], NULL) : 0;
+      gboolean ok = TRUE;
+      if (!strcmp(w[1], "centre"))      { e.kind = EV_CENTRE; e.v = v; ok = v > 0; }
+      else if (!strcmp(w[1], "gap"))    { e.kind = EV_GAP;    e.v = v; }
+      else if (!strcmp(w[1], "tx"))     { e.kind = EV_TX;     e.v = v; }
+      else if (!strcmp(w[1], "closed")) { e.kind = EV_CLOSED; }
+      else { ok = FALSE; }
+      if (ok) { g_array_append_val(a, e); }
+    }
+    g_strfreev(w);
+  }
+  g_strfreev(lines);
+  g_free(body);
+  return a;
+}
+
+/* ---- gh#28: the RBN tap ------------------------------------------------------ */
+
+static FILE   *g_rbn;
+static double  g_rate;
+static double  g_start_unix_us;        /* .meta start_unix_us; 0 = unknown   */
+static guint64 g_abs_frames;           /* recording frames + holes before the
+                                        * block now being fed               */
+static guint64 g_rbn_n;
+
+static void rbn_tap_cb(const char *call, const char *mode, double freq_hz,
+                       double snr_db, double speed, gpointer user) {
+  (void)user;
+  const double t = (double)g_abs_frames / g_rate;
+  char utc[32] = "-";
+  if (g_start_unix_us > 0) {
+    const double abs_s = g_start_unix_us / 1e6 + t;
+    GDateTime *dt = g_date_time_new_from_unix_utc((gint64)abs_s);
+    char *s = g_date_time_format(dt, "%Y-%m-%dT%H:%M:%SZ");
+    g_strlcpy(utc, s, sizeof(utc));
+    g_free(s);
+    g_date_time_unref(dt);
+  }
+  char khz[G_ASCII_DTOSTR_BUF_SIZE];
+  g_ascii_formatd(khz, sizeof(khz), "%.2f", freq_hz / 1000.0);
+  fprintf(g_rbn, "%s\t%.1f\t%s\t%s\t%s\t%.0f\t%.0f\n", utc, t, call, khz,
+          mode, snr_db, speed);
+  g_rbn_n++;
+}
+
 static int by_freq(gconstpointer a, gconstpointer b) {
   const SkimStation *sa = *(const SkimStation *const *)a;
   const SkimStation *sb = *(const SkimStation *const *)b;
@@ -161,8 +239,23 @@ int main(int argc, char **argv) {
 
   char *dict = g_build_filename(g_get_user_config_dir(), "skimmer-for-linux",
                                 "master.scp", NULL);
-  char *dlog = g_strdup_printf("%s.decodes.log", path);
+  const char *out_env = g_getenv("SKIM_REPLAY_OUT");
+  const char *out = out_env && out_env[0] ? out_env : path;
+  char *dlog = g_strdup_printf("%s.decodes.log", out);
   remove(dlog);                        /* fresh log — runs must diff cleanly  */
+  char *rlog = g_strdup_printf("%s.rbn.log", out);
+  g_rbn = fopen(rlog, "w");            /* fresh too                           */
+  if (!g_rbn) {
+    fprintf(stderr, "cannot write %s\n", rlog);
+    return 2;
+  }
+  g_rate = rate;
+  {
+    char *m = g_strdup_printf("%s.meta", path);
+    g_start_unix_us = meta_get(m, "start_unix_us:");
+    g_free(m);
+  }
+  const char *rmin = g_getenv("SKIM_REPLAY_RBN_MIN");
   /* SKIM_MODE=rtty replays through the RTTY backend + wide bank (the same
    * config path the app's Mode preference takes); default CW. */
   const char *menv = g_getenv("SKIM_MODE");
@@ -174,6 +267,8 @@ int main(int argc, char **argv) {
     .chan_bw_hz = 0,                   /* mode default: 125 Hz CW, 250 RTTY  */
     .dict_path = g_file_test(dict, G_FILE_TEST_EXISTS) ? dict : NULL,
     .decode_log_path = dlog,
+    .rbn_min_score = rmin && rmin[0] ? g_ascii_strtod(rmin, NULL) : 0,
+    .rbn_tap = rbn_tap_cb,
   };
   /* SKIM_CW_ENGINE=v1|v2|deepcw picks the CW engine (the app's "CW engine"
    * preference takes the same config field); the pipeline resolves the
@@ -210,6 +305,25 @@ int main(int argc, char **argv) {
   GArray *mutes = holds_parse(g_getenv("SKIM_REPLAY_MUTE"));
   if (holds->len) { printf("TX holds replayed: %u\n", holds->len / 2); }
   if (mutes->len) { printf("muted intervals: %u\n", mutes->len / 2); }
+  char *evpath = g_strdup_printf("%s.events", path);
+  GArray *ev = events_load(evpath);
+  g_free(evpath);
+  /* SKIM_REPLAY_HOLDS, when given, replaces the sidecar's TX edges. */
+  const gboolean ev_tx = holds->len == 0;
+  {
+    guint nc = 0, ng = 0, nt = 0;
+    for (guint i = 0; i < ev->len; i++) {
+      const EvKind k = g_array_index(ev, Ev, i).kind;
+      nc += k == EV_CENTRE; ng += k == EV_GAP; nt += k == EV_TX;
+    }
+    if (ev->len) {
+      printf("events: %u centre, %u gap, %u tx%s\n", nc, ng, nt,
+             ev_tx ? "" : " (tx replaced by SKIM_REPLAY_HOLDS)");
+    }
+  }
+  printf("rbn tap: %s (bar %.2f)%s\n", rlog,
+         cfg.rbn_min_score > 0 ? cfg.rbn_min_score : 0.85,
+         g_start_unix_us > 0 ? "" : " — no start_unix_us in .meta, UTC unknown");
 
   gint64 t0 = g_get_monotonic_time();
   static float buf[BLK * 2];
@@ -226,9 +340,36 @@ int main(int argc, char **argv) {
   const guint64 frames_to = to_env && to_env[0]
       ? (guint64)(g_ascii_strtod(to_env, NULL) * rate) : G_MAXUINT64;
   const guint64 frames_from = frames;
-  while (frames < frames_to && (n = fread(buf, 2 * sizeof(float), BLK, f)) > 0) {
+  /* Events up to the slice start set the state it starts in (centre, TX);
+   * a hole before it only moves the absolute clock. */
+  guint ei = 0;
+  gboolean ev_tx_on = FALSE;
+  guint64 holes = 0;                   /* hole frames before `frames`         */
+  for (; ei < ev->len && g_array_index(ev, Ev, ei).frame <= frames; ei++) {
+    const Ev *e = &g_array_index(ev, Ev, ei);
+    if (e->kind == EV_CENTRE) { center = e->v; }
+    else if (e->kind == EV_TX) { ev_tx_on = e->v != 0; }
+    else if (e->kind == EV_GAP) { holes += (guint64)e->v; }
+  }
+  for (;;) {
+    for (; ei < ev->len && g_array_index(ev, Ev, ei).frame <= frames; ei++) {
+      const Ev *e = &g_array_index(ev, Ev, ei);
+      if (e->kind == EV_CENTRE) { center = e->v; }
+      else if (e->kind == EV_TX) { ev_tx_on = e->v != 0; }
+      else if (e->kind == EV_GAP) {
+        holes += (guint64)e->v;
+        skim_pipeline_feed_gap(p, (guint)e->v);
+      }
+    }
+    /* A block never straddles an event: live, the client split it there. */
+    guint64 want = BLK;
+    if (ei < ev->len) { want = MIN(want, g_array_index(ev, Ev, ei).frame - frames); }
+    if (frames_to != G_MAXUINT64) { want = MIN(want, frames_to - MIN(frames, frames_to)); }
+    if (!want || (n = fread(buf, 2 * sizeof(float), (size_t)want, f)) == 0) { break; }
     if (holds->len) {
       skim_pipeline_set_tx_hold(p, holds_tx_at(holds, (double)frames / rate));
+    } else if (ev_tx) {
+      skim_pipeline_set_tx_hold(p, ev_tx_on);
     }
     for (guint m = 0; m + 1 < mutes->len; m += 2) {
       const double a = g_array_index(mutes, double, m) * rate - (double)frames;
@@ -237,9 +378,11 @@ int main(int argc, char **argv) {
       const gsize i0 = a > 0 ? (gsize)a : 0, i1 = z < (double)n ? (gsize)z : n;
       memset(buf + 2 * i0, 0, (i1 - i0) * 2 * sizeof(float));
     }
+    g_abs_frames = frames + holes;
     skim_pipeline_feed(p, buf, (guint)n, rate, center);
     frames += n;
   }
+  g_array_free(ev, TRUE);
   fclose(f);
   g_array_free(holds, TRUE);
   g_array_free(mutes, TRUE);
@@ -270,6 +413,9 @@ int main(int argc, char **argv) {
          stream, wall, stream / MAX(wall, 0.001), frames, g_fragments,
          rows->len);
   printf("decode log: %s\n", dlog);
+  printf("rbn tap: %" G_GUINT64_FORMAT " records → %s\n", g_rbn_n, rlog);
+  fclose(g_rbn);
+  g_free(rlog);
 
   g_ptr_array_free(rows, TRUE);
   g_hash_table_destroy(g_stations);

@@ -417,14 +417,19 @@ SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg) {
   /* Logbook dup lookup — pipeline-lifetime like the RBN memo: the verdict
    * cache rides out reconnects. Harmless when no logbook listens. */
   p->dupq     = skim_dup_query_new();
-  if (p->cfg.rbn) {
+  if (p->cfg.rbn || p->cfg.rbn_tap) {
     /* Lives for the pipeline's whole life (not per-connection like the TCI
      * sink): the dedup memo rides out reconnects, no re-spot burst. */
     p->rbn_spots = skim_spot_out_new(NULL);
     skim_spot_out_set_clock(p->rbn_spots, pipe_clock_cb, p);
     skim_spot_out_set_policy(p->rbn_spots, RBN_RESPOT_S, RBN_QSY_HZ,
                              RBN_MAX_PER_S);
-    skim_spot_out_set_sink(p->rbn_spots, rbn_sink_fwd, p->cfg.rbn);
+    /* The real feed wins; the tap is the bench's view of the same policy. */
+    if (p->cfg.rbn) {
+      skim_spot_out_set_sink(p->rbn_spots, rbn_sink_fwd, p->cfg.rbn);
+    } else {
+      skim_spot_out_set_sink(p->rbn_spots, p->cfg.rbn_tap, p->cfg.rbn_tap_user);
+    }
     p->rbn_min = p->cfg.rbn_min_score > 0 ? p->cfg.rbn_min_score
                                           : RBN_MIN_SCORE_DEFAULT;
   }

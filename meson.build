@@ -90,6 +90,24 @@ executable('skimmer-tci-probe',
   link_with : engine_lib,
 )
 
+# gh#28 bench: record a whole TCI session (cf32 + .meta + .events: retunes,
+# holes, TX) beside the running app — a second client changes nothing on
+# the radio — for skimmer-replay to replay as the live pipeline saw it.
+executable('skimmer-iq-record',
+  ['src/iq_record_main.c'],
+  include_directories : include_directories('src'),
+  dependencies : engine_deps,
+  link_with : engine_lib,
+)
+
+# gh#28 bench: score a replay's RBN tap against RBN's daily archive (call ×
+# band × hour: confirmed / look-alike / unconfirmed, recall over the EU
+# referee inside the recorded span), or two taps against each other.
+executable('skimmer-rbn-score',
+  ['src/rbn_score_main.c'],
+  dependencies : [glib_dep],
+)
+
 # M3 A/B harness: offline decode of a probe-recorded cf32 sample through the
 # full pipeline — decoder versions diff on the same off-air corpus.
 executable('skimmer-replay',

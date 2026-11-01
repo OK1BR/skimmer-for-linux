@@ -112,11 +112,14 @@ here; what was done and why is in git.
   the pipeline falls back to v2.
 - **`meson test` = 14 gates.** It does NOT relink the app — build
   `ninja skimmer-for-linux` explicitly or an old binary keeps running.
-- Richard's live instance runs from `builddir`; recorded IQ fixtures live in
-  `/var/tmp/skimmer-iq/` (a fresh one takes minutes:
-  `skimmer-tci-probe <server> <port> <rate> <secs> <dump.cf32>`; server =
-  `unix:/path`, `ws://host:port`, a bare host with the port argument, or `-`
-  for the default order).
+- Richard's live instance runs from `builddir`. Recorded IQ fixtures live in
+  `~/.local/share/skimmer-for-linux/fixtures/` — **never under `/var/tmp`**,
+  which is cleaned after 30 days (every fixture before 2026-10 was lost that
+  way, #28). Record with `skimmer-iq-record [-t secs] <out.cf32>` beside the
+  running app: sdr-for-linux keeps IQ subscription and rate per client, so a
+  second client changes nothing for the app (confirmed live 2026-11-01). The
+  bench — record, replay, score against the RBN archive, the replay noise
+  floor — is `docs/BENCH.md`.
 - Opt-in and without a live verdict: the tone splitter (`SKIM_TONE_SPLIT=1`)
   and the narrow focus slot (`SKIM_TONE_FOCUS=1`, implies the splitter).
 

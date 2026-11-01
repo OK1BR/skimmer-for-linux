@@ -15,6 +15,7 @@
 #include "decode.h"
 #include "dup_query.h"
 #include "rbn_feed.h"
+#include "spot_out.h"
 #include "station.h"
 
 G_BEGIN_DECLS
@@ -61,6 +62,14 @@ typedef struct {
    * puts a label on the local panadapter — the network wants certainty. */
   SkimRbnFeed *rbn;
   double       rbn_min_score;
+
+  /* gh#28 bench: the RBN policy WITHOUT the telnet server. When rbn is NULL
+   * and rbn_tap is set, every record the feed would broadcast — same
+   * CQ-only gate, score bar, ham-band check, dedup and rate budget — goes
+   * to rbn_tap instead (on the feeding thread offline). skimmer-replay
+   * writes it out for scoring against the RBN archive. */
+  SkimSpotSink rbn_tap;
+  gpointer     rbn_tap_user;
 } SkimPipelineConfig;
 
 typedef struct _SkimPipeline SkimPipeline;
