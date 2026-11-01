@@ -1,9 +1,11 @@
 /*
  * skimmer-tci-probe — M1 live gate against a running sdr-for-linux TCI server.
  *
- *   skimmer-tci-probe [host] [port] [rate] [seconds] [dump.cf32]
- *     host     TCI server (default 127.0.0.1)
- *     port     WebSocket port (default 40001)
+ *   skimmer-tci-probe [server] [port] [rate] [seconds] [dump.cf32]
+ *     server   unix:/path, ws://host[:port] or a bare host; "-" or none =
+ *              the default order (sdr-for-linux's socket at
+ *              $XDG_RUNTIME_DIR/sdr-for-linux/tci.sock, then 127.0.0.1:40001)
+ *     port     TCP port for a bare host (default 40001; ignored otherwise)
  *     rate     IQ rate in Hz or kHz: 48/96/192/384[000] (default 192000)
  *     seconds  capture length (default 10)
  *     dump     optional: append raw IQ (float32 interleaved, true
@@ -113,15 +115,25 @@ static double bin_hz(int k, double rate) {
 }
 
 int main(int argc, char **argv) {
-  const char *host = argc > 1 ? argv[1] : "127.0.0.1";
-  guint16     port = argc > 2 ? (guint16)atoi(argv[2]) : 40001;
+  const char *srv  = argc > 1 && strcmp(argv[1], "-") != 0 ? argv[1] : NULL;
+  int         port = argc > 2 ? atoi(argv[2]) : 0;
   guint       rate = argc > 3 ? (guint)atoi(argv[3]) : 192000;
   int         secs = argc > 4 ? atoi(argv[4]) : 10;
   const char *dump = argc > 5 ? argv[5] : NULL;
   if (rate < 1000) { rate *= 1000; }              /* 192 → 192000              */
 
-  printf("=== skimmer-tci-probe — ws://%s:%u, %u Hz IQ, %d s ===\n",
-         host, port, rate, secs);
+  /* The pre-#39 form was <host> <port>: a bare host takes the port argument
+   * along; unix:/path and ws://host:port carry their own. */
+  char *server = NULL;
+  if (srv && port > 0 && !g_str_has_prefix(srv, "unix:") &&
+      !strstr(srv, "://") && !strchr(srv, ':')) {
+    server = g_strdup_printf("ws://%s:%d", srv, port);
+  } else if (srv) {
+    server = g_strdup(srv);
+  }
+  printf("=== skimmer-tci-probe — %s, %u Hz IQ, %d s ===\n",
+         server ? server : "default order (sdr-for-linux socket, then ws://127.0.0.1:40001)",
+         rate, secs);
   if (dump) {
     p_dump = fopen(dump, "ab");
     if (!p_dump) {
@@ -133,7 +145,8 @@ int main(int argc, char **argv) {
 
   GDateTime *t_start = g_date_time_new_now_local();
 
-  SkimTciClient *c = skim_tci_client_new(host, port);
+  SkimTciClient *c = skim_tci_client_new(server);
+  g_free(server);
   skim_tci_client_set_iq_cb(c, iq_cb, NULL);
 
   GError *err = NULL;
@@ -143,6 +156,8 @@ int main(int argc, char **argv) {
     skim_tci_client_free(c);
     return 1;
   }
+  char *link = g_strdup(skim_tci_client_endpoint(c));   /* for the sidecar */
+  printf("link:      %s\n", link);
   printf("handshake: protocol %s, device \"%s\"\n",
          skim_tci_client_protocol(c), skim_tci_client_device(c));
   printf("           dds centre %.0f Hz, device iq rate at connect %u\n",
@@ -202,12 +217,12 @@ int main(int argc, char **argv) {
     if (meta) {
       char *ts = g_date_time_format(t_start, "%Y-%m-%d %H:%M:%S %z");
       fprintf(meta,
-              "file: %s\nstart: %s\nsource: ws://%s:%u\n"
+              "file: %s\nstart: %s\nsource: %s\n"
               "format: cf32 interleaved I,Q — TRUE spectrum orientation "
               "(as on the wire, no conjugation)\n"
               "center_hz: %.0f\nrate_hz: %.0f\nframes: %" G_GUINT64_FORMAT
               "\nduration_s: %.1f\n---\n",
-              dump, ts, host, port, center, hdrrate, frames, span_s);
+              dump, ts, link, center, hdrrate, frames, span_s);
       fclose(meta);
       g_free(ts);
       printf("  dump closed, sidecar %s written\n", meta_path);
@@ -275,6 +290,7 @@ int main(int argc, char **argv) {
   }
 
   skim_tci_client_free(c);
+  g_free(link);
   gboolean pass = fabs(dev) < 2.0;
   printf("\n%s\n", pass ? "PASS (plus the eyeball orientation check above)"
                         : "FAIL — sample-rate deviation out of tolerance");

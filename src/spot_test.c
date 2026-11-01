@@ -533,7 +533,7 @@ int main(void) {
   GThread *st = g_thread_new("mock-tci", server_thread, NULL);
 
   SkimPipelineConfig cfg = {
-    .host = "127.0.0.1", .port = PORT, .iq_rate = RATE, .chan_bw_hz = 125.0,
+    .server = "ws://127.0.0.1:" G_STRINGIFY(PORT), .iq_rate = RATE, .chan_bw_hz = 125.0,
   };
   SkimPipeline *p = skim_pipeline_new(&cfg);
   skim_pipeline_set_text_cb(p, on_text, NULL);

@@ -70,7 +70,13 @@ sitting there as "open", and nobody could see what was really left.
 
 ## TCI facts that matter (from sdr-for-linux `docs/TCI-SCOPE.md`)
 
-- Server: `ws://<host>:40001`, `PROTOCOL:ExpertSDR3,1.9`.
+- Server: `ws://<host>:40001` over TCP, or — the local default since #39 —
+  the Unix socket `$XDG_RUNTIME_DIR/sdr-for-linux/tci.sock` (sdr-for-linux#46).
+  `PROTOCOL:ExpertSDR3,1.9`. The client names the server by one string
+  (`unix:/path`, `ws://host[:port]`, `host[:port]`; empty = socket, then
+  `ws://127.0.0.1:40001`) and takes the first candidate that answers `ready;`.
+  **lws dials a Unix socket when `lws_client_connect_info.address` starts
+  with `+`** — not the URL path, whatever the #39 ticket text said.
 - IQ: `iq_samplerate:{48,96,192,384};` + `iq_start:0;`. Binary Stream header
   `type=0`, float32, 2 ch, `length = frames×2`.
 - **The wire carries TRUE spectrum orientation — do NOT conjugate on ingest.**
@@ -100,7 +106,9 @@ here; what was done and why is in git.
   `ninja skimmer-for-linux` explicitly or an old binary keeps running.
 - Richard's live instance runs from `builddir`; recorded IQ fixtures live in
   `/var/tmp/skimmer-iq/` (a fresh one takes minutes:
-  `skimmer-tci-probe <host> <port> <rate> <secs> <dump.cf32>`).
+  `skimmer-tci-probe <server> <port> <rate> <secs> <dump.cf32>`; server =
+  `unix:/path`, `ws://host:port`, a bare host with the port argument, or `-`
+  for the default order).
 - Opt-in and without a live verdict: the tone splitter (`SKIM_TONE_SPLIT=1`)
   and the narrow focus slot (`SKIM_TONE_FOCUS=1`, implies the splitter).
 

@@ -1,8 +1,12 @@
 /*
  * skimmer-tci-test — offline gate for the TCI client (M1). No radio, no GUI.
  *
- * Runs a mock TCI server (libwebsockets, the sdr-for-linux wire dialect) on
- * 127.0.0.1:40124 and drives skim_tci_client against it:
+ * Runs a mock TCI server (libwebsockets, the sdr-for-linux wire dialect) with
+ * BOTH of sdr-for-linux's listeners — TCP 127.0.0.1:40124 and a Unix socket
+ * at the client's default path under a scratch XDG_RUNTIME_DIR (never the
+ * live path: lws unlinks whatever sits there before it binds) — and drives
+ * skim_tci_client against it. The whole session below runs once over each
+ * transport (gh#39):
  *   - handshake: batched init block ending ready;/start; → start() returns,
  *     protocol/device/dds/iq_samplerate land in the getters,
  *   - the client requests iq_samplerate + iq_start:0 (the SDC lesson: say the
@@ -25,11 +29,20 @@
  *     ignored (dds label, one whole-block callback),
  *   - the remote-tester diagnostics fire: a mock that answers iq_samplerate
  *     with ANOTHER rate and never starts IQ produces the "server runs IQ at
- *     X Hz (asked for Y)" line and the 3 s "no IQ block" warning.
+ *     X Hz (asked for Y)" line and the 3 s "no IQ block" warning,
+ *   - transports (gh#39): the server-address parser (unix:/path,
+ *     ws://host[:port], host[:port]; wss://, relative paths, bad ports
+ *     refused), the candidate order — an absent socket or a stale file at
+ *     its path fails inside connect() and TCP answers well inside the
+ *     handshake timeout, the default order (no server string) takes the
+ *     socket at the default path, nothing answering names every candidate
+ *     in the error, a malformed string is its own error before any dial —
+ *     and the endpoint getter names the address that won.
  *
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <libwebsockets.h>
 #include <math.h>
 #include <stdio.h>
@@ -37,8 +50,16 @@
 
 #include "engine/tci_client.h"
 
-#define PORT      40124
+#define PORT      40124           /* TCP listener — never the live 40001       */
 #define RATE      48000
+
+/* The two listeners' addresses (filled in main) and the scratch runtime dir
+ * the socket lives in. The socket path is a static: lws keeps the iface
+ * pointer and unlink()s it at context destroy. */
+static char  s_tcp_addr[64];
+static char  s_unix_path[SKIM_TCI_SOCK_PATH_MAX];
+static char  s_unix_addr[SKIM_TCI_SOCK_PATH_MAX + 8];
+static char *s_scratch;
 #define TONE_HZ   12000.0
 #define BLK       2048            /* frames per Stream block                  */
 #define MARK_RATE 47999           /* h[1] of the MARKER block the mock queues right
@@ -307,6 +328,20 @@ static void capture_reset(void) {
   g_atomic_int_set(&c_hz_7021000, 0); g_atomic_int_set(&c_odd_frames, 0);
 }
 
+/* A fresh session on the mock: what the client said so far, the last spot
+ * and the frame counter go — the session checks read them back, and the
+ * same session runs over two transports. */
+static void mock_reset(void) {
+  g_mutex_lock(&s_lock);
+  g_string_truncate(s_rx, 0);
+  s_spot[0] = '\0';
+  g_mutex_unlock(&s_lock);
+  g_atomic_int_set(&s_text_frames, 0);
+  g_atomic_int_set(&s_push_dds, 0);
+  g_atomic_int_set(&s_stamp_req, 0);
+  capture_reset();
+}
+
 static void iq_cb(const float *iq, guint nframes, double rate, double center,
                   gpointer user) {
   (void)user;
@@ -417,35 +452,22 @@ static int fixture(int req) {
   return ok;
 }
 
-int main(void) {
-  printf("=== TCI client gate (offline, mock server) ===\n");
-  s_rx = g_string_new(NULL);
-  l_log = g_string_new(NULL);
-  g_log_set_writer_func(log_tap, NULL, NULL);
-  g_queue_init(&s_out);
-
-  struct lws_context_creation_info info;
-  memset(&info, 0, sizeof(info));
-  lws_set_log_level(LLL_ERR, NULL);
-  info.port      = PORT;
-  info.iface     = "127.0.0.1";
-  info.protocols = s_protocols;
-  info.gid       = (gid_t)-1;
-  info.uid       = (uid_t)-1;
-  s_ctx = lws_create_context(&info);
-  if (!s_ctx) {
-    printf("FAIL — mock server would not start on :%d\n", PORT);
-    return 1;
-  }
-  GThread *st = g_thread_new("mock-tci-server", server_thread, NULL);
-
-  SkimTciClient *c = g_client = skim_tci_client_new("127.0.0.1", PORT);
+/* The whole M1 session — handshake, IQ reassembly, centre stamps, the
+ * hardening fixtures, orientation, retune, spots, stop — over ONE transport.
+ * Run once over TCP and once over the Unix socket (gh#39): the WebSocket
+ * layer is the same, but the dial, the Host: header and the way a failure
+ * surfaces are not. */
+static void session_full(const char *server) {
+  mock_reset();
+  SkimTciClient *c = g_client = skim_tci_client_new(server);
   skim_tci_client_set_iq_cb(c, iq_cb, NULL);
 
   GError *err = NULL;
   check("start() completes the handshake (ready;)",
         skim_tci_client_start(c, RATE, &err));
   if (err) { printf("       (%s)\n", err->message); g_clear_error(&err); }
+  check("endpoint getter names the address that won",
+        g_strcmp0(skim_tci_client_endpoint(c), server) == 0);
   check("protocol getter carries ExpertSDR3,1.9",
         strcmp(skim_tci_client_protocol(c), "ExpertSDR3,1.9") == 0);
   check("device getter carries the init-block name",
@@ -548,15 +570,96 @@ int main(void) {
   int frozen = g_atomic_int_get(&c_blocks);
   g_usleep(300 * 1000);
   check("no IQ callback after stop()", g_atomic_int_get(&c_blocks) == frozen);
+  check("after stop() the endpoint getter is NULL", skim_tci_client_endpoint(c) == NULL);
 
   skim_tci_client_free(c);
+}
+
+int main(void) {
+  /* ⛔ A scratch runtime dir, set before GLib reads XDG_RUNTIME_DIR, so the
+   * client's default socket path lands in it — never the live one: lws
+   * unlinks whatever sits at the path before it binds, so the DEFAULT path
+   * would steal a running sdr-for-linux's socket (the socket-path
+   * counterpart of using port 40124 instead of 40001). */
+  s_scratch = g_dir_make_tmp("skimmer-tci-XXXXXX", NULL);
+  if (!s_scratch) { printf("FAIL — no scratch directory\n"); return 1; }
+  g_setenv("XDG_RUNTIME_DIR", s_scratch, TRUE);
+
+  printf("=== TCI client gate (offline, mock server) ===\n");
+  s_rx = g_string_new(NULL);
+  l_log = g_string_new(NULL);
+  g_log_set_writer_func(log_tap, NULL, NULL);
+  g_queue_init(&s_out);
+
+  /* The mock: one context, two explicit vhosts sharing the protocol table —
+   * TCP on 127.0.0.1:PORT and the Unix socket at the client's DEFAULT path
+   * under the scratch dir, so the default-order check finds it there. */
+  struct lws_context_creation_info info;
+  memset(&info, 0, sizeof(info));
+  lws_set_log_level(LLL_ERR, NULL);
+  info.port      = CONTEXT_PORT_NO_LISTEN;
+  info.options   = LWS_SERVER_OPTION_EXPLICIT_VHOSTS;
+  info.gid       = (gid_t)-1;
+  info.uid       = (uid_t)-1;
+  s_ctx = lws_create_context(&info);
+  if (!s_ctx) {
+    printf("FAIL — mock context would not start\n");
+    return 1;
+  }
+  struct lws_context_creation_info vi;
+  memset(&vi, 0, sizeof(vi));
+  vi.vhost_name = "tcp";
+  vi.port       = PORT;
+  vi.iface      = "127.0.0.1";
+  vi.options    = LWS_SERVER_OPTION_DISABLE_IPV6;
+  vi.protocols  = s_protocols;
+  if (!lws_create_vhost(s_ctx, &vi)) {
+    printf("FAIL — mock server would not start on :%d\n", PORT);
+    return 1;
+  }
+  g_snprintf(s_tcp_addr, sizeof(s_tcp_addr), "ws://127.0.0.1:%d", PORT);
+
+  char *sock = skim_tci_default_socket_path();
+  char *sdir = g_path_get_dirname(sock);
+  check("default socket path = $XDG_RUNTIME_DIR/sdr-for-linux/tci.sock (under the scratch dir)",
+        g_str_has_prefix(sock, s_scratch) &&
+        g_str_has_suffix(sock, "/sdr-for-linux/tci.sock"));
+  if (g_mkdir_with_parents(sdir, 0700) != 0 || strlen(sock) >= sizeof(s_unix_path)) {
+    printf("FAIL — socket directory %s\n", sdir);
+    return 1;
+  }
+  g_strlcpy(s_unix_path, sock, sizeof(s_unix_path));
+  g_snprintf(s_unix_addr, sizeof(s_unix_addr), "unix:%s", s_unix_path);
+  g_free(sock);
+  memset(&vi, 0, sizeof(vi));
+  vi.vhost_name = "unix";
+  vi.port       = 0;
+  vi.iface      = s_unix_path;
+  vi.options    = LWS_SERVER_OPTION_UNIX_SOCK;
+  vi.protocols  = s_protocols;
+  if (!lws_create_vhost(s_ctx, &vi)) {
+    printf("FAIL — mock socket vhost would not bind %s\n", s_unix_path);
+    return 1;
+  }
+  check("mock socket file exists at the default path",
+        g_file_test(s_unix_path, G_FILE_TEST_EXISTS));
+  GThread *st = g_thread_new("mock-tci-server", server_thread, NULL);
+
+  printf("\n--- full session over TCP %s ---\n", s_tcp_addr);
+  session_full(s_tcp_addr);
+  printf("\n--- full session over the Unix socket %s ---\n", s_unix_addr);
+  session_full(s_unix_addr);
+
+  SkimTciClient *c;
+  GError *err = NULL;
+  int marked;
 
   /* --- second session: a server that never echoes iq_stamp (SKM-8) --- */
   /* Thetis zeroes the reserved words, ExpertSDR3 is closed source — a
    * server putting anything there must NOT move our centre. */
   g_atomic_int_set(&s_echo_stamp, 0);
   capture_reset();
-  c = g_client = skim_tci_client_new("127.0.0.1", PORT);
+  c = g_client = skim_tci_client_new(s_tcp_addr);
   skim_tci_client_set_iq_cb(c, iq_cb, NULL);
   check("SKM-8 session: start() completes against a server without iq_stamp",
         skim_tci_client_start(c, RATE, &err));
@@ -582,7 +685,7 @@ int main(void) {
   g_atomic_int_set(&s_rate_echo, 96000);
   g_atomic_int_set(&s_ignore_start, 1);
   capture_reset();
-  c = g_client = skim_tci_client_new("127.0.0.1", PORT);
+  c = g_client = skim_tci_client_new(s_tcp_addr);
   skim_tci_client_set_iq_cb(c, iq_cb, NULL);
   check("diag session: start() completes (the init block still ends in ready;)",
         skim_tci_client_start(c, RATE, &err));
@@ -601,10 +704,159 @@ int main(void) {
   g_atomic_int_set(&s_rate_echo, 0);
   g_atomic_int_set(&s_ignore_start, 0);
 
+  /* --- transports (gh#39) --- */
+  printf("\n--- server address parser ---\n");
+  {
+    static const struct { const char *in, *canon; } good[] = {
+      { "unix:/run/user/1000/sdr-for-linux/tci.sock", "unix:/run/user/1000/sdr-for-linux/tci.sock" },
+      { "ws://127.0.0.1:40001",     "ws://127.0.0.1:40001" },
+      { "ws://127.0.0.1",           "ws://127.0.0.1:40001" },
+      { "127.0.0.1",                "ws://127.0.0.1:40001" },
+      { "radio.local:40002",        "ws://radio.local:40002" },
+      { "ws://sunsdr.lan:50001/",   "ws://sunsdr.lan:50001" },
+      { "  ws://10.0.0.5:40001  ",  "ws://10.0.0.5:40001" },
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(good); i++) {
+      SkimTciEndpoint ep;
+      gboolean ok = skim_tci_endpoint_parse(good[i].in, &ep);
+      char *canon = ok ? skim_tci_endpoint_to_string(&ep) : NULL;
+      char what[200];
+      g_snprintf(what, sizeof(what), "parse \"%s\" → %s", good[i].in, good[i].canon);
+      check(what, ok && g_strcmp0(canon, good[i].canon) == 0);
+      g_free(canon);
+    }
+    char longpath[SKIM_TCI_SOCK_PATH_MAX + 2];
+    memset(longpath, 'a', sizeof(longpath) - 1);
+    longpath[0] = '/'; longpath[sizeof(longpath) - 1] = '\0';
+    char *longaddr = g_strdup_printf("unix:%s", longpath);
+    const char *bad[] = {
+      "", "   ", "unix:", "unix:tci.sock", "unix:@tci", "/run/user/1000/tci.sock",
+      "wss://127.0.0.1:40001", "http://127.0.0.1:40001", "ws://127.0.0.1:0",
+      "ws://127.0.0.1:70000", "ws://127.0.0.1:abc", "ws://:40001", "ws://a b:40001",
+      "ws://127.0.0.1:40001:1", longaddr,
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(bad); i++) {
+      SkimTciEndpoint ep;
+      memset(&ep, 0, sizeof(ep));
+      ep.port = 1234;                          /* must survive a refusal    */
+      gboolean ok = skim_tci_endpoint_parse(bad[i], &ep);
+      char what[200];
+      g_snprintf(what, sizeof(what), "refuse \"%s\"",
+                 strlen(bad[i]) > 40 ? "unix:/<108+ chars>" : bad[i]);
+      check(what, !ok && ep.port == 1234);
+    }
+    g_free(longaddr);
+  }
+
+  printf("\n--- candidate order ---\n");
+  char *absent = g_build_filename(s_scratch, "nobody", "tci.sock", NULL);
+  char *absent_addr = g_strdup_printf("unix:%s", absent);
+  {
+    /* An absent socket fails inside connect(), so the client is on the TCP
+     * candidate well inside the per-candidate handshake timeout — the
+     * default order must not cost a radio on TCP seconds per reconnect. */
+    const char *order[] = { absent_addr, s_tcp_addr, NULL };
+    mock_reset();
+    c = skim_tci_client_new_order(order);
+    gint64 t0 = g_get_monotonic_time();
+    gboolean ok = skim_tci_client_start(c, RATE, &err);
+    gint64 took_ms = (g_get_monotonic_time() - t0) / 1000;
+    if (err) { printf("       (%s)\n", err->message); g_clear_error(&err); }
+    printf("       absent socket → TCP took %lld ms\n", (long long)took_ms);
+    check("fallback: an absent socket is skipped, the TCP candidate answers", ok);
+    check("fallback: well inside the handshake timeout (< 1500 ms)", took_ms < 1500);
+    check("fallback: the endpoint getter names the TCP address",
+          g_strcmp0(skim_tci_client_endpoint(c), s_tcp_addr) == 0);
+    skim_tci_client_stop(c);
+    skim_tci_client_free(c);
+
+    /* A stale file at the path (a crashed server's leftover): ECONNREFUSED
+     * at once, the same cheap fallback. */
+    char *stale = g_build_filename(s_scratch, "stale.sock", NULL);
+    g_file_set_contents(stale, "", 0, NULL);
+    char *stale_addr = g_strdup_printf("unix:%s", stale);
+    const char *order2[] = { stale_addr, s_tcp_addr, NULL };
+    mock_reset();
+    c = skim_tci_client_new_order(order2);
+    t0 = g_get_monotonic_time();
+    ok = skim_tci_client_start(c, RATE, &err);
+    took_ms = (g_get_monotonic_time() - t0) / 1000;
+    if (err) { printf("       (%s)\n", err->message); g_clear_error(&err); }
+    printf("       stale file → TCP took %lld ms\n", (long long)took_ms);
+    check("stale file at the socket path: refused at once, TCP answers (< 1500 ms)",
+          ok && took_ms < 1500 &&
+          g_strcmp0(skim_tci_client_endpoint(c), s_tcp_addr) == 0);
+    skim_tci_client_stop(c);
+    skim_tci_client_free(c);
+    g_remove(stale);
+    g_free(stale_addr);
+    g_free(stale);
+  }
+  {
+    /* The default order with no server string: the socket at the radio's
+     * default path wins (the TCP candidate would be the live 40001 — with
+     * nothing there, or a real radio that is not MockSDR). */
+    mock_reset();
+    c = skim_tci_client_new(NULL);
+    skim_tci_client_set_iq_cb(c, iq_cb, NULL);
+    gboolean ok = skim_tci_client_start(c, RATE, &err);
+    if (err) { printf("       (%s)\n", err->message); g_clear_error(&err); }
+    check("default order (NULL server): the socket at the default path wins",
+          ok && g_strcmp0(skim_tci_client_endpoint(c), s_unix_addr) == 0);
+    check("default order: the init block came over the socket (device MockSDR)",
+          ok && strcmp(skim_tci_client_device(c), "MockSDR") == 0);
+    check("default order: IQ flows over the socket", ok && wait_ms(cond_blocks, 5000));
+    skim_tci_client_stop(c);
+    skim_tci_client_free(c);
+
+    mock_reset();
+    c = skim_tci_client_new("   ");
+    ok = skim_tci_client_start(c, RATE, &err);
+    if (err) { printf("       (%s)\n", err->message); g_clear_error(&err); }
+    check("blank server string = the default order",
+          ok && g_strcmp0(skim_tci_client_endpoint(c), s_unix_addr) == 0);
+    skim_tci_client_stop(c);
+    skim_tci_client_free(c);
+  }
+  {
+    /* Nothing answers: the error names every candidate and why. A malformed
+     * server string is its own error, before any dial. */
+    const char *order[] = { absent_addr, "ws://127.0.0.1:9", NULL };   /* discard */
+    c = skim_tci_client_new_order(order);
+    gboolean ok = skim_tci_client_start(c, RATE, &err);
+    check("nothing answers: start() fails", !ok && err != NULL);
+    if (err) {
+      printf("       (%s)\n", err->message);
+      check("nothing answers: the error names the socket candidate",
+            strstr(err->message, absent_addr) != NULL);
+      check("nothing answers: the error names the TCP candidate as refused",
+            strstr(err->message, "ws://127.0.0.1:9 (refused)") != NULL);
+      g_clear_error(&err);
+    } else { checks += 2; fails += 2; }
+    check("nothing answers: no endpoint", skim_tci_client_endpoint(c) == NULL);
+    skim_tci_client_free(c);
+
+    c = skim_tci_client_new("wss://127.0.0.1:40001");
+    ok = skim_tci_client_start(c, RATE, &err);
+    check("malformed server string: start() fails before any dial",
+          !ok && err && strstr(err->message, "malformed") &&
+          strstr(err->message, "wss://127.0.0.1:40001"));
+    if (err) { printf("       (%s)\n", err->message); g_clear_error(&err); }
+    skim_tci_client_free(c);
+  }
+  g_free(absent_addr);
+  g_free(absent);
+
   g_atomic_int_set(&s_run, 0);
   lws_cancel_service(s_ctx);
   g_thread_join(st);
   lws_context_destroy(s_ctx);
+  /* lws unlinks the socket file at destroy — the real server relies on the
+   * same, so a stale file never survives a clean stop. */
+  check("socket file gone after the mock stopped", !g_file_test(s_unix_path, G_FILE_TEST_EXISTS));
+  g_rmdir(sdir);
+  g_rmdir(s_scratch);
+  g_free(sdir);
 
   printf("\n=== %d checks, %d failures ===\n", checks, fails);
   if (fails) {
@@ -615,6 +867,6 @@ int main(void) {
     return 1;
   }
   printf("PASS — handshake, IQ reassembly, true-orientation ingest, spot "
-         "plumbing and the foreign-server hardening all behave.\n");
+         "plumbing, the foreign-server hardening and both transports all behave.\n");
   return 0;
 }

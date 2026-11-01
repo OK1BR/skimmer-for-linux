@@ -168,8 +168,7 @@ int main(int argc, char **argv) {
   const char *menv = g_getenv("SKIM_MODE");
   const gboolean rtty = menv && g_ascii_strcasecmp(menv, "rtty") == 0;
   SkimPipelineConfig cfg = {
-    .host = NULL,
-    .port = 0,
+    .server = NULL,
     .iq_rate = 0,
     .mode = rtty ? SKIM_PIPELINE_MODE_RTTY : SKIM_PIPELINE_MODE_CW,
     .chan_bw_hz = 0,                   /* mode default: 125 Hz CW, 250 RTTY  */

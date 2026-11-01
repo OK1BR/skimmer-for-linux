@@ -27,6 +27,7 @@
 #include "spot_out.h"
 #include "decode_deepcw.h"
 #include "pipeline.h"
+#include "tci_client.h"
 #include "scp_update.h"
 #include "wf_compose.h"
 #include "wf_view.h"
@@ -90,10 +91,15 @@ enum { VIEW_NONE = 0, VIEW_WF = 1 };   /* the station list view is gone   */
 typedef struct {
   SkimPipeline   *pipeline;      /* running pipeline (owned by main thread)   */
   SkimPipeline   *starting;      /* pipeline mid-handshake on a worker thread */
-  char           *host;          /* TCI server host (persisted preference)    */
-  int             tci_port;      /* TCI server port (persisted; default 40001
-                                  * — the spec names none, the server decides:
-                                  * ExpertSDR3 shows it in its settings)     */
+  char           *server;        /* TCI server (persisted [tci] server):
+                                  * unix:/path, ws://host[:port] or
+                                  * host[:port]; "" = the default order —
+                                  * sdr-for-linux's socket, then
+                                  * 127.0.0.1:40001 (gh#39). The server
+                                  * decides its TCP port; 40001 is the usual
+                                  * one, ExpertSDR3 shows its own          */
+  char           *probe_cands[2];/* the scanner's knock list, engine order   */
+  guint           probe_n, probe_i;
   gboolean        cq_only;       /* spot only CALLING stations (persisted)    */
   guint           spot_round;    /* outgoing spot freq grid Hz, 0=exact
                                   * (persisted; SDC-style spot accuracy)      */
@@ -1025,34 +1031,42 @@ static char *settings_file(void) {
                           "settings.ini", NULL);
 }
 
-static char *settings_load_host(void) {
+/* [tci] server — unix:/path, ws://host[:port] or host[:port]; "" = the
+ * default order (sdr-for-linux's socket, then 127.0.0.1:40001). A pre-#39
+ * ini has host + port instead (SKM-11, gh#2 made the port a setting): the
+ * 127.0.0.1:40001 pair is what the dialog showed from day one, never a
+ * choice, so it migrates to the default order — read as an explicit TCP
+ * address it would keep every existing install off the socket for good.
+ * Only a changed host or port was deliberate and becomes ws://host:port. */
+static char *settings_load_server(void) {
   char *path = settings_file();
   GKeyFile *kf = g_key_file_new();
-  char *host = NULL;
+  char *server = NULL;
   if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
-    host = g_key_file_get_string(kf, "tci", "host", NULL);
+    if (g_key_file_has_key(kf, "tci", "server", NULL)) {
+      server = g_key_file_get_string(kf, "tci", "server", NULL);
+      server = g_strstrip(server ? server : g_strdup(""));
+      SkimTciEndpoint ep;
+      if (server[0] && !skim_tci_endpoint_parse(server, &ep)) {
+        g_warning("settings: [tci] server \"%s\" is not unix:/path or "
+                  "ws://host:port — using the default order", server);
+        server[0] = '\0';
+      }
+    } else {
+      char *host = g_key_file_get_string(kf, "tci", "host", NULL);
+      int port = g_key_file_get_integer(kf, "tci", "port", NULL);
+      if (host) { g_strstrip(host); }
+      if (port < 1 || port > 65535) { port = SKIM_TCI_DEFAULT_PORT; }
+      if (host && host[0] && (g_strcmp0(host, "127.0.0.1") != 0 ||
+                              port != SKIM_TCI_DEFAULT_PORT)) {
+        server = g_strdup_printf("ws://%s:%d", host, port);
+      }
+      g_free(host);
+    }
   }
   g_key_file_free(kf);
   g_free(path);
-  if (host && host[0]) { return host; }
-  g_free(host);
-  return g_strdup("127.0.0.1");
-}
-
-/* [tci] port — 1..65535, 40001 when absent or out of range (SKM-11, gh#2:
- * a SunSDR/ExpertSDR3 on another port was unreachable). */
-static int settings_load_tci_port(void) {
-  char *path = settings_file();
-  GKeyFile *kf = g_key_file_new();
-  int port = 40001;
-  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL) &&
-      g_key_file_has_key(kf, "tci", "port", NULL)) {
-    int p = g_key_file_get_integer(kf, "tci", "port", NULL);
-    if (p > 0 && p <= 65535) { port = p; }
-  }
-  g_key_file_free(kf);
-  g_free(path);
-  return port;
+  return server ? server : g_strdup("");
 }
 
 static gboolean settings_load_cq_only(void) {
@@ -1231,8 +1245,9 @@ static void settings_save(const App *app) {
   g_mkdir_with_parents(dir, 0755);
   GKeyFile *kf = g_key_file_new();
   g_key_file_load_from_file(kf, path, G_KEY_FILE_KEEP_COMMENTS, NULL);
-  g_key_file_set_string(kf, "tci", "host", app->host);
-  g_key_file_set_integer(kf, "tci", "port", app->tci_port);
+  g_key_file_set_string(kf, "tci", "server", app->server);
+  g_key_file_remove_key(kf, "tci", "host", NULL);   /* pre-#39 keys       */
+  g_key_file_remove_key(kf, "tci", "port", NULL);
   g_key_file_set_string(kf, "decode", "mode", app->dec_mode ? "rtty" : "cw");
   g_key_file_set_string(kf, "decode", "engine", app->cw_engine ? "deepcw" : "v2");
   g_key_file_set_string(kf, "decode", "device", app->dcw_device ? "cuda" : "cpu");
@@ -1417,11 +1432,54 @@ static void start_pipeline_done(GObject *src, GAsyncResult *res, gpointer user) 
   tuned_label_update(app, NULL);
 }
 
+/* --- finding the server -------------------------------------------------------------------
+ * The scanner knocks on the candidates the engine will dial, in the engine's
+ * order (tci_client.h): the one explicit server, or sdr-for-linux's socket
+ * and then 127.0.0.1:40001. A plain connect, so the pipeline's handshake
+ * thread is spun up only once somebody answers — a socket nobody serves
+ * fails at once, a dark TCP port after the 2 s timeout. */
+static void probe_candidates(App *app) {
+  for (guint i = 0; i < G_N_ELEMENTS(app->probe_cands); i++) {
+    g_clear_pointer(&app->probe_cands[i], g_free);
+  }
+  app->probe_n = app->probe_i = 0;
+  if (app->server[0]) {
+    app->probe_cands[app->probe_n++] = g_strdup(app->server);
+  } else {
+    char *sock = skim_tci_default_socket_path();
+    app->probe_cands[app->probe_n++] = g_strdup_printf("unix:%s", sock);
+    app->probe_cands[app->probe_n++] = g_strdup(SKIM_TCI_DEFAULT_TCP);
+    g_free(sock);
+  }
+}
+
+static void probe_done(GObject *src, GAsyncResult *res, gpointer user);
+
+/* Knock on the next candidate; FALSE once the list is exhausted. */
+static gboolean probe_next(App *app) {
+  while (app->probe_i < app->probe_n) {
+    SkimTciEndpoint ep;
+    if (!skim_tci_endpoint_parse(app->probe_cands[app->probe_i++], &ep)) {
+      continue;
+    }
+    GSocketConnectable *to = ep.unix_sock
+        ? G_SOCKET_CONNECTABLE(g_unix_socket_address_new(ep.path))
+        : G_SOCKET_CONNECTABLE(g_network_address_new(ep.host, ep.port));
+    GSocketClient *sc = g_socket_client_new();
+    g_socket_client_set_timeout(sc, 2);
+    g_socket_client_connect_async(sc, to, NULL, probe_done, app);
+    g_object_unref(to);
+    g_object_unref(sc);
+    return TRUE;
+  }
+  return FALSE;
+}
+
 static void probe_done(GObject *src, GAsyncResult *res, gpointer user) {
   App *app = user;
   GError *err = NULL;
   GSocketConnection *conn =
-      g_socket_client_connect_to_host_finish(G_SOCKET_CLIENT(src), res, &err);
+      g_socket_client_connect_finish(G_SOCKET_CLIENT(src), res, &err);
   if (app->closing) {                          /* window went mid-probe      */
     if (conn) {
       g_io_stream_close(G_IO_STREAM(conn), NULL, NULL);
@@ -1433,13 +1491,15 @@ static void probe_done(GObject *src, GAsyncResult *res, gpointer user) {
   }
   if (!conn) {
     g_clear_error(&err);
-    app->probing = FALSE;
+    if (!probe_next(app)) { app->probing = FALSE; }   /* scanner tries again */
     return;
   }
   g_io_stream_close(G_IO_STREAM(conn), NULL, NULL);
   g_object_unref(conn);
 
-  /* The TCI port answers — bring the pipeline up off the main thread. */
+  /* Somebody answers — bring the pipeline up off the main thread. Its own
+   * start() walks the same order and takes the first server that completes
+   * the handshake. */
   app->starting = pipeline_create(app);
   adw_window_title_set_subtitle(app->title, "connecting…");
   GTask *t = g_task_new(NULL, NULL, start_pipeline_done, app);
@@ -1465,8 +1525,7 @@ static SkimPipeline *pipeline_create(App *app) {
   g_free(day);
   g_free(logdir);
   SkimPipelineConfig cfg = {
-    .host = app->host,
-    .port = (guint16)app->tci_port,
+    .server = app->server,
     .iq_rate = 192000,
     .mode = app->dec_mode ? SKIM_PIPELINE_MODE_RTTY : SKIM_PIPELINE_MODE_CW,
     .cw_engine = app->cw_engine ? SKIM_CW_ENGINE_DEEPCW : SKIM_CW_ENGINE_V2,
@@ -1585,15 +1644,16 @@ static gboolean scan_tick(gpointer data) {
   App *app = data;
   if (app->closing) { return G_SOURCE_REMOVE; }
   if (app->pipeline || app->probing) { return G_SOURCE_CONTINUE; }
-  app->probing = TRUE;
-  char s[160];
-  g_snprintf(s, sizeof(s), "searching for %s:%d…", app->host, app->tci_port);
+  char s[200];
+  if (app->server[0]) {
+    g_snprintf(s, sizeof(s), "searching for %s…", app->server);
+  } else {
+    g_strlcpy(s, "searching for sdr-for-linux — its socket, then 127.0.0.1:40001…",
+              sizeof(s));
+  }
   adw_window_title_set_subtitle(app->title, s);
-  GSocketClient *sc = g_socket_client_new();
-  g_socket_client_set_timeout(sc, 2);
-  g_socket_client_connect_to_host_async(sc, app->host, (guint16)app->tci_port, NULL,
-                                        probe_done, app);
-  g_object_unref(sc);
+  probe_candidates(app);
+  app->probing = probe_next(app);
   return G_SOURCE_CONTINUE;
 }
 
@@ -1635,10 +1695,25 @@ static void on_pref_engine(AdwComboRow *r, GParamSpec *ps, gpointer user) {
   gtk_widget_set_visible(GTK_WIDGET(user), adw_combo_row_get_selected(r) == 1);
 }
 
+/* Red while the Server text is neither empty nor a spelling the client
+ * dials (unix:/path, ws://host:port, host:port) — libadwaita styles
+ * row.entry.error. prefs_closed does not apply such a text. */
+static void on_pref_server_changed(GtkEditable *row, gpointer user) {
+  (void)user;
+  const char *t = gtk_editable_get_text(row);
+  char *s = g_strstrip(g_strdup(t ? t : ""));
+  SkimTciEndpoint ep;
+  if (s[0] && !skim_tci_endpoint_parse(s, &ep)) {
+    gtk_widget_add_css_class(GTK_WIDGET(row), "error");
+  } else {
+    gtk_widget_remove_css_class(GTK_WIDGET(row), "error");
+  }
+  g_free(s);
+}
+
 static void prefs_closed(AdwDialog *dlg, gpointer user) {
   App *app = user;
-  GtkWidget *row  = g_object_get_data(G_OBJECT(dlg), "host-row");
-  GtkWidget *tprow = g_object_get_data(G_OBJECT(dlg), "tci-port-row");
+  GtkWidget *row  = g_object_get_data(G_OBJECT(dlg), "server-row");
   GtkWidget *mrow = g_object_get_data(G_OBJECT(dlg), "mode-row");
   GtkWidget *erow = g_object_get_data(G_OBJECT(dlg), "engine-row");
   GtkWidget *drow = g_object_get_data(G_OBJECT(dlg), "device-row");
@@ -1649,10 +1724,15 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   GtkWidget *rcall = g_object_get_data(G_OBJECT(dlg), "rbn-call-row");
   GtkWidget *rport = g_object_get_data(G_OBJECT(dlg), "rbn-port-row");
   GtkWidget *scprow = g_object_get_data(G_OBJECT(dlg), "scp-row");
-  const char *h = gtk_editable_get_text(GTK_EDITABLE(row));
-  char *host = g_strstrip(g_strdup((h && h[0]) ? h : "127.0.0.1"));
-  int tci_port = (int)adw_spin_row_get_value(ADW_SPIN_ROW(tprow));
-  if (tci_port <= 0 || tci_port > 65535) { tci_port = 40001; }
+  const char *sv = gtk_editable_get_text(GTK_EDITABLE(row));
+  char *server = g_strstrip(g_strdup(sv ? sv : ""));
+  SkimTciEndpoint ep;
+  if (server[0] && !skim_tci_endpoint_parse(server, &ep)) {
+    /* red in the dialog (on_pref_server_changed), not applied — the
+     * previous server stays */
+    g_free(server);
+    server = g_strdup(app->server);
+  }
   gboolean cq_only = adw_switch_row_get_active(ADW_SWITCH_ROW(sw));
   static const guint ROUND_VALS[] = { 0, 10, 20, 50, 100 };
   guint rsel = adw_combo_row_get_selected(ADW_COMBO_ROW(qrow));
@@ -1667,8 +1747,7 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   guint dcw_device = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(drow)), 1u);
   gboolean scp_auto = adw_switch_row_get_active(ADW_SWITCH_ROW(scprow));
   gboolean scp_changed = scp_auto != app->scp_auto;
-  gboolean host_changed = host[0] && g_strcmp0(host, app->host) != 0;
-  gboolean port_changed = tci_port != app->tci_port;
+  gboolean server_changed = g_strcmp0(server, app->server) != 0;
   gboolean mode_changed = dec_mode != app->dec_mode;
   gboolean engine_changed = cw_engine != app->cw_engine;
   gboolean device_changed = dcw_device != app->dcw_device;
@@ -1678,13 +1757,12 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   gboolean rbn_changed  = rbn_enabled != app->rbn_enabled ||
                           g_strcmp0(rbn_call, app->rbn_call) != 0 ||
                           rbn_port != app->rbn_port;
-  if (host_changed) {
-    g_free(app->host);
-    app->host = host;
+  if (server_changed) {
+    g_free(app->server);
+    app->server = server;
   } else {
-    g_free(host);
+    g_free(server);
   }
-  if (port_changed) { app->tci_port = tci_port; }
   if (cq_changed) {
     app->cq_only = cq_only;
     if (app->pipeline) {                       /* applies live               */
@@ -1723,7 +1801,7 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   if (device_changed) {
     app->dcw_device = dcw_device;
   }
-  if (host_changed || port_changed || mode_changed || engine_changed ||
+  if (server_changed || mode_changed || engine_changed ||
       device_changed || cq_changed || round_changed || font_changed ||
       rbn_changed || scp_changed) {
     settings_save(app);
@@ -1737,9 +1815,9 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
     skim_decode_deepcw_reset();
   }
   /* The pipeline's config carries the feed pointer — an RBN change needs a
-   * fresh pipeline just like a host change does; a mode or engine change
+   * fresh pipeline just like a server change does; a mode or engine change
    * swaps the backend (and the bank geometry), which only a rebuild can do. */
-  if (host_changed || port_changed || mode_changed || engine_changed ||
+  if (server_changed || mode_changed || engine_changed ||
       device_rebuild || rbn_changed) {
     const gboolean replaying = app->replay_thread != NULL;
     if (replaying) { replay_stop(app); }        /* feeder off BEFORE the free */
@@ -1781,17 +1859,16 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   GtkWidget *grp  = adw_preferences_group_new();
   adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(grp), "TCI server");
   adw_preferences_group_set_description(ADW_PREFERENCES_GROUP(grp),
-      "TCI WebSocket server (sdr-for-linux, ExpertSDR3, Thetis…) — the "
-      "connection is automatic. The server decides the port; 40001 is the "
-      "usual one, ExpertSDR3 shows its own in its settings");
+      "TCI server (sdr-for-linux, ExpertSDR3, Thetis…) — the connection is "
+      "automatic. Empty finds sdr-for-linux on this machine: its Unix socket "
+      "first, then ws://127.0.0.1:40001. Otherwise unix:/path or "
+      "ws://host:port — the server decides the port; 40001 is the usual one, "
+      "ExpertSDR3 shows its own in its settings");
   GtkWidget *row = adw_entry_row_new();
-  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), "Host");
-  gtk_editable_set_text(GTK_EDITABLE(row), app->host);
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), "Server");
+  gtk_editable_set_text(GTK_EDITABLE(row), app->server);
+  g_signal_connect(row, "changed", G_CALLBACK(on_pref_server_changed), NULL);
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(grp), row);
-  GtkWidget *tprow = adw_spin_row_new_with_range(1, 65535, 1);
-  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(tprow), "Port");
-  adw_spin_row_set_value(ADW_SPIN_ROW(tprow), app->tci_port);
-  adw_preferences_group_add(ADW_PREFERENCES_GROUP(grp), tprow);
   adw_preferences_page_add(p_radio, ADW_PREFERENCES_GROUP(grp));
 
   GtkWidget *dgrp = adw_preferences_group_new();
@@ -1980,8 +2057,7 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(ugrp), prow);
   adw_preferences_page_add(p_disp, ADW_PREFERENCES_GROUP(ugrp));
 
-  g_object_set_data(G_OBJECT(dlg), "host-row", row);
-  g_object_set_data(G_OBJECT(dlg), "tci-port-row", tprow);
+  g_object_set_data(G_OBJECT(dlg), "server-row", row);
   g_object_set_data(G_OBJECT(dlg), "mode-row", mrow);
   g_object_set_data(G_OBJECT(dlg), "engine-row", erow);
   g_object_set_data(G_OBJECT(dlg), "device-row", drow);
@@ -2060,7 +2136,8 @@ static void act_about(GSimpleAction *action, GVariant *param, gpointer user) {
   /* Versions and paths, pasteable into a bug report via the Copy button. */
   char *dbg = g_strdup_printf(
       "GTK %u.%u.%u, libadwaita %u.%u.%u\n"
-      "TCI: %s:%d\n"
+      "TCI: %s\n"
+      "TCI link: %s\n"
       "Mode: %s, CW engine: %s\n"
       "Telnet feed: %s\n"
       "Settings: %s/skimmer-for-linux/settings.ini\n"
@@ -2071,7 +2148,11 @@ static void act_about(GSimpleAction *action, GVariant *param, gpointer user) {
       gtk_get_micro_version(),
       adw_get_major_version(), adw_get_minor_version(),
       adw_get_micro_version(),
-      app->host, app->tci_port, app->dec_mode ? "RTTY" : "CW",
+      app->server[0] ? app->server
+                     : "default order — sdr-for-linux socket, then ws://127.0.0.1:40001",
+      (app->pipeline && skim_pipeline_tci_endpoint(app->pipeline))
+          ? skim_pipeline_tci_endpoint(app->pipeline) : "not connected",
+      app->dec_mode ? "RTTY" : "CW",
       app->pipeline ? skim_pipeline_cw_engine_name(app->pipeline)
                     : (app->cw_engine ? "deepcw (preferred)" : "cw-v2"),
       feed,
@@ -2301,8 +2382,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer user_data) {
   app->window       = GTK_WINDOW(window);
   g_signal_connect(window, "close-request", G_CALLBACK(on_close_request), app);
   g_signal_connect(gtk_app, "shutdown", G_CALLBACK(on_shutdown), app);
-  app->host         = settings_load_host();
-  app->tci_port     = settings_load_tci_port();
+  app->server       = settings_load_server();
   app->dec_mode     = settings_load_mode();
   app->cw_engine    = settings_load_engine();
   app->dcw_device   = settings_load_device();

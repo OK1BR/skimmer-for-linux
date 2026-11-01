@@ -355,7 +355,7 @@ static void rate_section(double rate) {
 
 static void pipeline_section(void) {
   printf("-- pipeline (offline, 48 k, centre 14 020 000)\n");
-  SkimPipelineConfig cfg = { .host = NULL, .port = 0, .iq_rate = 0,
+  SkimPipelineConfig cfg = { .server = NULL, .iq_rate = 0,
                              .mode = SKIM_PIPELINE_MODE_CW, .chan_bw_hz = 0,
                              .dict_path = NULL, .decode_log_path = NULL };
   SkimPipeline *p = skim_pipeline_new(&cfg);

@@ -21,6 +21,17 @@
  * Ingest is pass-through: a signal above the DDC centre lands at a positive
  * offset. Do NOT conjugate here — live-caught 2026-07-15 mirroring the band.
  *
+ * Transports (gh#39, the client half of sdr-for-linux#46): the server is
+ * named by one string — unix:/path, ws://host[:port] or host[:port] — or by
+ * none, which means the default order: sdr-for-linux's Unix socket at
+ * $XDG_RUNTIME_DIR/sdr-for-linux/tci.sock first, then ws://127.0.0.1:40001.
+ * start() dials the candidates in turn and the first one that answers
+ * ready; wins; a socket nobody serves fails inside connect(), so the
+ * fallback costs a radio on TCP nothing. lws dials a Unix socket when the
+ * connect ADDRESS starts with '+' (lib/core-net/client/connect2.c) — not the
+ * URL path, whatever the #39 ticket text says; sdr-for-linux proved it on
+ * this lws with sdrfl-tci-send -u.
+ *
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
 #include "tci_client.h"
@@ -41,8 +52,10 @@
 #define STREAM_FMT_FLOAT  3
 
 struct _SkimTciClient {
-  char    *host;
-  guint16  port;
+  GPtrArray *order;           /* SkimTciEndpoint* candidates, tried in turn  */
+  char      *bad;             /* the first malformed server string, if any   */
+  char      *dial;            /* the address handed to lws for the live dial */
+  char      *endpoint;        /* the winner's canonical spelling (lock)      */
 
   SkimTciIqCb iq_cb;
   gpointer    iq_cb_data;
@@ -89,6 +102,66 @@ struct _SkimTciClient {
   volatile gint run;          /* service loop keeps going while 1            */
   gboolean      started;      /* start() succeeded (iq_start sent)           */
 };
+
+/* ---- server address ----------------------------------------------------------- */
+
+gboolean skim_tci_endpoint_parse(const char *s, SkimTciEndpoint *out) {
+  g_return_val_if_fail(out != NULL, FALSE);
+  if (!s) { return FALSE; }
+  while (g_ascii_isspace(*s)) { s++; }
+  char *t = g_strchomp(g_strdup(s));
+  SkimTciEndpoint ep;
+  memset(&ep, 0, sizeof(ep));
+  gboolean ok = FALSE;
+
+  if (g_str_has_prefix(t, "unix:")) {
+    /* An absolute, dialable path. lws would also take "+@name" for an
+     * abstract-namespace socket, but the radio offers no such thing. */
+    const char *p = t + 5;
+    if (p[0] == '/' && strlen(p) < SKIM_TCI_SOCK_PATH_MAX) {
+      ep.unix_sock = TRUE;
+      g_strlcpy(ep.path, p, sizeof(ep.path));
+      ok = TRUE;
+    }
+  } else if (strstr(t, "://") == NULL || g_str_has_prefix(t, "ws://")) {
+    /* ws://host[:port] or bare host[:port]; wss:// and friends fail here
+     * (no TLS on a TCI link). A pasted URL may end in "/". No IPv6
+     * literals — the radio's localhost-only listener is 127.0.0.1. */
+    char *hp = g_strdup(g_str_has_prefix(t, "ws://") ? t + 5 : t);
+    size_t n = strlen(hp);
+    if (n && hp[n - 1] == '/') { hp[n - 1] = '\0'; }
+    guint64 port = SKIM_TCI_DEFAULT_PORT;
+    gboolean port_ok = TRUE;
+    char *colon = strrchr(hp, ':');
+    if (colon) {
+      *colon = '\0';
+      port_ok = colon[1] &&
+                g_ascii_string_to_unsigned(colon + 1, 10, 1, 65535, &port, NULL);
+    }
+    if (port_ok && hp[0] && strpbrk(hp, "/:@ \t") == NULL &&
+        strlen(hp) < sizeof(ep.host)) {
+      g_strlcpy(ep.host, hp, sizeof(ep.host));
+      ep.port = (guint16)port;
+      ok = TRUE;
+    }
+    g_free(hp);
+  }
+
+  g_free(t);
+  if (ok) { *out = ep; }
+  return ok;
+}
+
+char *skim_tci_endpoint_to_string(const SkimTciEndpoint *ep) {
+  g_return_val_if_fail(ep != NULL, NULL);
+  return ep->unix_sock ? g_strdup_printf("unix:%s", ep->path)
+                       : g_strdup_printf("ws://%s:%u", ep->host, ep->port);
+}
+
+char *skim_tci_default_socket_path(void) {
+  return g_build_filename(g_get_user_runtime_dir(), "sdr-for-linux", "tci.sock",
+                          NULL);
+}
 
 /* ---- outgoing text ---------------------------------------------------------- */
 
@@ -415,15 +488,41 @@ static gpointer service_thread(gpointer data) {
 
 /* ---- public API -------------------------------------------------------------- */
 
-SkimTciClient *skim_tci_client_new(const char *host, guint16 port) {
+SkimTciClient *skim_tci_client_new_order(const char *const *servers) {
   SkimTciClient *c = g_new0(SkimTciClient, 1);
-  c->host = g_strdup(host ? host : "127.0.0.1");
-  c->port = port ? port : 40001;
+  c->order = g_ptr_array_new_with_free_func(g_free);
+  for (; servers && *servers; servers++) {
+    SkimTciEndpoint ep;
+    if (skim_tci_endpoint_parse(*servers, &ep)) {
+      g_ptr_array_add(c->order, g_memdup2(&ep, sizeof(ep)));
+    } else if (!c->bad) {
+      c->bad = g_strdup(*servers);
+    }
+  }
   g_mutex_init(&c->lock);
   g_cond_init(&c->cond);
   g_queue_init(&c->out);
   c->txt = g_string_new(NULL);
   c->bin = g_byte_array_new();
+  return c;
+}
+
+SkimTciClient *skim_tci_client_new(const char *server) {
+  while (server && g_ascii_isspace(*server)) { server++; }
+  if (server && *server) {
+    const char *one[] = { server, NULL };
+    return skim_tci_client_new_order(one);
+  }
+  /* The default order: the local radio's socket, then its TCP port — a
+   * fresh install finds sdr-for-linux whichever listener it has on. The
+   * socket path is sdr-for-linux's own default; a socket moved by its
+   * preference is typed in here as unix:/path. */
+  char *sock = skim_tci_default_socket_path();
+  char *unix_addr = g_strdup_printf("unix:%s", sock);
+  const char *def[] = { unix_addr, SKIM_TCI_DEFAULT_TCP, NULL };
+  SkimTciClient *c = skim_tci_client_new_order(def);
+  g_free(unix_addr);
+  g_free(sock);
   return c;
 }
 
@@ -437,7 +536,10 @@ void skim_tci_client_free(SkimTciClient *c) {
   g_byte_array_free(c->bin, TRUE);
   g_mutex_clear(&c->lock);
   g_cond_clear(&c->cond);
-  g_free(c->host);
+  g_ptr_array_free(c->order, TRUE);
+  g_free(c->bad);
+  g_free(c->dial);
+  g_free(c->endpoint);
   g_free(c);
 }
 
@@ -462,18 +564,39 @@ void skim_tci_client_set_closed_cb(SkimTciClient *c, SkimTciClosedCb cb,
   c->closed_cb_data = user_data;
 }
 
-gboolean skim_tci_client_start(SkimTciClient *c, guint iq_samplerate, GError **error) {
+/* Tear one dial down: stop the service thread, drop the context, forget
+ * every per-session fact. Shared by a failed candidate (so the next one
+ * starts clean) and stop(). */
+static void teardown(SkimTciClient *c) {
+  g_atomic_int_set(&c->run, 0);
+  if (c->ctx) { lws_cancel_service(c->ctx); }
   if (c->thread) {
-    g_set_error(error, SKIM_TCI_ERROR, 1, "TCI client already started");
-    return FALSE;
+    g_thread_join(c->thread);
+    c->thread = NULL;
   }
-  if (iq_samplerate != 0 && iq_samplerate != 48000 && iq_samplerate != 96000 &&
-      iq_samplerate != 192000 && iq_samplerate != 384000) {
-    g_set_error(error, SKIM_TCI_ERROR, 2,
-                "invalid iq_samplerate %u (48/96/192/384 kHz)", iq_samplerate);
-    return FALSE;
+  lws_sul_cancel(&c->noiq_sul);      /* service thread gone — safe to unlink */
+  if (c->ctx) {
+    lws_context_destroy(c->ctx);
+    c->ctx = NULL;
   }
+  c->wsi = NULL;
+  c->up = c->ready = c->failed = FALSE;
+  c->iq_req_rate = 0;
+  c->iq_start_us = 0;
+  g_string_set_size(c->txt, 0);
+  g_byte_array_set_size(c->bin, 0);
+  c->stamp_ok = FALSE;
+  c->blocks = 0;
+  c->warned_fmt = c->warned_rx = c->warned_short = c->warned_pad =
+      c->warned_bogus = c->warned_noiq = c->warned_rate = FALSE;
+  g_clear_pointer(&c->dial, g_free);
+}
 
+/* One candidate: context, dial, service thread, then wait for ready; or a
+ * failure. On failure the attempt is torn down and *why names the reason
+ * for start()'s error. */
+static gboolean try_endpoint(SkimTciClient *c, const SkimTciEndpoint *ep,
+                             const char **why) {
   lws_set_log_level(LLL_ERR, NULL);
   struct lws_context_creation_info info;
   memset(&info, 0, sizeof(info));
@@ -484,20 +607,47 @@ gboolean skim_tci_client_start(SkimTciClient *c, guint iq_samplerate, GError **e
   info.user      = c;
   c->ctx = lws_create_context(&info);
   if (!c->ctx) {
-    g_set_error(error, SKIM_TCI_ERROR, 3, "lws_create_context failed");
+    *why = "lws_create_context failed";
     return FALSE;
   }
+
+  c->ready = c->failed = c->up = FALSE;
+  c->center_hz = c->vfo_hz = 0;
+  c->trx = c->tune = FALSE;
+  c->iq_rate = 0;
+  c->device[0] = c->protocol[0] = '\0';
+  g_string_set_size(c->txt, 0);
 
   struct lws_client_connect_info ci;
   memset(&ci, 0, sizeof(ci));
   ci.context  = c->ctx;
-  ci.address  = c->host;
-  ci.port     = c->port;
   ci.path     = "/";
-  ci.host     = c->host;
-  ci.origin   = c->host;
   ci.protocol = "tci";
-  lws_client_connect_via_info(&ci);
+  g_free(c->dial);
+  if (ep->unix_sock) {
+    /* lws dials a Unix socket when the ADDRESS starts with '+' (its
+     * lib/core-net/client/connect2.c) — not the URL path, whatever the
+     * comment on lws_client_connect_info.path and the #39 ticket text
+     * say; sdr-for-linux proved it on this lws with sdrfl-tci-send -u.
+     * The port is ignored and the path stays "/", but the Host: header
+     * still needs a name. The client owns the address string for the
+     * life of the dial rather than trusting lws to copy it. */
+    c->dial  = g_strdup_printf("+%s", ep->path);
+    ci.address = c->dial;
+    ci.port    = 0;
+    ci.host = ci.origin = "localhost";
+  } else {
+    c->dial = g_strdup(ep->host);
+    ci.address = ci.host = ci.origin = c->dial;
+    ci.port    = ep->port;
+  }
+  /* A NULL back from the dial is a failure lws need not also report
+   * through the callback (a missing socket file fails inside connect()). */
+  if (!lws_client_connect_via_info(&ci)) {
+    g_mutex_lock(&c->lock);
+    c->failed = TRUE;
+    g_mutex_unlock(&c->lock);
+  }
 
   g_atomic_int_set(&c->run, 1);
   c->thread = g_thread_new("skim-tci", service_thread, c);
@@ -511,14 +661,57 @@ gboolean skim_tci_client_start(SkimTciClient *c, guint iq_samplerate, GError **e
   gboolean ready = c->ready, failed = c->failed;
   g_mutex_unlock(&c->lock);
 
-  if (!ready) {
-    g_set_error(error, SKIM_TCI_ERROR, 4,
-                failed ? "connection to ws://%s:%u refused"
-                       : "handshake timeout against ws://%s:%u (no ready;)",
-                c->host, c->port);
-    skim_tci_client_stop(c);
+  if (ready) { return TRUE; }
+  *why = failed ? "refused" : "no ready; within " G_STRINGIFY(HANDSHAKE_TIMEOUT_S) " s";
+  teardown(c);
+  return FALSE;
+}
+
+gboolean skim_tci_client_start(SkimTciClient *c, guint iq_samplerate, GError **error) {
+  if (c->thread) {
+    g_set_error(error, SKIM_TCI_ERROR, 1, "TCI client already started");
     return FALSE;
   }
+  if (iq_samplerate != 0 && iq_samplerate != 48000 && iq_samplerate != 96000 &&
+      iq_samplerate != 192000 && iq_samplerate != 384000) {
+    g_set_error(error, SKIM_TCI_ERROR, 2,
+                "invalid iq_samplerate %u (48/96/192/384 kHz)", iq_samplerate);
+    return FALSE;
+  }
+  if (c->order->len == 0) {
+    g_set_error(error, SKIM_TCI_ERROR, 5, "malformed TCI server address \"%s\"",
+                c->bad ? c->bad : "");
+    return FALSE;
+  }
+
+  /* The first candidate to answer ready; wins; the rest are never dialled.
+   * A candidate that is not there fails inside connect(), so the default
+   * order costs nothing when the radio only has TCP on. */
+  GString *tried = g_string_new(NULL);
+  char *won = NULL;
+  for (guint i = 0; i < c->order->len && !won; i++) {
+    const SkimTciEndpoint *ep = g_ptr_array_index(c->order, i);
+    const char *why = NULL;
+    char *name = skim_tci_endpoint_to_string(ep);
+    if (try_endpoint(c, ep, &why)) {
+      won = name;
+      break;
+    }
+    g_string_append_printf(tried, "%s%s (%s)", tried->len ? ", " : "", name, why);
+    g_free(name);
+  }
+  if (!won) {
+    g_set_error(error, SKIM_TCI_ERROR, 4, "no TCI server answered: %s", tried->str);
+    g_string_free(tried, TRUE);
+    return FALSE;
+  }
+  g_string_free(tried, TRUE);
+  g_mutex_lock(&c->lock);
+  g_free(c->endpoint);
+  c->endpoint = won;
+  g_mutex_unlock(&c->lock);
+  /* The line a remote tester's log needs: which transport carries the link. */
+  g_message("tci: connected over %s", won);
 
   /* iq_samplerate is device-global radio state — request ours (the SDC lesson:
    * say it explicitly or inherit whatever the device last used), then start. */
@@ -559,23 +752,18 @@ void skim_tci_client_stop(SkimTciClient *c) {
     }
     c->started = FALSE;
   }
-  g_atomic_int_set(&c->run, 0);
-  lws_cancel_service(c->ctx);
-  g_thread_join(c->thread);
-  c->thread = NULL;
-  lws_sul_cancel(&c->noiq_sul);      /* service thread gone — safe to unlink */
-  lws_context_destroy(c->ctx);
-  c->ctx = NULL;
-  c->wsi = NULL;
-  c->up = c->ready = c->failed = FALSE;
-  c->iq_req_rate = 0;
-  c->iq_start_us = 0;
-  g_string_set_size(c->txt, 0);
-  g_byte_array_set_size(c->bin, 0);
-  c->stamp_ok = FALSE;
-  c->blocks = 0;
-  c->warned_fmt = c->warned_rx = c->warned_short = c->warned_pad =
-      c->warned_bogus = c->warned_noiq = c->warned_rate = FALSE;
+  teardown(c);
+  g_mutex_lock(&c->lock);
+  g_clear_pointer(&c->endpoint, g_free);
+  g_mutex_unlock(&c->lock);
+}
+
+const char *skim_tci_client_endpoint(SkimTciClient *c) {
+  if (!c) { return NULL; }
+  g_mutex_lock(&c->lock);
+  const char *e = c->endpoint;
+  g_mutex_unlock(&c->lock);
+  return e;
 }
 
 void skim_tci_client_spot(SkimTciClient *c, const char *call, const char *mode,

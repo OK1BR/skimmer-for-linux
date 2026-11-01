@@ -105,11 +105,16 @@ meson install -C builddir
 
 ## Connecting to the radio
 
-Start the TCI server first, then the skimmer. Host and port go in
-**Preferences → Radio** (port 40001 unless your server says otherwise) and the
-toggle in the header bar connects. The IQ sample rate is radio state: the
-server announces it and the skimmer follows, so a segment is as wide as the
-radio's IQ stream (48, 96, 192 or 384 kHz with `sdr-for-linux`).
+Start the TCI server first, then the skimmer; the connection is automatic.
+With nothing set in **Preferences → Radio** the skimmer looks for
+`sdr-for-linux` on this machine — over its Unix socket
+(`$XDG_RUNTIME_DIR/sdr-for-linux/tci.sock`) first, then over TCP at
+`ws://127.0.0.1:40001`. A radio elsewhere, or another TCI server, goes into
+the Server row as `ws://host:port` (40001 unless your server says otherwise);
+a socket moved in `sdr-for-linux`'s preferences as `unix:/path`. The IQ
+sample rate is radio state: the server announces it and the skimmer follows,
+so a segment is as wide as the radio's IQ stream (48, 96, 192 or 384 kHz with
+`sdr-for-linux`).
 
 No radio at hand? `SKIM_IQ_FILE=<capture.cf32>` replays a recorded IQ file
 through the whole pipeline at real-time pace, looping, and draws it in the
@@ -152,8 +157,7 @@ the key for each row is given here so the file can be edited directly.
 
 | Row | Key | Notes |
 | --- | --- | --- |
-| Host | `[tci] host` | TCI server address, default `127.0.0.1` |
-| Port | `[tci] port` | 1–65535, default `40001` |
+| Server | `[tci] server` | `unix:/path`, `ws://host:port` or `host:port`; empty (the default) = `sdr-for-linux`'s socket, then `ws://127.0.0.1:40001`. A pre-0.6 `host` + `port` pair still reads: the default `127.0.0.1` / `40001` as empty, anything else as `ws://host:port` |
 
 **Decoding**
 

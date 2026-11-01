@@ -306,6 +306,10 @@ const char *skim_pipeline_cw_engine_name(const SkimPipeline *p) {
   }
 }
 
+const char *skim_pipeline_tci_endpoint(const SkimPipeline *p) {
+  return p->tci ? skim_tci_client_endpoint(p->tci) : NULL;
+}
+
 static const char *pipe_mode_str(const SkimPipeline *p) {
   return p->cfg.mode == SKIM_PIPELINE_MODE_RTTY ? "RTTY" : "CW";
 }
@@ -322,8 +326,8 @@ SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg) {
   SkimPipeline *p = g_new0(SkimPipeline, 1);
   p->cfg = *cfg;
   p->cw_engine = cw_engine_pick(cfg);
-  p->host = g_strdup(cfg->host ? cfg->host : "127.0.0.1");
-  p->cfg.host = p->host;
+  p->host = g_strdup(cfg->server ? cfg->server : "");
+  p->cfg.server = p->host;
   p->dlog_path = g_strdup(cfg->decode_log_path);
   if (p->cfg.chan_bw_hz <= 0) {
     p->cfg.chan_bw_hz =
@@ -1148,7 +1152,7 @@ gboolean skim_pipeline_start(SkimPipeline *p, GError **error) {
   p->holding = FALSE;
   p->hold_capped = FALSE;
   p->grace_frames = 0;
-  p->tci = skim_tci_client_new(p->cfg.host, p->cfg.port);
+  p->tci = skim_tci_client_new(p->cfg.server);
   skim_tci_client_set_iq_cb(p->tci, iq_cb, p);
   skim_tci_client_set_vfo_cb(p->tci, vfo_fwd_cb, p);
   skim_tci_client_set_tx_cb(p->tci, tx_fwd_cb, p);

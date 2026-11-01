@@ -43,8 +43,10 @@ typedef enum {
 } SkimCwEngine;
 
 typedef struct {
-  const char *host;           /* TCI server (default 127.0.0.1)              */
-  guint16     port;           /* default 40001                               */
+  const char *server;         /* TCI server: unix:/path, ws://host[:port] or
+                               * host[:port]; NULL/"" = the default order —
+                               * sdr-for-linux's socket, then 127.0.0.1:40001
+                               * (tci_client.h)                              */
   guint       iq_rate;        /* 48/96/192/384 kHz; 0 = keep device rate     */
   SkimPipelineMode mode;      /* decoded mode (default CW)                   */
   SkimCwEngine cw_engine;     /* CW engine (default v2; see SkimCwEngine)    */
@@ -109,11 +111,16 @@ void     skim_pipeline_stop(SkimPipeline *p);
 /* Offline mode (the .cf32 replayer / M3 A/B gate): no TCI, no engine thread —
  * the caller feeds IQ synchronously and callbacks fire on the caller's
  * thread. The decode log is stamped with STREAM time (deterministic across
- * runs). host/port/iq_rate in the config are ignored. */
+ * runs). server/iq_rate in the config are ignored. */
 /* The decode engine actually in use ("cw-v2", "cw-v1", "deepcw", "rtty") —
  * resolved at skim_pipeline_new from the config, the env override and the
  * DeepCW availability check (About, replay header, logs). */
 const char *skim_pipeline_cw_engine_name(const SkimPipeline *p);
+
+/* The TCI address the live pipeline is connected over ("unix:/path" or
+ * "ws://host:port" — which candidate won); NULL offline or before start.
+ * Owned by the pipeline, valid while it runs. */
+const char *skim_pipeline_tci_endpoint(const SkimPipeline *p);
 
 gboolean skim_pipeline_start_offline(SkimPipeline *p, GError **error);
 void     skim_pipeline_feed(SkimPipeline *p, const float *iq, guint nframes,
