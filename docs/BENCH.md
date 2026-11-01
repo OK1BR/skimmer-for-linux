@@ -64,8 +64,35 @@ live session (in OK1HRA's fork, offline wins twice lost on live air — #28).
 
 ## Noise floor
 
-Measured before anything is judged: two replays of one recording that
-differ only by a warm-up shift. A difference between two runs smaller than
-this is noise, and the two sides of an A/B must start the same way.
+Measured before anything is judged: replays of one recording that differ
+only by where they start (`SKIM_REPLAY_FROM`), a warm-up shift. A
+difference between two runs smaller than this is noise, and the two sides
+of an A/B must start at the same frame.
 
-(to be filled in from the first recording, 2026-11-01)
+First measurement, 2026-11-01: the first hour of `iq-20261101-1803z-192k`
+(80 m, Sunday evening 18:03–19:03 UTC, cw-v2, no retune, no TX), replayed
+from 0, 5, 10, 20 and 30 s. Each run put 23–26 calls (24–27 units, 48–57
+records) on the feed. Over the ten pairs 1 to 7 units differ, 3.7 to
+24.1 % of the union. 21 of the 29 calls seen are in all five runs; the
+other 8 are where the noise lives:
+
+- seven are readings of four stations whose call the decoder is unsure
+  of: DM8EO or DK8EO at 3566.00; SA8AR beside HA8AR (in every run) at
+  3535.02; OK1FLK and OK1FLKO together at 3551.91, or neither; OK2BVX,
+  read whole in one run, otherwise only as K2B and the fragments OK2B and
+  K2BVX, which are in every run;
+- one, DH2IF, is a single spot that is there or not.
+
+The runs fall into two families, 0/5/20 s (DM8EO, OK1FLK + OK1FLKO) and
+10/30 s (DK8EO, SA8AR): 3.7–7.7 % apart inside a family, 17–24 % across.
+The noise looks like a fork between a few trajectories, not a drift that
+grows with the shift.
+
+For an A/B on a recording this size: both sides start at the same frame;
+a difference of up to five units a side, in calls like these, is not a
+signal; a change in the stable set is. Not every bust is noise — OK2B and
+K2BVX are in every run, so a fix for them (#29) can be measured. One quiet
+hour is a thin sample: re-measure over a whole evening and on a contest
+recording. The floor on confirmed units and recall — what an A/B is judged
+by — comes from scoring these runs against the day's RBN archive (to be
+added).
