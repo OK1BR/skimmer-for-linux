@@ -36,6 +36,15 @@
 #define HOLD_GRACE_S   0.3                    /* post-TX settle (T/R + att)  */
 #define HOLD_CAP_S     30.0                   /* a stuck trx must not freeze
                                                  the skimmer forever         */
+/* IQ gap (gh#38): frames missing before a block — the TCI 2.1 packet counter
+ * skipped blocks, a block arrived truncated, or our own queue dropped one
+ * under load. Below this length the hole is shorter than one CW element at
+ * 15 WPM (a dash = 240 ms): the decoders read it as at most one wrong
+ * element, cheaper than throwing away mid-character state. At or above it
+ * the framers are resynced exactly like after a TX hold. */
+#define GAP_RESYNC_MS  250.0
+/* "engine behind — block dropped" line: one per this many µs, with the tally */
+#define DROP_LOG_EVERY_US (10 * G_USEC_PER_SEC)
 #define PRUNE_EVERY_US (2 * G_USEC_PER_SEC)
 /* RBN policy: the network keeps its own history, so re-announce sparsely
  * (the panadapter's 180 s is about keeping labels alive — not needed here)
@@ -87,6 +96,7 @@ typedef struct {
   guint   nframes;
   double  rate;
   double  center_hz;
+  guint   gap_frames;   /* IQ frames missing right before this block (gh#38) */
 } IqBlock;
 
 /* One slot's decode collected in pass 1 of a block (dispatch happens in
@@ -217,7 +227,23 @@ struct _SkimPipeline {
   volatile guint64 frames;
   volatile guint64 dropped;
   guint64          spots_total;                /* survives stop()            */
+
+  /* IQ gaps (gh#38): frames the decoders never saw — blocks the server
+   * counted that never got here (TCI 2.1 header word 8, via the client's
+   * gap_frames), blocks our own queue dropped under load. The feed side
+   * (LWS thread live, the caller offline) accumulates, the next queued block
+   * carries the sum, the engine thread acts on it in process_block. */
+  guint            gap_pending;                /* feed side only             */
+  gint64           drop_log_us;                /* feed side only             */
+  guint64          gap_frames_total;           /* engine thread              */
+  guint64          gaps;                       /* blocks that carried a gap  */
 };
+
+/* Frames pending as the next block's gap — a long outage must not wrap. */
+static guint sat_add(guint a, guint64 b) {
+  const guint64 s = (guint64)a + b;
+  return s > G_MAXUINT ? G_MAXUINT : (guint)s;
+}
 
 /* ---- construction ------------------------------------------------------------ */
 
@@ -536,17 +562,30 @@ static void tx_fwd_cb(gboolean tx, gpointer user) {
 /* ---- LWS-thread side: queue the block ---------------------------------------- */
 
 static void iq_cb(const float *iq, guint nframes, double rate, double center,
-                  gpointer user) {
+                  guint gap_frames, gpointer user) {
   SkimPipeline *p = user;
+  p->gap_pending = sat_add(p->gap_pending, gap_frames);   /* lost on the link */
   if (g_async_queue_length(p->queue) >= QUEUE_MAX) {
     p->dropped++;                              /* overload: drop, don't stall */
+    /* The engine learns of the hole with the next block it does get — and
+     * the log says so, once per 10 s with the tally (the counter alone was
+     * invisible outside the gates). */
+    p->gap_pending = sat_add(p->gap_pending, nframes);
+    const gint64 now = g_get_monotonic_time();
+    if (now - p->drop_log_us >= DROP_LOG_EVERY_US) {
+      p->drop_log_us = now;
+      g_message("pipeline: engine behind — IQ block dropped (%" G_GUINT64_FORMAT
+                " dropped this run)", p->dropped);
+    }
     return;
   }
   IqBlock *b = g_new(IqBlock, 1);
   b->iq = g_memdup2(iq, (gsize)nframes * 2 * sizeof(float));
-  b->nframes   = nframes;
-  b->rate      = rate;
-  b->center_hz = center;
+  b->nframes    = nframes;
+  b->rate       = rate;
+  b->center_hz  = center;
+  b->gap_frames = p->gap_pending;
+  p->gap_pending = 0;
   g_async_queue_push(p->queue, b);
 }
 
@@ -702,6 +741,28 @@ static void hold_begin(SkimPipeline *p) {
     return;
   for (guint i = 0; i < p->nchan * NSLOT; i++) {
     if (p->dec[i]) { be->hold_begin(p->dec[i]); }
+  }
+}
+
+/* IQ missing before this block (gh#38): stream time follows the radio's
+ * clock, not the bytes that made it here (TTLs, dedup windows, the decode
+ * log's stamps), and a hole of GAP_RESYNC_MS or more gets the TX-hold
+ * resume — mid-character framer state is meaningless across it, acquisition
+ * survives. Backends without a resync hook (cw-v1/v2) are left alone, as
+ * after a hold: v2 reads the hole as a pause. The client already logged a
+ * counter gap with its numbers; this line says what the engine did. */
+static void gap_note(SkimPipeline *p, const IqBlock *b) {
+  const double ms = 1000.0 * (double)b->gap_frames / MAX(b->rate, 1.0);
+  p->gaps++;
+  p->gap_frames_total += b->gap_frames;
+  p->frames += b->gap_frames;
+  p->stream_us = (gint64)((double)p->frames * G_USEC_PER_SEC /
+                          MAX(b->rate, 1.0));
+  if (ms >= GAP_RESYNC_MS) {
+    hold_resume(p);
+    g_message("pipeline: IQ gap of %u frames (%.0f ms) before this block — "
+              "decoders resynced (gap %" G_GUINT64_FORMAT " of this run)",
+              b->gap_frames, ms, p->gaps);
   }
 }
 
@@ -971,6 +1032,7 @@ static void hold_pump(SkimPipeline *p, const IqBlock *b) {
 static void process_block(SkimPipeline *p, IqBlock *b) {
   spec_feed(p, b);                             /* M8: the picture follows the
                                                 * data, not the hold below    */
+  if (b->gap_frames) { gap_note(p, b); }       /* gh#38: the hole before it  */
   /* TX hold (TX hold): while the operator's own TX deafens the RX
    * (T/R relay + 31 dB TX attenuators), the band the decoders would see is
    * self-inflicted silence — evaluating it releases every channel and the
@@ -1189,6 +1251,8 @@ gboolean skim_pipeline_start(SkimPipeline *p, GError **error) {
     return FALSE;
   }
   g_atomic_int_set(&p->tx_now, 0);   /* fresh session — no hold carried over */
+  p->gap_pending = 0;                /* nor a gap: the client re-anchors too */
+  p->drop_log_us = 0;
   p->holding = FALSE;
   p->hold_capped = FALSE;
   p->grace_frames = 0;
@@ -1238,6 +1302,7 @@ gboolean skim_pipeline_start_offline(SkimPipeline *p, GError **error) {
     return FALSE;
   }
   p->offline = TRUE;
+  p->gap_pending = 0;
   p->stream_us  = 0;
   p->last_prune = 0;
   g_atomic_int_set(&p->tx_now, 0);
@@ -1260,10 +1325,12 @@ void skim_pipeline_feed(SkimPipeline *p, const float *iq, guint nframes,
   g_return_if_fail(p->offline);
   IqBlock b = {
     .iq = (float *)iq,                 /* process_block never writes into it */
-    .nframes   = nframes,
-    .rate      = rate,
-    .center_hz = center_hz,
+    .nframes    = nframes,
+    .rate       = rate,
+    .center_hz  = center_hz,
+    .gap_frames = p->gap_pending,
   };
+  p->gap_pending = 0;
   process_block(p, &b);
   /* Prune on the STREAM clock — live has the engine thread for this; a
    * replay that never pruned kept every station forever, which is a
@@ -1344,3 +1411,13 @@ guint skim_pipeline_stations(const SkimPipeline *p) {
   return skim_station_table_size(p->stations);
 }
 guint64 skim_pipeline_dropped_blocks(const SkimPipeline *p) { return p->dropped; }
+guint64 skim_pipeline_gap_frames(const SkimPipeline *p) { return p->gap_frames_total; }
+guint64 skim_pipeline_gaps(const SkimPipeline *p) { return p->gaps; }
+int skim_pipeline_tci_stamp_layout(const SkimPipeline *p) {
+  return p->tci ? skim_tci_client_stamp_layout(p->tci) : -2;
+}
+
+void skim_pipeline_feed_gap(SkimPipeline *p, guint frames) {
+  g_return_if_fail(p->offline);
+  p->gap_pending = sat_add(p->gap_pending, frames);
+}

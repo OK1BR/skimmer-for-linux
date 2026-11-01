@@ -27,6 +27,14 @@
  *     the stream goes on; a truncated message is dropped without desyncing
  *     the next; and with the iq_stamp echo withheld the reserved words are
  *     ignored (dds label, one whole-block callback),
+ *   - header layouts + packet counter (gh#38, sdr-for-linux#43): the client
+ *     asks iq_stamp:2 and reads the words the ECHO promises — stamps at 9–11
+ *     and the TCI 2.1 counter at word 8 from a server that answers 2
+ *     (sdr-for-linux ≥ 0.6.0), stamps at 8–10 and no counter from one that
+ *     answers 1 (before #43), nothing without an echo. A counter jump and a
+ *     truncated block each reach the IQ callback as the gap before the next
+ *     block (lost blocks × block size), logged with their numbers; under
+ *     layout 1 a jump goes unnoticed (word 8 is a frequency there),
  *   - the remote-tester diagnostics fire: a mock that answers iq_samplerate
  *     with ANOTHER rate and never starts IQ produces the "server runs IQ at
  *     X Hz (asked for Y)" line and the 3 s "no IQ block" warning,
@@ -85,7 +93,17 @@ static char        s_spot[256];       /* last spot: command                    *
 static struct lws *s_wsi;
 static struct lws_context *s_ctx;
 static volatile gint s_run = 1, s_streaming, s_push_dds, s_blocks_sent, s_stamp_req;
-static volatile gint s_echo_stamp = 1;   /* mock echoes iq_stamp:1 (sdr-for-linux does; others do not) */
+/* The header layout the mock SERVES (gh#38): 2 = sdr-for-linux ≥ 0.6.0
+ * (echoes min(request, 2); count at word 8, stamps at 9–11 under 2), 1 = a
+ * server before sdr-for-linux#43 (echoes 1 to any non-zero request; stamps
+ * at 8–10, no counter), -1 = a server that never heard of iq_stamp (no echo;
+ * words 8–10 carry whatever the fixture wrote — junk to the client). */
+static volatile gint s_served = 2;
+static volatile gint s_layout = 0;       /* layout of the blocks queued NOW: the
+                                          * real server serves 0 until the echo */
+static guint32       s_count, s_count_rx1;  /* per-stream packet counters (s_lock) */
+static volatile gint s_skip;             /* counts the rx0 counter skips before
+                                          * the next block (a gap fixture)       */
 static volatile gint s_text_frames;      /* complete text frames received from the client */
 static volatile gint s_marks_sent;       /* MARKER blocks queued so far (one per fixture) */
 static volatile gint s_rate_echo;        /* ≠0: echo THIS iq_samplerate instead of the request */
@@ -141,7 +159,24 @@ static void srv_queue_block(guint32 rx, guint32 rate, guint32 hz0, guint32 off,
   m->binary = 1;
   guint32 h[16] = { 0 };
   h[0] = rx; h[1] = rate; h[2] = 3; h[5] = BLK * 2; h[6] = 0; h[7] = 2;
-  h[8] = hz0; h[9] = off; h[10] = hz1;
+  /* word 8 / stamps per the layout in effect (gh#38) — one producer thread,
+   * so the counters advance in queue order like the real server's */
+  const gint layout = g_atomic_int_get(&s_layout);
+  g_mutex_lock(&s_lock);
+  guint32 cnt;
+  if (rx == 0) {
+    s_count += (guint32)g_atomic_int_get(&s_skip);
+    g_atomic_int_set(&s_skip, 0);
+    cnt = s_count++;
+  } else {
+    cnt = s_count_rx1++;                       /* receiver 1 has its own stream */
+  }
+  g_mutex_unlock(&s_lock);
+  switch (layout) {
+  case 1: case -1: h[8] = hz0; h[9] = off; h[10] = hz1; break; /* legacy / junk */
+  case 2:  h[8] = cnt; h[9] = hz0; h[10] = off; h[11] = hz1; break;
+  default: h[8] = cnt; break;                                  /* 0: count only */
+  }
   memcpy(m->data, h, sizeof(h));
   float *iq = (float *)(void *)(m->data + 64);
   for (int i = 0; i < BLK; i++) {
@@ -182,8 +217,18 @@ static void srv_exec(char *cmd) {
     g_atomic_int_set(&s_streaming, 0);
     srv_queue_text("iq_stop:0;");
   } else if (g_str_has_prefix(cmd, "iq_stamp:")) {
-    if (g_atomic_int_get(&s_echo_stamp)) {
-      srv_queue_text("iq_stamp:1;");           /* the family extension echo   */
+    const gint served = g_atomic_int_get(&s_served);
+    if (served >= 0) {
+      /* the family extension echo: the layout SERVED, min(request, served)
+       * — a pre-#43 server answers any non-zero request with 1; the flag
+       * flips BEFORE the echo is queued and the FIFO carries text and
+       * binary in order, exactly like the real server */
+      gint req = atoi(cmd + 9);
+      const gint l = MIN(MAX(req, 0), served);
+      g_atomic_int_set(&s_layout, l);
+      char echo[32];
+      g_snprintf(echo, sizeof(echo), "iq_stamp:%d;", l);
+      srv_queue_text(echo);
     }                                          /* else: a server that never heard of it */
   } else if (g_str_has_prefix(cmd, "spot:")) {
     g_mutex_lock(&s_lock);
@@ -279,6 +324,10 @@ static gpointer server_thread(gpointer data) {
     if (sr == 3) { srv_queue_block(1, 96000, 0, 0, 0, 0, 0); }
     if (sr == 4) { srv_queue_block(0, RATE, 7022000, 0, 0, 100, 0); }
     if (sr == 5) { srv_queue_block(0, RATE, 7023000, 0, 0, 0, 1000); }
+    /* gap fixtures (gh#38): the packet counter skips 1 / 8 blocks before
+     * the next regular block — the server emitted them, we never got them */
+    if (sr == 6) { g_atomic_int_set(&s_skip, 1); srv_queue_iq_block(); }
+    if (sr == 7) { g_atomic_int_set(&s_skip, 8); srv_queue_iq_block(); }
     if (sr) {                                  /* the MARKER right behind it  */
       g_atomic_int_set(&s_stamp_req, 0);
       srv_queue_block(0, MARK_RATE, 0, 0, 0, 0, 0);
@@ -314,12 +363,16 @@ static guint  c_ring_n[CAP_RING]; static double c_ring_hz[CAP_RING]; static guin
 static volatile gint c_rx1_blocks;      /* callbacks at the receiver-1 telltale rate */
 static volatile gint c_marks;           /* MARKER blocks delivered (rate MARK_RATE)  */
 static volatile gint c_hz_7022000, c_hz_7023000, c_hz_7021000, c_odd_frames;
+static volatile gint c_gaps;            /* callbacks that carried a gap (gh#38)      */
+static guint         c_gap_last, c_gap_total;   /* frames (c_lock)                   */
 
 static void capture_reset(void) {
   g_mutex_lock(&c_lock);
   memset(c_ring_n, 0, sizeof(c_ring_n)); memset(c_ring_hz, 0, sizeof(c_ring_hz)); c_ring_i = 0;
   c_have_block = 0; c_nframes = 0; c_rate = 0; c_center = 0;
+  c_gap_last = 0; c_gap_total = 0;
   g_mutex_unlock(&c_lock);
+  g_atomic_int_set(&c_gaps, 0);
   g_atomic_int_set(&c_blocks, 0);
   g_atomic_int_set(&c_rx1_blocks, 0);
   g_atomic_int_set(&c_marks, 0);
@@ -339,14 +392,20 @@ static void mock_reset(void) {
   g_atomic_int_set(&s_text_frames, 0);
   g_atomic_int_set(&s_push_dds, 0);
   g_atomic_int_set(&s_stamp_req, 0);
+  g_mutex_lock(&s_lock);
+  s_count = s_count_rx1 = 0;                   /* a fresh iq_start counts from 0 */
+  g_mutex_unlock(&s_lock);
+  g_atomic_int_set(&s_skip, 0);
+  g_atomic_int_set(&s_layout, g_atomic_int_get(&s_served) >= 0 ? 0 : -1);
   capture_reset();
 }
 
 static void iq_cb(const float *iq, guint nframes, double rate, double center,
-                  gpointer user) {
+                  guint gap_frames, gpointer user) {
   (void)user;
   g_mutex_lock(&c_lock);
   c_ring_n[c_ring_i % CAP_RING] = nframes; c_ring_hz[c_ring_i % CAP_RING] = center; c_ring_i++;
+  if (gap_frames) { c_gap_last = gap_frames; c_gap_total += gap_frames; }
   if (!c_have_block && nframes == BLK) {
     memcpy(c_block, iq, sizeof(c_block));
     c_have_block = 1;
@@ -362,6 +421,14 @@ static void iq_cb(const float *iq, guint nframes, double rate, double center,
   if (center == 7023000.0) { g_atomic_int_inc(&c_hz_7023000); }
   if (center == 7021000.0) { g_atomic_int_inc(&c_hz_7021000); }
   if (nframes != BLK) { g_atomic_int_inc(&c_odd_frames); }
+  if (gap_frames) { g_atomic_int_inc(&c_gaps); }
+}
+
+static guint gap_last(void) {
+  g_mutex_lock(&c_lock);
+  const guint g = c_gap_last;
+  g_mutex_unlock(&c_lock);
+  return g;
 }
 
 /* centre-stamp captures: a stamped block's own centre, and a stamped
@@ -429,7 +496,8 @@ static int cond_diag(void) {
   return log_contains("tci: server runs IQ at 96000 Hz (asked for 48000)") &&
          log_contains("tci: no IQ block 3 s after iq_start:0");
 }
-static int cond_stamp_asked(void) { return srv_rx_contains("iq_stamp:1;"); }
+static int cond_stamp_asked(void) { return srv_rx_contains("iq_stamp:2;"); }
+static int cond_layout_echoed(void) { return skim_tci_client_stamp_layout(g_client) >= 0; }
 
 /* Queue fixture `req` on the mock and wait until EVERY marker the mock has
  * queued so far (this fixture's included — earlier stamp fixtures leave
@@ -453,11 +521,14 @@ static int fixture(int req) {
 }
 
 /* The whole M1 session — handshake, IQ reassembly, centre stamps, the
- * hardening fixtures, orientation, retune, spots, stop — over ONE transport.
- * Run once over TCP and once over the Unix socket (gh#39): the WebSocket
- * layer is the same, but the dial, the Host: header and the way a failure
- * surfaces are not. */
-static void session_full(const char *server) {
+ * hardening fixtures, orientation, retune, spots, stop — over ONE transport
+ * against a mock serving header layout `served` (2 = sdr-for-linux ≥ 0.6.0,
+ * 1 = before its #43). Run over TCP and over the Unix socket (gh#39): the
+ * WebSocket layer is the same, but the dial, the Host: header and the way a
+ * failure surfaces are not; and once more against the old layout (gh#38):
+ * the cross-version pair that exists the day either side updates. */
+static void session_full(const char *server, int served) {
+  g_atomic_int_set(&s_served, served);
   mock_reset();
   SkimTciClient *c = g_client = skim_tci_client_new(server);
   skim_tci_client_set_iq_cb(c, iq_cb, NULL);
@@ -492,11 +563,21 @@ static void session_full(const char *server) {
   /* centre stamps (sdr-for-linux family extension): the client asked for
    * them, a stamped block's own centre beats the dds label, and a stamped
    * boundary splits the block into two callbacks at the stamped frame */
-  check("client asked for centre stamps (iq_stamp:1 after iq_start)", srv_rx_contains("iq_stamp:1;"));
+  check("client asked for header layout 2 (iq_stamp:2 after iq_start)", srv_rx_contains("iq_stamp:2;"));
+  char what[160];
+  g_snprintf(what, sizeof(what), "gh#38: layout getter = %d — what the server echoed, not what we asked", served);
+  check(what, wait_ms(cond_layout_echoed, 2000) && skim_tci_client_stamp_layout(c) == served);
+  g_snprintf(what, sizeof(what), "gh#38: log names the layout ('tci: IQ header layout %d — …')", served);
+  check(what, log_contains(served == 2
+            ? "tci: IQ header layout 2 — packet counter at word 8, centre stamps at words 9–11"
+            : "tci: IQ header layout 1 — legacy centre stamps at words 8–10, no packet counter"));
   g_atomic_int_set(&s_stamp_req, 1);
-  check("stamped block: the callback carries h[8] (7021000), not the dds label", wait_ms(cond_stamp_single, 3000));
+  g_snprintf(what, sizeof(what), "stamped block: the callback carries the stamped centre (7021000, word %d), not the dds label", served == 2 ? 9 : 8);
+  check(what, wait_ms(cond_stamp_single, 3000));
   g_atomic_int_set(&s_stamp_req, 2);
   check("stamped boundary at 700: two callbacks — 700 frames @ 7020000, 1348 @ 7025000", wait_ms(cond_stamp_pair, 3000));
+  check("gh#38: the contiguous stream reports no gap (counter consecutive / no counter)",
+        g_atomic_int_get(&c_gaps) == 0);
 
   /* --- TCI hardening (gh#2) --- */
   /* SKM-10: the request is THREE WebSocket text frames, not one batched
@@ -521,6 +602,30 @@ static void session_full(const char *server) {
   check("SKM-9: truncated message dropped, no desync of the next block",
         marked && g_atomic_int_get(&c_hz_7023000) == 0 &&
         g_atomic_int_get(&c_odd_frames) == 2);
+  check("gh#38: the truncated block is reported as a 2048-frame gap before the next block (both layouts)",
+        g_atomic_int_get(&c_gaps) == 1 && gap_last() == BLK &&
+        skim_tci_client_lost_blocks(c) == 1);
+  /* gh#38: packet-counter gaps — only a layout WITH the counter sees them */
+  marked = fixture(6);
+  if (served == 2) {
+    check("gh#38: counter skips 1 block → the next block carries a 2048-frame gap",
+          marked && g_atomic_int_get(&c_gaps) == 2 && gap_last() == BLK);
+    check("gh#38: the gap is logged with its numbers (1 block ≈ 43 ms at 48 kHz)",
+          log_contains("tci: IQ packet counter jumped") &&
+          log_contains("1 block ≈ 43 ms of IQ lost"));
+  } else {
+    check("gh#38: layout 1 has no counter — a skipped block goes unnoticed",
+          marked && g_atomic_int_get(&c_gaps) == 1);
+  }
+  marked = fixture(7);
+  if (served == 2) {
+    check("gh#38: counter skips 8 blocks → 16384-frame gap; 10 blocks lost this session (1 truncated + 1 + 8)",
+          marked && g_atomic_int_get(&c_gaps) == 3 && gap_last() == 8 * BLK &&
+          skim_tci_client_lost_blocks(c) == 10);
+  } else {
+    check("gh#38: layout 1 — still only the truncated block counted as lost",
+          marked && skim_tci_client_lost_blocks(c) == 1);
+  }
 
   if (have) {
     /* Correlate the ingested block against e^{±j2π·12k·t}: ingest is
@@ -645,10 +750,12 @@ int main(void) {
         g_file_test(s_unix_path, G_FILE_TEST_EXISTS));
   GThread *st = g_thread_new("mock-tci-server", server_thread, NULL);
 
-  printf("\n--- full session over TCP %s ---\n", s_tcp_addr);
-  session_full(s_tcp_addr);
-  printf("\n--- full session over the Unix socket %s ---\n", s_unix_addr);
-  session_full(s_unix_addr);
+  printf("\n--- full session over TCP %s (server layout 2) ---\n", s_tcp_addr);
+  session_full(s_tcp_addr, 2);
+  printf("\n--- full session over the Unix socket %s (server layout 2) ---\n", s_unix_addr);
+  session_full(s_unix_addr, 2);
+  printf("\n--- full session over TCP %s against a pre-#43 server (layout 1) ---\n", s_tcp_addr);
+  session_full(s_tcp_addr, 1);
 
   SkimTciClient *c;
   GError *err = NULL;
@@ -657,8 +764,8 @@ int main(void) {
   /* --- second session: a server that never echoes iq_stamp (SKM-8) --- */
   /* Thetis zeroes the reserved words, ExpertSDR3 is closed source — a
    * server putting anything there must NOT move our centre. */
-  g_atomic_int_set(&s_echo_stamp, 0);
-  capture_reset();
+  g_atomic_int_set(&s_served, -1);
+  mock_reset();
   c = g_client = skim_tci_client_new(s_tcp_addr);
   skim_tci_client_set_iq_cb(c, iq_cb, NULL);
   check("SKM-8 session: start() completes against a server without iq_stamp",
@@ -675,8 +782,11 @@ int main(void) {
   check("SKM-8: every callback of the session sits on the dds centre (7020000)",
         c_center == 7020000.0);
   g_mutex_unlock(&c_lock);
+  check("gh#38: without an echo the layout getter stays -1 and word 8 is never read — no gap",
+        skim_tci_client_stamp_layout(c) == -1 && g_atomic_int_get(&c_gaps) == 0);
   skim_tci_client_stop(c);
   skim_tci_client_free(c);
+  g_atomic_int_set(&s_served, 2);              /* back to today's server      */
 
   /* --- third session: the "connected, no output" picture (gh#2) --- */
   /* The mock answers iq_samplerate with 96000 and never starts IQ; the

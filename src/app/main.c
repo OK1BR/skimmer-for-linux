@@ -2133,11 +2133,27 @@ static void act_about(GSimpleAction *action, GVariant *param, gpointer user) {
                app->scp_auto ? "on" : "off", when,
                app->scp_note[0] ? "; this session: " : "", app->scp_note);
   }
+  /* IQ stream health (gh#38): the header layout the server serves and the
+   * holes the decoders saw — link losses, truncated blocks, overload drops. */
+  char iqs[200] = "not connected";
+  if (app->pipeline && skim_pipeline_tci_endpoint(app->pipeline)) {
+    const int l = skim_pipeline_tci_stamp_layout(app->pipeline);
+    g_snprintf(iqs, sizeof(iqs),
+               "header layout %s; %" G_GUINT64_FORMAT " gaps (%" G_GUINT64_FORMAT
+               " frames missing), %" G_GUINT64_FORMAT " blocks dropped under load",
+               l == 2 ? "2 (TCI 2.1 counter + centre stamps)"
+               : l == 1 ? "1 (legacy centre stamps, no counter)"
+               : l == 0 ? "0 (counter only)" : "none (no iq_stamp echo)",
+               skim_pipeline_gaps(app->pipeline),
+               skim_pipeline_gap_frames(app->pipeline),
+               skim_pipeline_dropped_blocks(app->pipeline));
+  }
   /* Versions and paths, pasteable into a bug report via the Copy button. */
   char *dbg = g_strdup_printf(
       "GTK %u.%u.%u, libadwaita %u.%u.%u\n"
       "TCI: %s\n"
       "TCI link: %s\n"
+      "IQ stream: %s\n"
       "Mode: %s, CW engine: %s\n"
       "Telnet feed: %s\n"
       "Settings: %s/skimmer-for-linux/settings.ini\n"
@@ -2152,6 +2168,7 @@ static void act_about(GSimpleAction *action, GVariant *param, gpointer user) {
                      : "default order — sdr-for-linux socket, then ws://127.0.0.1:40001",
       (app->pipeline && skim_pipeline_tci_endpoint(app->pipeline))
           ? skim_pipeline_tci_endpoint(app->pipeline) : "not connected",
+      iqs,
       app->dec_mode ? "RTTY" : "CW",
       app->pipeline ? skim_pipeline_cw_engine_name(app->pipeline)
                     : (app->cw_engine ? "deepcw (preferred)" : "cw-v2"),

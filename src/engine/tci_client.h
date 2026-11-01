@@ -60,11 +60,16 @@ char *skim_tci_default_socket_path(void);
 
 /* Called with each reassembled IQ block (nframes interleaved I/Q pairs) in
  * true orientation as received. center_hz is the stream centre frequency.
+ * gap_frames = IQ frames MISSING right before this block, 0 = contiguous:
+ * blocks the server counted (TCI 2.1 header word 8) that never got here,
+ * plus blocks that arrived unusable (truncated) — estimated as lost blocks ×
+ * this block's size (gh#38). The link itself (TCP or Unix) loses nothing; a
+ * gap means the server skipped emitting, so it is rare and worth a log line.
  * ⚠ Fires on the client's LWS service thread, not the GLib main loop — consumers
  * queue/marshal themselves (the engine pipeline runs headless anyway). */
 typedef void (*SkimTciIqCb)(const float *iq, guint nframes,
                             double sample_rate, double center_hz,
-                            gpointer user_data);
+                            guint gap_frames, gpointer user_data);
 
 /* Tuned frequency changed (vfo:0,0,<hz> — rx 0 channel A). LWS thread. */
 typedef void (*SkimTciVfoCb)(double vfo_hz, gpointer user_data);
@@ -115,6 +120,18 @@ double      skim_tci_client_vfo_hz(SkimTciClient *c);     /* vfo:0,0,<hz>      *
 guint       skim_tci_client_iq_rate(SkimTciClient *c);    /* echoed/announced  */
 const char *skim_tci_client_device(SkimTciClient *c);    /* device:<name>     */
 const char *skim_tci_client_protocol(SkimTciClient *c);  /* protocol:<n>,<v>  */
+
+/* IQ Stream header layout the server echoed to our iq_stamp:2 (gh#38;
+ * sdr-for-linux#43): -1 = no echo — a server without the family extension,
+ * words 8–15 are not read; 0 = TCI 2.1 packet counter at word 8, no centre
+ * stamps; 1 = legacy centre stamps at words 8–10 and NO counter (a
+ * sdr-for-linux before its #43 answers any request with 1); 2 = counter at
+ * word 8, stamps at 9–11 (sdr-for-linux ≥ 0.6.0). Valid after start(). */
+int         skim_tci_client_stamp_layout(SkimTciClient *c);
+
+/* IQ blocks the server counted that never reached the consumer this
+ * session — counter gaps plus truncated blocks. 0 without a counter. */
+guint64     skim_tci_client_lost_blocks(SkimTciClient *c);
 
 /* Send a spot back to the radio panadapter (SPOT:call,mode,freq_hz,argb,text). M5. */
 void     skim_tci_client_spot(SkimTciClient *c, const char *call, const char *mode,

@@ -125,6 +125,11 @@ const char *skim_pipeline_tci_endpoint(const SkimPipeline *p);
 gboolean skim_pipeline_start_offline(SkimPipeline *p, GError **error);
 void     skim_pipeline_feed(SkimPipeline *p, const float *iq, guint nframes,
                             double rate, double center_hz);
+/* Offline: `frames` of IQ are missing before the NEXT fed block — a recording
+ * with a hole, the gap gate. Live, the TCI client reports the same from the
+ * TCI 2.1 packet counter (gh#38): stream time advances over the hole and a
+ * hole of 250 ms or more resyncs the decoders like a TX-hold release. */
+void     skim_pipeline_feed_gap(SkimPipeline *p, guint frames);
 
 /* TX hold: TRUE while the operator's own radio
  * transmits. Live it is driven automatically from the TCI trx/tune
@@ -175,6 +180,14 @@ guint64 skim_pipeline_spots(const SkimPipeline *p);
 guint64 skim_pipeline_rbn_spots(const SkimPipeline *p);
 guint   skim_pipeline_stations(const SkimPipeline *p);
 guint64 skim_pipeline_dropped_blocks(const SkimPipeline *p);
+/* IQ gaps (gh#38): blocks that arrived behind a hole, and the frames the
+ * holes added up to — packet-counter losses, truncated blocks and our own
+ * overload drops alike. Totals over the process lifetime. */
+guint64 skim_pipeline_gaps(const SkimPipeline *p);
+guint64 skim_pipeline_gap_frames(const SkimPipeline *p);
+/* The IQ header layout the server echoed (skim_tci_client_stamp_layout);
+ * -2 offline or before start. */
+int     skim_pipeline_tci_stamp_layout(const SkimPipeline *p);
 
 G_END_DECLS
 

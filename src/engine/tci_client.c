@@ -11,9 +11,10 @@
  * parsed once, trailing bytes are ignored and a short message is dropped
  * with a warning (SKM-9; the old byte-stream cut read any padding as the
  * next header). Blocks of other receivers are dropped (SKM-7: Thetis'
- * AlwaysStreamIQ pushes every receiver to every client) and the centre
- * stamps in the reserved words count only after the server echoed
- * iq_stamp:1 (SKM-8: the spec promises nothing about those words).
+ * AlwaysStreamIQ pushes every receiver to every client) and header words
+ * 8–11 are read only in the LAYOUT the server echoed to iq_stamp (SKM-8:
+ * the spec promised nothing about those words; TCI 2.1 made word 8 the
+ * stream's packet counter — gh#38, see start() and handle_block()).
  *
  * Wire orientation: the wire already carries the TRUE spectrum — the server
  * conjugates its RF-inverted raw DDC feed on send (the ExpertSDR convention
@@ -91,10 +92,18 @@ struct _SkimTciClient {
    * service thread, and so does the no-IQ watchdog). */
   GString    *txt;            /* text command accumulator                    */
   GByteArray *bin;            /* the binary message being reassembled        */
-  gboolean    stamp_ok;       /* server echoed iq_stamp:1 — h[8..10] valid   */
+  int         stamp_layout;   /* iq_stamp echo (gh#38): -1 none, 0 counter at
+                               * word 8 only, 1 legacy stamps at 8–10 and no
+                               * counter, 2 counter at 8 + stamps at 9–11   */
+  gboolean    count_have;     /* count_last holds the previous block's word 8 */
+  guint32     count_last;
+  guint       gap_pending;    /* frames lost before the next delivered block */
+  guint64     lost_blocks;    /* counted by the server, never decoded (lock) */
+  gint64      gap_log_us;     /* last counter-gap line (rate limit)          */
+  guint       gaps_unlogged;  /* gaps since that line                        */
   guint       blocks;         /* IQ blocks delivered this session            */
   gboolean    warned_fmt, warned_rx, warned_short, warned_pad, warned_bogus,
-              warned_noiq, warned_rate;
+              warned_noiq, warned_rate, warned_count;
   lws_sorted_usec_list_t noiq_sul; /* wakes the service loop 3 s after iq_start
                                     * left — lws_service() sleeps until an event,
                                     * so a polling check alone came ~5 s late */
@@ -187,6 +196,8 @@ static void handle_command(SkimTciClient *c, char *cmd) {
   SkimTciTxCb  tx_cb = NULL;
   gpointer     tx_user = NULL;
   gboolean     tx_val = FALSE;
+  gboolean     layout_log = FALSE;
+  long         layout_v = 0;
 
   g_mutex_lock(&c->lock);
   if (strcmp(cmd, "ready") == 0) {
@@ -231,9 +242,20 @@ static void handle_command(SkimTciClient *c, char *cmd) {
       }
     }
   } else if (strcmp(cmd, "iq_stamp") == 0 && args) {
-    /* sdr-for-linux's echo of our family extension — only now do the
-     * reserved header words mean anything (SKM-8). */
-    c->stamp_ok = strtol(args, NULL, 10) == 1;
+    /* sdr-for-linux's echo of our family extension: the LAYOUT of header
+     * words 8–11 the server SERVES (gh#38; sdr-for-linux#43) — only now do
+     * those words mean anything (SKM-8). We ask for 2; a server before its
+     * #43 answers any non-zero request with 1 (the legacy image this client
+     * read before #38), one that knows 2 answers 2. Above 2 is a layout this
+     * client does not know: read none of the words. Word 8 changes meaning
+     * with the layout, so the packet counter re-anchors on the next block. */
+    layout_v = strtol(args, NULL, 10);
+    const int layout = (layout_v >= 0 && layout_v <= 2) ? (int)layout_v : -1;
+    if (layout != c->stamp_layout) {
+      c->stamp_layout = layout;
+      c->count_have = FALSE;
+      layout_log = TRUE;
+    }
   } else if ((strcmp(cmd, "trx") == 0 || strcmp(cmd, "tune") == 0) && args) {
     /* trx:<rx>,<bool> / tune:<rx>,<bool> — rx 0. sdr-for-linux ≥ cc470af
      * reports the REAL keyed state (CW/RTTY text keying included); tune is
@@ -254,6 +276,21 @@ static void handle_command(SkimTciClient *c, char *cmd) {
   }
   g_mutex_unlock(&c->lock);
 
+  if (layout_log) {
+    /* The line a live log shows next to "IQ stream up". */
+    static const char *const what[] = {
+      "packet counter at word 8, no centre stamps",
+      "legacy centre stamps at words 8–10, no packet counter "
+      "(sdr-for-linux before its #43)",
+      "packet counter at word 8, centre stamps at words 9–11 (TCI 2.1)",
+    };
+    if (layout_v >= 0 && layout_v <= 2) {
+      g_message("tci: IQ header layout %ld — %s", layout_v, what[layout_v]);
+    } else {
+      g_message("tci: server echoed iq_stamp:%ld — a header layout this client "
+                "does not know; words 8–15 ignored", layout_v);
+    }
+  }
   if (vfo_cb) { vfo_cb(vfo_hz, vfo_user); }
   if (tx_cb) { tx_cb(tx_val, tx_user); }
 }
@@ -272,6 +309,50 @@ static void drain_text(SkimTciClient *c) {
 }
 
 /* ---- incoming binary (Stream blocks) ---------------------------------------- */
+
+/* Frames pending as the next block's gap — a long outage must not wrap. */
+static guint sat_add(guint a, guint64 b) {
+  const guint64 s = (guint64)a + b;
+  return s > G_MAXUINT ? G_MAXUINT : (guint)s;
+}
+
+static const char *layout_note(int layout) {
+  switch (layout) {
+  case 0:  return ", packet counter on";
+  case 1:  return ", centre stamps on (legacy layout 1)";
+  case 2:  return ", centre stamps + packet counter on (layout 2)";
+  default: return "";
+  }
+}
+
+/* The packet counter skipped `lost` blocks before the block carrying `to`
+ * (gh#38): their frames ride on the next delivered block as its gap, and
+ * every gap is logged — at most one line per second, carrying the tally, so
+ * a server that skips on every block cannot flood the log. LWS thread. */
+#define GAP_LOG_EVERY_US (1 * G_TIME_SPAN_SECOND)
+static void count_gap(SkimTciClient *c, guint32 from, guint32 to, guint32 lost,
+                      guint nframes, guint32 rate) {
+  c->gap_pending = sat_add(c->gap_pending, (guint64)lost * nframes);
+  g_mutex_lock(&c->lock);
+  c->lost_blocks += lost;
+  const guint64 total = c->lost_blocks;
+  g_mutex_unlock(&c->lock);
+  c->gaps_unlogged++;
+  const gint64 now = g_get_monotonic_time();
+  if (c->gap_log_us && now - c->gap_log_us < GAP_LOG_EVERY_US) { return; }
+  const double ms = rate ? 1000.0 * (double)lost * nframes / rate : 0.0;
+  char more[48] = "";
+  if (c->gaps_unlogged > 1) {
+    g_snprintf(more, sizeof(more), ", %u gaps since the last line",
+               c->gaps_unlogged);
+  }
+  g_message("tci: IQ packet counter jumped %u → %u — %u block%s ≈ %.0f ms of IQ "
+            "lost%s (%" G_GUINT64_FORMAT " block%s lost this session)",
+            from, to, lost, lost == 1 ? "" : "s", ms, more,
+            total, total == 1 ? "" : "s");
+  c->gaps_unlogged = 0;
+  c->gap_log_us = now;
+}
 
 /* One complete binary WebSocket message = one Stream block (TCI spec 3.4).
  * Called once the last fragment is in; c->bin holds the whole message. */
@@ -296,21 +377,6 @@ static void handle_block(SkimTciClient *c) {
     }
     return;
   }
-  if (len < need) {
-    if (!c->warned_short) {
-      c->warned_short = TRUE;
-      g_warning("tci: Stream block truncated — header says %u samples (%" G_GSIZE_FORMAT
-                " bytes), message carries %" G_GSIZE_FORMAT ", dropped", samples, need, len);
-    }
-    return;
-  }
-  if (len > need && !c->warned_pad) {
-    /* Padding (the spec's fixed data[16384]?) or a server concatenating
-     * blocks — either way the one line in the log says which. */
-    c->warned_pad = TRUE;
-    g_message("tci: binary message carries %" G_GSIZE_FORMAT " bytes past the Stream "
-              "block (%u samples) — trailing bytes ignored", len - need, samples);
-  }
   if (h[0] != 0) {
     /* We asked for iq_start:0 only; a server may push other receivers too
      * (Thetis AlwaysStreamIQ, a two-receiver SunSDR). RX1 samples through
@@ -330,13 +396,62 @@ static void handle_block(SkimTciClient *c) {
     return;
   }
   const guint nframes = samples / 2;
+  const int   layout  = c->stamp_layout;    /* written on this thread too  */
+  /* TCI 2.1 word 8 = the stream's packet counter (gh#38) — read only under
+   * a layout the server echoed as carrying it (0 or 2): under 1 the word is
+   * a frequency, and with no echo a pre-2.1 server leaves it zero (or
+   * anything: the spec called it reserved). The first counted block anchors
+   * the sequence — ExpertSDR's start value is unknown, so consecutiveness
+   * is the test, not the value. A jump forward = blocks the server emitted
+   * that never got here (the link itself, TCP or Unix, loses nothing — the
+   * server skipped them); their frames ride on the next delivered block as
+   * its gap. Standing still or running backwards = a server restart (or a
+   * server that does not really count): re-anchor, say so once. */
+  if (layout == 0 || layout == 2) {
+    const guint32 cnt = h[8];
+    if (c->count_have) {
+      const guint32 d = cnt - c->count_last;              /* wrap-safe      */
+      if (d > 1 && d < 0x80000000u) {
+        count_gap(c, c->count_last, cnt, d - 1, nframes, h[1]);
+      } else if (d != 1 && !c->warned_count) {
+        c->warned_count = TRUE;
+        g_message("tci: IQ packet counter went %u → %u — sequence re-anchored",
+                  c->count_last, cnt);
+      }
+    }
+    c->count_last = cnt;
+    c->count_have = TRUE;
+  }
+  if (len < need) {
+    /* The header arrived (and advanced the sequence above), the samples did
+     * not — to the decoders this block is as lost as a counted-out one. */
+    if (!c->warned_short) {
+      c->warned_short = TRUE;
+      g_warning("tci: Stream block truncated — header says %u samples (%" G_GSIZE_FORMAT
+                " bytes), message carries %" G_GSIZE_FORMAT ", dropped", samples, need, len);
+    }
+    c->gap_pending = sat_add(c->gap_pending, nframes);
+    g_mutex_lock(&c->lock);
+    c->lost_blocks++;
+    g_mutex_unlock(&c->lock);
+    return;
+  }
+  if (len > need && !c->warned_pad) {
+    /* Padding (the spec's fixed data[16384]?) or a server concatenating
+     * blocks — either way the one line in the log says which. */
+    c->warned_pad = TRUE;
+    g_message("tci: binary message carries %" G_GSIZE_FORMAT " bytes past the Stream "
+              "block (%u samples) — trailing bytes ignored", len - need, samples);
+  }
   if (c->blocks++ == 0) {
     /* The line a remote tester's log needs (gh#2 question 1). */
     g_message("tci: IQ stream up — receiver %u, %u Hz, float32, %u channels, "
-              "%u frames/block%s", h[0], h[1], h[7], nframes,
-              c->stamp_ok ? ", centre stamps on" : "");
+              "%u frames/block%s", h[0], h[1], h[7], nframes, layout_note(layout));
   }
-  if (!c->iq_cb) { return; }
+  if (!c->iq_cb) {
+    c->gap_pending = 0;
+    return;
+  }
   float *iq = (float *)(void *)(c->bin->data + STREAM_HDR_BYTES);
   /* The wire is already TRUE spectrum orientation — sdr-for-linux
    * conjugates its RF-inverted raw DDC feed on send (the ExpertSDR
@@ -346,21 +461,24 @@ static void handle_block(SkimTciClient *c) {
   g_mutex_lock(&c->lock);
   double center = c->center_hz;
   g_mutex_unlock(&c->lock);
-  /* centre stamps (iq_stamp:1, see start()) — ONLY after the server echoed
-   * the command; the spec calls h[8..15] "reserved", not "zero". The
-   * block's own centre beats the label; a retune inside the block splits
-   * it at the stamped frame so both halves carry the centre of their
-   * samples. */
-  if (c->stamp_ok) {
-    const guint32 st_hz0 = h[8], st_off = h[9], st_hz1 = h[10];
-    if (st_hz0 != 0) { center = (double)st_hz0; }
-    if (st_hz0 != 0 && st_hz1 != 0 && st_off != 0 && st_off < nframes) {
-      c->iq_cb(iq, st_off, (double)h[1], center, c->iq_cb_data);
-      c->iq_cb(iq + 2 * st_off, nframes - st_off, (double)h[1], (double)st_hz1, c->iq_cb_data);
-      return;
-    }
+  const guint gap = c->gap_pending;         /* frames missing before THIS block */
+  c->gap_pending = 0;
+  /* centre stamps (iq_stamp, see start()) — in the layout the server
+   * echoed: 1 = words 8–10 (legacy), 2 = words 9–11 (TCI 2.1), none
+   * otherwise (the spec calls h[8..15] "reserved", not "zero"). The block's
+   * own centre beats the label; a retune inside the block splits it at the
+   * stamped frame so both halves carry the centre of their samples. */
+  guint32 st_hz0 = 0, st_off = 0, st_hz1 = 0;
+  if (layout == 1)      { st_hz0 = h[8]; st_off = h[9];  st_hz1 = h[10]; }
+  else if (layout == 2) { st_hz0 = h[9]; st_off = h[10]; st_hz1 = h[11]; }
+  if (st_hz0 != 0) { center = (double)st_hz0; }
+  if (st_hz0 != 0 && st_hz1 != 0 && st_off != 0 && st_off < nframes) {
+    c->iq_cb(iq, st_off, (double)h[1], center, gap, c->iq_cb_data);
+    c->iq_cb(iq + 2 * st_off, nframes - st_off, (double)h[1], (double)st_hz1,
+             0, c->iq_cb_data);
+    return;
   }
-  c->iq_cb(iq, nframes, (double)h[1], center, c->iq_cb_data);
+  c->iq_cb(iq, nframes, (double)h[1], center, gap, c->iq_cb_data);
 }
 
 /* No IQ within a few seconds of iq_start:0 — the "connected, no output"
@@ -504,6 +622,7 @@ SkimTciClient *skim_tci_client_new_order(const char *const *servers) {
   g_queue_init(&c->out);
   c->txt = g_string_new(NULL);
   c->bin = g_byte_array_new();
+  c->stamp_layout = -1;            /* no echo yet — words 8–15 not read */
   return c;
 }
 
@@ -585,10 +704,16 @@ static void teardown(SkimTciClient *c) {
   c->iq_start_us = 0;
   g_string_set_size(c->txt, 0);
   g_byte_array_set_size(c->bin, 0);
-  c->stamp_ok = FALSE;
+  c->stamp_layout = -1;
+  c->count_have = FALSE;
+  c->count_last = 0;
+  c->gap_pending = 0;
+  c->lost_blocks = 0;
+  c->gap_log_us = 0;
+  c->gaps_unlogged = 0;
   c->blocks = 0;
   c->warned_fmt = c->warned_rx = c->warned_short = c->warned_pad =
-      c->warned_bogus = c->warned_noiq = c->warned_rate = FALSE;
+      c->warned_bogus = c->warned_noiq = c->warned_rate = c->warned_count = FALSE;
   g_clear_pointer(&c->dial, g_free);
 }
 
@@ -715,11 +840,15 @@ gboolean skim_tci_client_start(SkimTciClient *c, guint iq_samplerate, GError **e
 
   /* iq_samplerate is device-global radio state — request ours (the SDC lesson:
    * say it explicitly or inherit whatever the device last used), then start. */
-  /* iq_stamp:1 = sdr-for-linux's family extension: every IQ block carries
-   * the DDC centre of its first frame (h[8]) and, when the radio retuned
-   * inside the block, the frame offset (h[9]) + the new centre (h[10]).
-   * Other servers ignore the command and leave the words zero — then the
-   * dds label at block arrival is used, as before (±1 block of jitter). */
+  /* iq_stamp:2 = sdr-for-linux's family extension, layout 2 (gh#38): every
+   * IQ block carries the TCI 2.1 packet counter in word 8, the DDC centre
+   * of its first frame in word 9 and, when the radio retuned inside the
+   * block, the frame offset (10) + the new centre (11). The server echoes
+   * the layout it SERVES — a server before sdr-for-linux#43 answers 1 and
+   * keeps the stamps at 8–10 with no counter; handle_block reads whatever
+   * the echo promised. Other servers ignore the command and leave the words
+   * zero — then the dds label at block arrival is used, as before (±1
+   * block of jitter), and no counter is read. */
   /* One command per text frame (SKM-10): the spec does not say a frame may
    * carry several, and a server reading only the first would lose iq_start
    * — "connected, no IQ" with nothing in the log. iq_stamp goes last so its
@@ -732,7 +861,7 @@ gboolean skim_tci_client_start(SkimTciClient *c, guint iq_samplerate, GError **e
     cli_queue(c, g_strdup_printf("iq_samplerate:%u;", iq_samplerate));
   }
   cli_queue(c, g_strdup("iq_start:0;"));
-  cli_queue(c, g_strdup("iq_stamp:1;"));
+  cli_queue(c, g_strdup("iq_stamp:2;"));
   c->started = TRUE;
   return TRUE;
 }
@@ -828,4 +957,18 @@ const char *skim_tci_client_device(SkimTciClient *c) {
 
 const char *skim_tci_client_protocol(SkimTciClient *c) {
   return c->protocol;
+}
+
+int skim_tci_client_stamp_layout(SkimTciClient *c) {
+  g_mutex_lock(&c->lock);
+  const int l = c->stamp_layout;
+  g_mutex_unlock(&c->lock);
+  return l;
+}
+
+guint64 skim_tci_client_lost_blocks(SkimTciClient *c) {
+  g_mutex_lock(&c->lock);
+  const guint64 n = c->lost_blocks;
+  g_mutex_unlock(&c->lock);
+  return n;
 }

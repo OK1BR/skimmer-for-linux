@@ -51,8 +51,8 @@ static guint         p_fft_fill;            /* frames captured into p_fft_buf  *
 static FILE         *p_dump;                /* raw IQ dump (set before start)  */
 
 static void iq_cb(const float *iq, guint nframes, double rate, double center,
-                  gpointer user) {
-  (void)center; (void)user;
+                  guint gap_frames, gpointer user) {
+  (void)center; (void)gap_frames; (void)user;   /* losses: the client's tally below */
   gint64 now = g_get_monotonic_time();
   if (p_dump) { fwrite(iq, 2 * sizeof(float), nframes, p_dump); }
   g_mutex_lock(&p_lock);
@@ -175,6 +175,8 @@ int main(int argc, char **argv) {
   printf("\n");
   double center  = skim_tci_client_center_hz(c);
   guint  granted = skim_tci_client_iq_rate(c);   /* echoed by now (or default) */
+  const int     layout = skim_tci_client_stamp_layout(c);  /* before stop() resets */
+  const guint64 lost   = skim_tci_client_lost_blocks(c);
   skim_tci_client_stop(c);
 
   g_mutex_lock(&p_lock);
@@ -208,6 +210,12 @@ int main(int argc, char **argv) {
          eff, dev, fabs(dev) < 2.0 ? "ok" : "OUT OF TOLERANCE");
   printf("  RMS %.1f dBFS, peak %.3f, DC offset I %+.5f Q %+.5f\n",
          rms > 0 ? 20.0 * log10(rms) : -999.0, peak, dc_i, dc_q);
+  printf("  header layout %d (%s), %" G_GUINT64_FORMAT " block%s lost on the link\n",
+         layout,
+         layout == 2 ? "TCI 2.1 counter at word 8, stamps at 9–11"
+         : layout == 1 ? "legacy stamps at 8–10, no counter"
+         : layout == 0 ? "counter only" : "no iq_stamp echo — words 8–15 not read",
+         lost, lost == 1 ? "" : "s");
 
   if (p_dump) {
     fclose(p_dump);

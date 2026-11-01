@@ -86,6 +86,14 @@ sitting there as "open", and nobody could see what was really left.
   feed, *not* to RF. A client-side conjugate mirrors every frequency around the
   DDC centre — live-caught 2026-07-15 (spots landed out of band).
 - `iq_samplerate` is device-global radio state, announced in the init block.
+- `iq_stamp:N` picks the IQ Stream header layout and the server echoes the
+  layout it SERVES (sdr-for-linux#43 / #38): 1 = legacy centre stamps at
+  words 8–10 and no counter (a server before #43 answers any non-zero
+  request with 1); 2 = the TCI 2.1 packet counter at word 8 + stamps at
+  9–11 (sdr-for-linux ≥ 0.6.0); 0 = counter only. The client asks for 2 and
+  reads only what the echo promised — no echo, none of the words. A counter
+  jump means the server skipped blocks; TCP and the Unix socket lose none
+  themselves, so a gap in a live log points at the server, not the link.
 - Spots back: `SPOT:call,mode,freq,ARGB,text;` / `SPOT_DELETE:call` /
   `SPOT_CLEAR`. A click on the radio issues `rx_clicked_on_spot:0,0,call,hz`.
 

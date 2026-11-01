@@ -34,6 +34,30 @@
 #define CENTER   7020000.0
 #define BLK      2048
 
+/* log capture (gh#38 gap section): the engine's g_message lines, read back
+ * through a structured-log writer (default output kept) */
+static GMutex   l_lock;
+static GString *l_log;
+static GLogWriterOutput log_tap(GLogLevelFlags lvl, const GLogField *f, gsize n, gpointer u) {
+  (void)u;
+  for (gsize i = 0; i < n; i++) {
+    if (strcmp(f[i].key, "MESSAGE") == 0) {
+      g_mutex_lock(&l_lock);
+      if (f[i].length < 0) { g_string_append(l_log, (const char *)f[i].value); }
+      else { g_string_append_len(l_log, (const char *)f[i].value, f[i].length); }
+      g_string_append_c(l_log, '\n');
+      g_mutex_unlock(&l_lock);
+    }
+  }
+  return g_log_writer_default(lvl, f, n, u);
+}
+static int log_contains(const char *needle) {
+  g_mutex_lock(&l_lock);
+  const int hit = strstr(l_log->str, needle) != NULL;
+  g_mutex_unlock(&l_lock);
+  return hit;
+}
+
 static int fails, checks;
 static void check(const char *what, int ok) {
   checks++;
@@ -338,6 +362,8 @@ static gint64 u_now(gpointer user) {
 
 int main(void) {
   printf("=== spot/station/pipeline gate (offline) ===\n");
+  l_log = g_string_new(NULL);
+  g_log_set_writer_func(log_tap, NULL, NULL);
 
   /* -- station table units --------------------------------------------------- */
   {
@@ -508,6 +534,40 @@ int main(void) {
           skim_spot_out_emit(so, "OK1BR", "CW", 7032063, 25, 20) &&
               u_hz[u_spots - 1] == 7032063.0);
     skim_spot_out_free(so);
+  }
+
+  /* -- IQ gaps (gh#38): the hole before a block ------------------------------- */
+  /* Live, the TCI client reports frames missing before a block (a jump of
+   * the TCI 2.1 packet counter, a truncated block, our own overload drop);
+   * offline the feeder says so with skim_pipeline_feed_gap. Stream time must
+   * advance over the hole (TTLs tick with the radio's clock), and a hole of
+   * 250 ms or more resyncs the decoders like a TX-hold release — the log
+   * line says so; a shorter one is counted, not acted on. */
+  {
+    SkimPipelineConfig gcfg = { .chan_bw_hz = 125.0 };
+    SkimPipeline *gp = skim_pipeline_new(&gcfg);
+    GError *gerr = NULL;
+    check("gap: offline pipeline starts", skim_pipeline_start_offline(gp, &gerr));
+    if (gerr) { printf("       (%s)\n", gerr->message); g_clear_error(&gerr); }
+    float *z = g_new0(float, 2 * BLK);
+    skim_pipeline_feed(gp, z, BLK, RATE, CENTER);
+    skim_pipeline_feed(gp, z, BLK, RATE, CENTER);
+    const guint64 f0 = skim_pipeline_frames(gp);
+    skim_pipeline_feed_gap(gp, BLK);             /* 2048 frames = 43 ms: below */
+    skim_pipeline_feed(gp, z, BLK, RATE, CENTER);
+    check("gap: a 43 ms hole is counted and stream time advances over it (frames += hole + block)",
+          skim_pipeline_gaps(gp) == 1 && skim_pipeline_gap_frames(gp) == BLK &&
+          skim_pipeline_frames(gp) == f0 + 2 * BLK);
+    check("gap: below 250 ms the decoders are left alone (no resync line)",
+          !log_contains("decoders resynced"));
+    skim_pipeline_feed_gap(gp, 6 * BLK);         /* 12288 frames = 256 ms: above */
+    skim_pipeline_feed(gp, z, BLK, RATE, CENTER);
+    check("gap: a 256 ms hole resyncs the decoders — 'pipeline: IQ gap of 12288 frames (256 ms) … decoders resynced'",
+          skim_pipeline_gaps(gp) == 2 && skim_pipeline_gap_frames(gp) == 7 * BLK &&
+          log_contains("pipeline: IQ gap of 12288 frames (256 ms) before this block — decoders resynced"));
+    g_free(z);
+    skim_pipeline_stop(gp);
+    skim_pipeline_free(gp);
   }
 
   /* -- full pipeline over a real WebSocket --------------------------------------- */
