@@ -10,7 +10,8 @@
  *       (C6AGU yes, "5NN" no)
  *   V4  digit-first prefix 2..9 + letter (+letter: 3DA) + area + suffix
  * Suffix: 1–4 chars ending in a letter. Portable designators are split on
- * '/' and either side may be the call (OK1BR/P, F/OK1BR).
+ * '/' and either side may be the call (OK1BR/P, F/OK1BR); the short side is
+ * letters and digits only, like the call itself.
  *
  * Extraction: tokenised stream with CW context — a token after DE gets the
  * strongest marker, tokens shortly after CQ get a weaker one, repetitions
@@ -120,6 +121,18 @@ static gboolean core_valid(const char *s) {
   return FALSE;
 }
 
+/* The short side of a '/' call: a designator (P, MM, QRP, 4) or a bare DXCC
+ * prefix (F, EA8) — 1–3 bytes, letters and digits only. */
+static gboolean side_ok(const char *s, gsize n) {
+  if (n < 1 || n > 3)
+    return FALSE;
+  for (gsize i = 0; i < n; i++) {
+    if (!is_letter(s[i]) && !is_digit(s[i]))
+      return FALSE;
+  }
+  return TRUE;
+}
+
 gboolean skim_callsign_is_valid(const char *s) {
   if (!s || !s[0])
     return FALSE;
@@ -129,16 +142,19 @@ gboolean skim_callsign_is_valid(const char *s) {
   if (strchr(slash + 1, '/'))
     return FALSE;                              /* at most one designator     */
   /* Either side may be the call: OK1BR/P, OK1BR/4, F/OK1BR. The other side
-   * must be short (a designator or a bare DXCC prefix). */
+   * must be short (a designator or a bare DXCC prefix) and, like the call,
+   * letters and digits only: the over-break mark the CW decoders write
+   * (U+00B7, two bytes) glues onto a designator as readily as onto any
+   * token, and a length check alone let PA3BUL/D· out as a valid call. */
   gsize left = (gsize)(slash - s), right = strlen(slash + 1);
   char core[16];
-  if (left < sizeof(core) && right >= 1 && right <= 3) {
+  if (left < sizeof(core) && side_ok(slash + 1, right)) {
     memcpy(core, s, left);
     core[left] = '\0';
     if (core_valid(core))
       return TRUE;
   }
-  if (right < sizeof(core) && left >= 1 && left <= 3) {
+  if (right < sizeof(core) && side_ok(s, left)) {
     if (core_valid(slash + 1))
       return TRUE;
   }

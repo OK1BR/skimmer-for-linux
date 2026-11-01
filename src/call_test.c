@@ -55,6 +55,7 @@ int main(void) {
     "B1HQ", "9A1AA", "2E0ABC", "3DA0RS", "E73ABC", "T77XX", "C6AGU",
     "VK6ABC", "ZL4AA", "5B4AH", "9V1AB", "OK1BR/P", "OK1BR/4", "F/OK1BR",
     "HB9CV", "OL2025X", "SP9XYZ", "PY2ABC",
+    "OK1BR/QRP", "OK1BR/MM", "EA8/OK1BR",   /* 3-letter designator, prefix */
   };
   int good_ok = 0;
   for (guint i = 0; i < G_N_ELEMENTS(GOOD); i++) {
@@ -64,7 +65,7 @@ int main(void) {
       printf("       rejected valid: %s\n", GOOD[i]);
     }
   }
-  check("accepts real callsigns incl. rare prefixes (26/26)",
+  check("accepts real callsigns incl. rare prefixes (29/29)",
         good_ok == (int)G_N_ELEMENTS(GOOD));
 
   /* -- validity: must reject ------------------------------------------------- */
@@ -78,6 +79,9 @@ int main(void) {
     "0K1BR", "OK1BR2",           /* zero-first, suffix ends in a digit       */
     "OK1BRXYZQ",                 /* too long                                 */
     "OK1BR/P/M",                 /* two designators                          */
+    "PA3BUL/D·", "OK1BR/·",      /* glued over-break mark after '/' (#25)    */
+    "PA3BUL/#",                  /* any non-alnum byte after '/'             */
+    "OK1BR/", "/OK1BR",          /* empty side                               */
   };
   int bad_ok = 0;
   for (guint i = 0; i < G_N_ELEMENTS(BAD); i++) {
@@ -87,7 +91,7 @@ int main(void) {
       printf("       accepted garbage: %s\n", BAD[i]);
     }
   }
-  check("rejects garbage and decode-error shapes (18/18)",
+  check("rejects garbage and decode-error shapes (23/23)",
         bad_ok == (int)G_N_ELEMENTS(BAD));
 
   /* -- labelled corpus: realistic decoder lines ------------------------------ */
@@ -107,6 +111,7 @@ int main(void) {
     { "VVV VVV VVV",                         NULL     },  /* tune-up         */
     { "OK1XX",                               NULL     },  /* lone, no ctx    */
     { "CQ TEST DE OK1BR/P OK1BR/P",          "OK1BR/P"},  /* portable        */
+    { "CQ DE PA3BUL/D· PA3BUL/D· K",         NULL     },  /* glued mark #25  */
   };
   int tp = 0, fp = 0, fn = 0;
   for (guint i = 0; i < G_N_ELEMENTS(CORPUS); i++) {
