@@ -14,7 +14,10 @@
  * The telnet sink must capture exactly the two CALLING stations at the right
  * kHz, ONCE each (dedup across two passes of the band), and never IK2ABC:
  * S&P answers do not own the frequency, so they stay off the network even
- * though the station tracker lists them.
+ * though the station tracker lists them. The same band tuned 30 kHz lower
+ * puts OK1BR on 7002.0 kHz and DL1ABC on 6982.5, below 40 m: the tracker
+ * must still list DL1ABC (the panadapter shows what it hears), the feed
+ * must never send it.
  *
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
@@ -275,6 +278,37 @@ int main(void) {
     }
   }
 
+  /* -- the amateur bands: the feed refuses a frequency outside them ------------- */
+  {
+    static const struct { double hz; gboolean in; const char *what; } EDGES[] = {
+      {   135699.0, FALSE, "below 2200 m"          },
+      {   135700.0, TRUE,  "2200 m lower edge"     },
+      {   137800.0, TRUE,  "2200 m upper edge"     },
+      {   137801.0, FALSE, "above 2200 m"          },
+      {  5249999.0, FALSE, "below 60 m"            },
+      {  5332000.0, TRUE,  "60 m US channel"       },
+      {  6999999.0, FALSE, "below 40 m"            },
+      {  7000000.0, TRUE,  "40 m lower edge"       },
+      {  7300000.0, TRUE,  "40 m upper edge"       },
+      {  7300001.0, FALSE, "above 40 m"            },
+      { 10099000.0, FALSE, "between 40 m and 30 m" },
+      { 54000000.0, TRUE,  "6 m upper edge"        },
+      { 54000001.0, FALSE, "above 6 m"             },
+      {        0.0, FALSE, "zero"                  },
+    };
+    int ok = 0;
+    for (guint i = 0; i < G_N_ELEMENTS(EDGES); i++) {
+      if (skim_pipeline_in_ham_band(EDGES[i].hz) == EDGES[i].in) {
+        ok++;
+      } else {
+        printf("       band table wrong at %.0f Hz (%s)\n", EDGES[i].hz,
+               EDGES[i].what);
+      }
+    }
+    check("amateur bands: both edges of 2200 m, 40 m, 6 m and the 60 m span (14/14)",
+          ok == (int)G_N_ELEMENTS(EDGES));
+  }
+
   /* -- feed units: handshake, line format, broadcast ----------------------------- */
   {
     GError *err = NULL;
@@ -416,8 +450,59 @@ int main(void) {
     cap_free(a);
     skim_rbn_feed_free(f);
     g_string_free(c_stations, TRUE);
-    g_free(g_band);
   }
+
+  /* -- the same band 30 kHz lower: a station below the band edge stays off ------- */
+  {
+    GError *err = NULL;
+    SkimRbnFeed *f = skim_rbn_feed_new("OK1BR", 0, &err);
+    Cap *a = cap_new(skim_rbn_feed_port(f));
+    cap_wait(a, "Please enter your call:", 3000);
+    cap_send(a, "AGGR\r\n");
+    cap_wait(a, "Hello AGGR", 3000);
+
+    c_stations = g_string_new(NULL);
+    SkimPipelineConfig cfg = {
+      .chan_bw_hz = 125.0,
+      .rbn        = f,
+    };
+    SkimPipeline *p = skim_pipeline_new(&cfg);
+    skim_pipeline_set_station_cb(p, on_station, NULL);
+    check("offline pipeline starts (band edge)",
+          skim_pipeline_start_offline(p, &err));
+    /* OK1BR lands on 7002.0 kHz, DL1ABC on 6982.5: the receiver hears it,
+     * the tracker lists it, the feed must not send it. */
+    for (int pass = 0; pass < 2; pass++) {
+      for (guint off = 0; off + BLK <= g_band_frames; off += BLK) {
+        skim_pipeline_feed(p, g_band + 2 * (gsize)off, BLK, RATE,
+                           CENTER - 30000.0);
+      }
+    }
+    for (int t = 0; t < 10000 && cap_count(a, "OK1BR") == 0; t += 50) {
+      g_usleep(50 * 1000);                       /* broadcast is async       */
+    }
+    g_usleep(500 * 1000);                        /* a DL1ABC line would lag  */
+    char *la = cap_line(a, "OK1BR");
+    printf("       %s\n", la ? la : "(none)");
+    check("band edge: OK1BR at 7002.0 kHz goes out",
+          la && strstr(la, "7002.0") != NULL);
+    g_free(la);
+    g_mutex_lock(&c_lock);
+    gboolean tracked = strstr(c_stations->str, "DL1ABC") != NULL;
+    g_mutex_unlock(&c_lock);
+    check("band edge: DL1ABC at 6982.5 kHz is tracked (the panadapter shows it)",
+          tracked);
+    check("…but never reaches the feed (below 7000 kHz)",
+          cap_count(a, "DL1ABC") == 0);
+    check("pipeline RBN counter matches (1)", skim_pipeline_rbn_spots(p) == 1);
+
+    skim_pipeline_stop(p);
+    skim_pipeline_free(p);
+    cap_free(a);
+    skim_rbn_feed_free(f);
+    g_string_free(c_stations, TRUE);
+  }
+  g_free(g_band);
 
   printf("\n=== %d checks, %d failures ===\n%s\n", checks, fails,
          fails ? "FAIL" : "PASS — validated CQ spots flow to the RBN sink, "

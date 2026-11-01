@@ -164,6 +164,11 @@ void   skim_pipeline_set_spot_cq_only(SkimPipeline *p, gboolean cq_only);
  * 0/1 = exact. Applies live. */
 void   skim_pipeline_set_spot_round_hz(SkimPipeline *p, guint hz);
 
+/* Is this frequency inside an amateur band (2200 m to 6 m, the widest
+ * allocation any region has, edges inclusive)? The RBN feed refuses every
+ * record outside; the panadapter is not asked. Pure, thread-safe. */
+gboolean skim_pipeline_in_ham_band(double hz);
+
 /* Counters for the status line / gates. */
 guint64 skim_pipeline_frames(const SkimPipeline *p);
 guint64 skim_pipeline_spots(const SkimPipeline *p);

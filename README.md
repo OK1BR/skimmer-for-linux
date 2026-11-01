@@ -204,7 +204,10 @@ DX de OK1BR-#:   14025.6  OH3KAV       CW    31 dB  35 WPM  CQ      0928Z
 
 The feed is stricter than the panadapter: a callsign reaches the panadapter at
 a confidence of 0.70, the feed at 0.85, and the feed always sends CQ callers
-only. A station is repeated no more often than every 600 s unless it moves.
+only. A frequency outside the amateur bands (2200 m to 6 m, the widest
+allocation any region has) never goes out: a wide receiver span hears past
+the band edge, the panadapter shows it, the feed does not. A station is
+repeated no more often than every 600 s unless it moves.
 The server is app-owned, so client sessions survive a reconnect to the radio.
 
 ## Logbook integration

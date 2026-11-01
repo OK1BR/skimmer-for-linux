@@ -316,6 +316,43 @@ static const char *pipe_mode_str(const SkimPipeline *p) {
 
 static void station_gone_fwd(const SkimStation *st, gpointer user);
 
+/* --- RBN feed policy: the amateur bands ------------------------------------
+ * A receiver hears past the band edge — a 96 kHz span centred on 7040 kHz
+ * reaches down to 6992 kHz — and a "station" decoded there is no amateur to
+ * spot (Dan, OK1HRA: 2.9 % of his feed's spots sat where CW Skimmer Server
+ * never spots; ok1hra/skimmer-for-linux d37c54e). The table is the widest
+ * allocation any ITU region or country has for each band, 2200 m to 6 m,
+ * edges inclusive, in Hz. 60 m is the 5250–5450 kHz span: Region 2's
+ * alternative to its channels, and the US channels (5332–5405), the UK
+ * blocks, Norway and Denmark all fall inside it — the WRC-15 segment alone
+ * (5351.5–5366.5) would refuse stations RBN carries. Read from the
+ * allocation tables on en.wikipedia.org (Amateur_radio_frequency_allocations,
+ * 60-meter_band), 2026-11-01. The panadapter keeps showing what it hears;
+ * only the feed refuses. */
+static const struct { double lo, hi; } HAM_BANDS[] = {
+  {   135700.0,   137800.0 },                  /* 2200 m                     */
+  {   472000.0,   479000.0 },                  /* 630 m                      */
+  {  1800000.0,  2000000.0 },                  /* 160 m (Region 2)           */
+  {  3500000.0,  4000000.0 },                  /* 80 m (Region 2)            */
+  {  5250000.0,  5450000.0 },                  /* 60 m (see above)           */
+  {  7000000.0,  7300000.0 },                  /* 40 m (Region 2)            */
+  { 10100000.0, 10150000.0 },                  /* 30 m                       */
+  { 14000000.0, 14350000.0 },                  /* 20 m                       */
+  { 18068000.0, 18168000.0 },                  /* 17 m                       */
+  { 21000000.0, 21450000.0 },                  /* 15 m                       */
+  { 24890000.0, 24990000.0 },                  /* 12 m                       */
+  { 28000000.0, 29700000.0 },                  /* 10 m                       */
+  { 50000000.0, 54000000.0 },                  /* 6 m (Regions 2 and 3)      */
+};
+
+gboolean skim_pipeline_in_ham_band(double hz) {
+  for (guint i = 0; i < G_N_ELEMENTS(HAM_BANDS); i++) {
+    if (hz >= HAM_BANDS[i].lo && hz <= HAM_BANDS[i].hi)
+      return TRUE;
+  }
+  return FALSE;
+}
+
 /* RBN spot_out sink → the telnet feed (user = the borrowed SkimRbnFeed). */
 static void rbn_sink_fwd(const char *call, const char *mode, double freq_hz,
                          double snr_db, double speed, gpointer user) {
@@ -880,9 +917,12 @@ static void dispatch_hits(SkimPipeline *p, const IqBlock *b,
                            merged->freq_hz, merged->snr_db, merged->speed);
       }
       /* RBN etiquette is stricter than the panadapter: only a CALLING
-       * station (regardless of the local CQ-only switch), and only once
-       * the best score seen clears the RBN threshold. */
-      if (p->rbn_spots && merged->cq && merged->score >= p->rbn_min) {
+       * station (regardless of the local CQ-only switch), only once the
+       * best score seen clears the RBN threshold, and only inside an
+       * amateur band — the receiver hears past the band edge, the network
+       * must not. */
+      if (p->rbn_spots && merged->cq && merged->score >= p->rbn_min &&
+          skim_pipeline_in_ham_band(merged->freq_hz)) {
         skim_spot_out_emit(p->rbn_spots, merged->call, merged->mode,
                            merged->freq_hz, merged->snr_db, merged->speed);
       }
