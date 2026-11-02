@@ -157,7 +157,9 @@ static gboolean cover_load(const char *cf32, Cover *cv) {
         else if (!strcmp(w[1], "centre")) {
           Seg s = { (gint64)(start_us / 1e6 + (double)(fr + holes) / rate),
                     g_ascii_strtod(w[2], NULL) / 1000.0 };
-          g_array_append_val(cv->segs, s);
+          /* the recorder's frame-0 line repeats the .meta centre: not a retune */
+          const Seg *last = &g_array_index(cv->segs, Seg, cv->segs->len - 1);
+          if (s.centre_khz != last->centre_khz) { g_array_append_val(cv->segs, s); }
         }
       }
       g_strfreev(w);

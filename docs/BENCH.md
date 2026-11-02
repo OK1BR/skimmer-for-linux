@@ -91,8 +91,20 @@ grows with the shift.
 For an A/B on a recording this size: both sides start at the same frame;
 a difference of up to five units a side, in calls like these, is not a
 signal; a change in the stable set is. Not every bust is noise — OK2B and
-K2BVX are in every run, so a fix for them (#29) can be measured. One quiet
-hour is a thin sample: re-measure over a whole evening and on a contest
-recording. The floor on confirmed units and recall — what an A/B is judged
-by — comes from scoring these runs against the day's RBN archive (to be
-added).
+K2BVX are in every run, so a fix for them (#29) can be measured.
+
+The whole recording (18:03–23:30 UTC, 5 h 27 min) replayed from 0, 10 and
+20 s and scored against the 2026-11-01 archive, referee EU:
+
+    shift   ours   confirmed   look-alike   unconfirmed   recall
+     0 s     112       71          22            19        17.3 %
+    10 s     105       67          20            18        16.3 %
+    20 s     112       72          22            18        17.5 %
+
+The same two families again: 0 and 20 s differ in 2 units of 113, 10 s
+sits 14–16 % away from both. In the first hour the five shifts gave 17 or
+18 confirmed units (recall 16.7–17.6 %) where the raw units moved by up to
+seven. So the score moves less than the feed: over an evening on this band
+a change has to move confirmed units by more than about five (recall by
+more than about 1.2 points) or look-alikes by more than two before it says
+anything. A contest recording will have its own floor.
