@@ -13,6 +13,7 @@
 
 #include <glib.h>
 #include "decode.h"
+#include "decode_tap.h"
 #include "dup_query.h"
 #include "rbn_feed.h"
 #include "spot_out.h"
@@ -70,6 +71,15 @@ typedef struct {
    * writes it out for scoring against the RBN archive. */
   SkimSpotSink rbn_tap;
   gpointer     rbn_tap_user;
+
+  /* gh#28 bench: the decode tap (decode_tap.h). Every event the stages
+   * behind the decoders consume — a decode at the extractor seam (after
+   * ghost arbitration and the frequency lock), the bank geometry, the
+   * extractor resets, the station-table prune ticks — is handed to this
+   * sink on the engine thread (the feeding thread offline). skimmer-replay
+   * writes them out; skim_pipeline_feed_tap() plays them back. NULL = off. */
+  SkimTapCb    decode_tap;
+  gpointer     decode_tap_user;
 } SkimPipelineConfig;
 
 typedef struct _SkimPipeline SkimPipeline;
@@ -139,6 +149,18 @@ void     skim_pipeline_feed(SkimPipeline *p, const float *iq, guint nframes,
  * TCI 2.1 packet counter (gh#38): stream time advances over the hole and a
  * hole of 250 ms or more resyncs the decoders like a TX-hold release. */
 void     skim_pipeline_feed_gap(SkimPipeline *p, guint frames);
+
+/* Tap mode (gh#28 bench, decode_tap.h): offline like start_offline, but
+ * without channelizer or decoders — the caller feeds the events a decode
+ * tap recorded and the pipeline runs only what sits behind the decoders:
+ * the extractors, the station table, the spot/RBN policy, on the
+ * recorded clock. A tap of an offline replay plays back to the identical
+ * RBN tap output (the rbn-feed gate holds it to that); a change to any of
+ * those stages is measured here in seconds, over the very same decodes on
+ * both sides. Changes to the decoders, ghost arbitration or the frequency
+ * lock sit BEFORE the seam and need the IQ replay. */
+gboolean skim_pipeline_start_tap(SkimPipeline *p, GError **error);
+void     skim_pipeline_feed_tap(SkimPipeline *p, const SkimTapEvent *ev);
 
 /* TX hold: TRUE while the operator's own radio
  * transmits. Live it is driven automatically from the TCI trx/tune

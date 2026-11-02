@@ -119,7 +119,8 @@ here; what was done and why is in git.
   running app: sdr-for-linux keeps IQ subscription and rate per client, so a
   second client changes nothing for the app (confirmed live 2026-11-01). The
   bench — record, replay, score against the RBN archive, the replay noise
-  floor — is `docs/BENCH.md`.
+  floor, the decode tap that replays the stages behind the decoders in
+  seconds — is `docs/BENCH.md`.
 - Opt-in and without a live verdict: the tone splitter (`SKIM_TONE_SPLIT=1`)
   and the narrow focus slot (`SKIM_TONE_FOCUS=1`, implies the splitter).
 

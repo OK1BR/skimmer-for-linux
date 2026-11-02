@@ -60,6 +60,7 @@ engine_sources = [
   'src/engine/dup_query.c',    # logbook dup lookup (UDP 2238) → spot colour
   'src/engine/rbn_feed.c',     # M6: RBN telnet server (CW Skimmer dialect)
   'src/engine/spectrum.c',     # M8: band spectrum rows for the waterfall
+  'src/engine/decode_tap.c',   # gh#28 bench: decode tap line format
   'src/engine/pipeline.c',     # M5: the engine assembled end to end
 ]
 engine_deps = [glib_dep, gio_dep, lws_dep, wdsp_dep, fftw3f_dep, m_dep, dl_dep]

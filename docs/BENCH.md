@@ -38,6 +38,8 @@ live session (in OK1HRA's fork, offline wins twice lost on live air — #28).
 - Deterministic: two runs over the same input are byte-identical (cw-v2,
   2026-11-01). About 36× real time on cw-v2 at 192 kHz on the development
   machine, so an evening of air replays in minutes.
+- `<prefix>.tap`: the decode tap — everything the stages behind the
+  decoders consumed, for a replay in seconds (see "Decode tap" below).
 
 ## Score
 
@@ -108,3 +110,37 @@ seven. So the score moves less than the feed: over an evening on this band
 a change has to move confirmed units by more than about five (recall by
 more than about 1.2 points) or look-alikes by more than two before it says
 anything. A contest recording will have its own floor.
+
+## Decode tap
+
+    SKIM_REPLAY_OUT=<prefix> skimmer-replay <file.cf32>    # writes <prefix>.tap too
+    skimmer-replay <prefix>.tap                            # → <prefix>.tap.rbn.log
+
+- The cut sits in the pipeline's dispatch AFTER ghost arbitration and the
+  frequency lock and BEFORE the extractor is fed (`SkimPipelineConfig.
+  decode_tap`, `decode_tap.h`). One line per event: every decode with its
+  channel and lane, the locked frequency, confidence, speed, SNR, the
+  contested flag and the text; the bank geometry; every extractor reset (a
+  reborn slot, a centre change); every station-table prune tick — each with
+  the pipeline's stream frames and clock. The header names the source, the
+  engine, the mode, the rate, the origin frame and the MASTER.SCP release.
+- Given a `.tap`, `skimmer-replay` runs only the stages behind the cut —
+  extractor, station table, spot/RBN policy (`skim_pipeline_feed_tap`) —
+  on the recorded clock, through the same code the IQ path runs, and
+  writes the same `.rbn.log`. A run under a different MASTER.SCP release
+  says so: the extractor's dictionary bonus would differ.
+- Exact: the tap of the whole 2026-11-01 recording replayed to the same
+  215 RBN records byte for byte and the same station table; the first hour
+  alone, 57 records and 10 stations, likewise. The rbn-feed gate holds the
+  pipeline to that, and to the two events a replay silently goes wrong
+  without — the centre flush and the prune ticks (with the ticks dropped
+  the gate's replay diverges: a station pruned live clears its re-spot
+  memo and the comeback re-spots; unpruned, the 600 s window swallows it).
+- Fast, and free of the decoder's noise: the evening's 271 102 events
+  (29.6 MB) replay in 0.2 s against 544 s for the IQ. Both sides of an A/B
+  of an extractor, station-table or feed change read the very same
+  decodes, so the noise floor above does not apply — a difference is the
+  change. What sits before the cut — decoders, ghost arbitration, the
+  frequency lock, the tone splitter — still needs the IQ replay, and a tap
+  is valid only for the decoder that produced it: re-take it after a
+  decoder change (nine minutes for the evening).

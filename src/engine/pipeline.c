@@ -182,6 +182,8 @@ struct _SkimPipeline {
   volatile gint     run;
   gint64            last_prune;
   gboolean          offline;                   /* fed by skim_pipeline_feed  */
+  gboolean          tap;                       /* fed by skim_pipeline_feed_tap:
+                                                * no bank, no decoders       */
   gint64            stream_us;                 /* stream time (offline clock) */
   volatile gint     cq_only;                   /* spot only CALLING stations */
 
@@ -258,6 +260,17 @@ static gint64 pipe_now_us(const SkimPipeline *p) {
 
 static gint64 pipe_clock_cb(gpointer user) {
   return pipe_now_us(user);
+}
+
+/* gh#28 decode tap: hand one event to the tap sink, stamped with the
+ * pipeline's stream frames and its clock (decode_tap.h). Never in tap
+ * mode — a replay of a tap does not tap itself. */
+static void tap_emit(SkimPipeline *p, SkimTapEvent *ev) {
+  if (!p->cfg.decode_tap || p->tap)
+    return;
+  ev->frames = p->frames;
+  ev->now_us = pipe_now_us(p);
+  p->cfg.decode_tap(ev, p->cfg.decode_tap_user);
 }
 
 /* Decode-log timestamp: STREAM time offline (deterministic replays), wall
@@ -631,6 +644,11 @@ static void bank_build(SkimPipeline *p, double rate) {
       }
     }
   }
+  {
+    SkimTapEvent ev = { .kind = SKIM_TAP_BANK, .rate = rate,
+                        .nchan = p->nchan, .chan_bw_hz = p->cfg.chan_bw_hz };
+    tap_emit(p, &ev);
+  }
   if (p->state_cb) {
     char detail[128];
     g_snprintf(detail, sizeof(detail), "%u channels × %.0f Hz @ %.0f kHz IQ",
@@ -724,6 +742,10 @@ static void slot_sync(SkimPipeline *p, guint c, guint s,
   }
   memset(&p->flock[i], 0, sizeof(FreqLock));
   p->sgen[i] = g;
+  {
+    SkimTapEvent ev = { .kind = SKIM_TAP_RESET, .chan = c, .slot = s };
+    tap_emit(p, &ev);
+  }
 }
 
 /* Resume after a TX hold: bit-level resync on every live channel state —
@@ -791,6 +813,9 @@ static void spec_feed(SkimPipeline *p, const IqBlock *b) {
   }
   skim_spectrum_push(p->spec, b->iq, b->nframes, b->center_hz);
 }
+
+static void dispatch_text(SkimPipeline *p, guint c, guint slot, double sig_hz,
+                          gboolean contested, const SkimDecode *d);
 
 /* Pass 2 of a block: arbitrate the collected hits (p->hits) and dispatch the
  * survivors — decode log, pane, extractor, station table, spot sinks. */
@@ -936,63 +961,80 @@ static void dispatch_hits(SkimPipeline *p, const IqBlock *b,
        * instead of takeover-eviction or TTL-prune (fixture 2026-07-19:
        * pending episodes on runner channels blocked 100+ feeds and the
        * frozen extractor was the only thing that still knew the call). */
-      if (h->contested) {
-        if (g_getenv("SKIM_TS_DEBUG")) {
-          g_printerr("pipeline: ch %u slot %u @ %.0f Hz contested-drop |%s|\n",
-                     c, h->slot, sig_hz, d.text);
-        }
-      } else {
-        skim_callsign_extractor_feed(p->ext[SL(c, h->slot)], d.text);
+      {
+        /* gh#28: the decode tap's seam — what the extractor is about to
+         * see, with the lock's frequency. Everything behind this call
+         * replays from the tap alone (skim_pipeline_feed_tap). */
+        SkimTapEvent ev = { .kind = SKIM_TAP_DECODE, .chan = c, .slot = h->slot,
+                            .sig_hz = sig_hz, .contested = h->contested,
+                            .d = d };
+        tap_emit(p, &ev);
       }
-      char call[24];
-      gboolean cq = FALSE;
-      double score = skim_callsign_extractor_best_ex(p->ext[SL(c, h->slot)],
-                                                     call, sizeof(call), &cq);
-      if (g_getenv("SKIM_ST_DEBUG")) {
-        g_printerr("cand: ch %u slot %u @ %.0f Hz score %.2f %s |%s| t=%.0f\n",
-                   c, h->slot, sig_hz, score, score > 0 ? call : "-", d.text,
-                   pipe_now_us(p) / 1e6);
-      }
-      if (score <= 0)
-        continue;
-
-      SkimStation st;
-      memset(&st, 0, sizeof(st));
-      g_strlcpy(st.call, call, sizeof(st.call));
-      g_strlcpy(st.mode, pipe_mode_str(p), sizeof(st.mode));
-      st.freq_hz    = sig_hz;
-      st.speed      = d.speed;
-      st.snr_db     = d.snr_db;
-      st.score      = score;
-      st.cq         = cq;
-      st.last_heard = pipe_now_us(p);
-      st.first_heard = st.last_heard;
-      if (g_getenv("SKIM_ST_DEBUG")) {
-        g_printerr("report: ch %u slot %u %s @ %.0f Hz score %.2f t=%.0f s\n",
-                   c, h->slot, st.call, st.freq_hz, score,
-                   st.last_heard / 1e6);
-      }
-      const SkimStation *merged = skim_station_table_report(p->stations, &st);
-      if (p->station_cb) { p->station_cb(merged, p->station_user); }
-      /* The merged record's frequency is the ghost-deduped one. CQ-only
-       * policy: only a station heard CALLING may reach the spot sinks —
-       * an S&P answer does not own the frequency (RBN etiquette). */
-      if (p->spots &&
-          (!g_atomic_int_get(&p->cq_only) || merged->cq)) {
-        skim_spot_out_emit(p->spots, merged->call, merged->mode,
-                           merged->freq_hz, merged->snr_db, merged->speed);
-      }
-      /* RBN etiquette is stricter than the panadapter: only a CALLING
-       * station (regardless of the local CQ-only switch), only once the
-       * best score seen clears the RBN threshold, and only inside an
-       * amateur band — the receiver hears past the band edge, the network
-       * must not. */
-      if (p->rbn_spots && merged->cq && merged->score >= p->rbn_min &&
-          skim_pipeline_in_ham_band(merged->freq_hz)) {
-        skim_spot_out_emit(p->rbn_spots, merged->call, merged->mode,
-                           merged->freq_hz, merged->snr_db, merged->speed);
-      }
+      dispatch_text(p, c, h->slot, sig_hz, h->contested, &d);
     }
+  }
+}
+
+/* Behind the decoder seam: extractor → station table → spot sinks. Shared
+ * by the live/IQ path (dispatch_hits) and the tap replay
+ * (skim_pipeline_feed_tap) — ONE copy, so a tap A/B measures the code that
+ * runs live. Everything here ticks on pipe_now_us(): stream time offline. */
+static void dispatch_text(SkimPipeline *p, guint c, guint slot, double sig_hz,
+                          gboolean contested, const SkimDecode *d) {
+  if (contested) {
+    if (g_getenv("SKIM_TS_DEBUG")) {
+      g_printerr("pipeline: ch %u slot %u @ %.0f Hz contested-drop |%s|\n",
+                 c, slot, sig_hz, d->text);
+    }
+  } else {
+    skim_callsign_extractor_feed(p->ext[SL(c, slot)], d->text);
+  }
+  char call[24];
+  gboolean cq = FALSE;
+  double score = skim_callsign_extractor_best_ex(p->ext[SL(c, slot)],
+                                                 call, sizeof(call), &cq);
+  if (g_getenv("SKIM_ST_DEBUG")) {
+    g_printerr("cand: ch %u slot %u @ %.0f Hz score %.2f %s |%s| t=%.0f\n",
+               c, slot, sig_hz, score, score > 0 ? call : "-", d->text,
+               pipe_now_us(p) / 1e6);
+  }
+  if (score <= 0)
+    return;
+
+  SkimStation st;
+  memset(&st, 0, sizeof(st));
+  g_strlcpy(st.call, call, sizeof(st.call));
+  g_strlcpy(st.mode, pipe_mode_str(p), sizeof(st.mode));
+  st.freq_hz    = sig_hz;
+  st.speed      = d->speed;
+  st.snr_db     = d->snr_db;
+  st.score      = score;
+  st.cq         = cq;
+  st.last_heard = pipe_now_us(p);
+  st.first_heard = st.last_heard;
+  if (g_getenv("SKIM_ST_DEBUG")) {
+    g_printerr("report: ch %u slot %u %s @ %.0f Hz score %.2f t=%.0f s\n",
+               c, slot, st.call, st.freq_hz, score, st.last_heard / 1e6);
+  }
+  const SkimStation *merged = skim_station_table_report(p->stations, &st);
+  if (p->station_cb) { p->station_cb(merged, p->station_user); }
+  /* The merged record's frequency is the ghost-deduped one. CQ-only
+   * policy: only a station heard CALLING may reach the spot sinks —
+   * an S&P answer does not own the frequency (RBN etiquette). */
+  if (p->spots &&
+      (!g_atomic_int_get(&p->cq_only) || merged->cq)) {
+    skim_spot_out_emit(p->spots, merged->call, merged->mode,
+                       merged->freq_hz, merged->snr_db, merged->speed);
+  }
+  /* RBN etiquette is stricter than the panadapter: only a CALLING
+   * station (regardless of the local CQ-only switch), only once the
+   * best score seen clears the RBN threshold, and only inside an
+   * amateur band — the receiver hears past the band edge, the network
+   * must not. */
+  if (p->rbn_spots && merged->cq && merged->score >= p->rbn_min &&
+      skim_pipeline_in_ham_band(merged->freq_hz)) {
+    skim_spot_out_emit(p->rbn_spots, merged->call, merged->mode,
+                       merged->freq_hz, merged->snr_db, merged->speed);
   }
 }
 
@@ -1127,6 +1169,8 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
         }
       }
       memset(p->flock, 0, p->nchan * NSLOT * sizeof(FreqLock));
+      SkimTapEvent ev = { .kind = SKIM_TAP_FLUSH };
+      tap_emit(p, &ev);
     }
     p->center_hz = b->center_hz;
   }
@@ -1234,6 +1278,8 @@ static gpointer engine_thread(gpointer data) {
     if (now - p->last_prune > PRUNE_EVERY_US) {
       p->last_prune = now;
       skim_station_table_prune(p->stations, now, STATION_TTL_US);
+      SkimTapEvent ev = { .kind = SKIM_TAP_PRUNE };
+      tap_emit(p, &ev);
     }
     /* Logbook verdict flips (answers AND unsolicited "just logged him"
      * pushes) repaint the live label at once — the operator must not wait
@@ -1343,6 +1389,79 @@ void skim_pipeline_feed(SkimPipeline *p, const float *iq, guint nframes,
   if (p->stream_us - p->last_prune > PRUNE_EVERY_US) {
     p->last_prune = p->stream_us;
     skim_station_table_prune(p->stations, p->stream_us, STATION_TTL_US);
+    SkimTapEvent ev = { .kind = SKIM_TAP_PRUNE };
+    tap_emit(p, &ev);
+  }
+}
+
+/* ---- tap mode (gh#28, decode_tap.h) --------------------------------------------- */
+
+gboolean skim_pipeline_start_tap(SkimPipeline *p, GError **error) {
+  if (p->thread || p->offline) {
+    g_set_error(error, g_quark_from_static_string("skim-pipeline"), 1,
+                "pipeline already running");
+    return FALSE;
+  }
+  p->offline = TRUE;                 /* pipe_now_us() = the recorded clock  */
+  p->tap     = TRUE;
+  p->gap_pending = 0;
+  p->stream_us  = 0;
+  p->last_prune = 0;
+  g_atomic_int_set(&p->tx_now, 0);
+  p->holding = FALSE;
+  p->hold_capped = FALSE;
+  p->grace_frames = 0;
+  return TRUE;
+}
+
+/* The extractor of (chan, slot) in tap mode — born on first sight, exactly
+ * as slot_sync() spawns a narrow lane's (and a fresh one equals a reset). */
+static SkimCallsignExtractor *tap_ext(SkimPipeline *p, guint c, guint s) {
+  if (!p->ext || c >= p->nchan || s >= NSLOT) {
+    g_warning("pipeline: tap event for channel %u slot %u outside the bank "
+              "(%u channels) — dropped", c, s, p->nchan);
+    return NULL;
+  }
+  if (!p->ext[SL(c, s)]) { p->ext[SL(c, s)] = skim_callsign_extractor_new(); }
+  return p->ext[SL(c, s)];
+}
+
+void skim_pipeline_feed_tap(SkimPipeline *p, const SkimTapEvent *ev) {
+  g_return_if_fail(p->tap && ev);
+  /* The recorded clock, verbatim: every TTL, dedup window and token bucket
+   * must see the instants the live path saw. */
+  p->frames    = ev->frames;
+  p->stream_us = ev->now_us;
+  switch (ev->kind) {
+    case SKIM_TAP_BANK:
+      /* The geometry only — no channelizer, no decoders. Extractors are
+       * born lazily (tap_ext); the station table rides across a rebuild
+       * like it does live. */
+      bank_teardown(p);
+      p->nchan     = ev->nchan;
+      p->bank_rate = ev->rate;
+      p->ext       = g_new0(SkimCallsignExtractor *, p->nchan * NSLOT);
+      p->center_hz = 0;
+      break;
+    case SKIM_TAP_DECODE:
+      if (tap_ext(p, ev->chan, ev->slot)) {
+        dispatch_text(p, ev->chan, ev->slot, ev->sig_hz, ev->contested, &ev->d);
+      }
+      break;
+    case SKIM_TAP_RESET: {
+      SkimCallsignExtractor *x = tap_ext(p, ev->chan, ev->slot);
+      if (x) { skim_callsign_extractor_reset(x); }
+      break;
+    }
+    case SKIM_TAP_FLUSH:
+      for (guint i = 0; p->ext && i < p->nchan * NSLOT; i++) {
+        if (p->ext[i]) { skim_callsign_extractor_reset(p->ext[i]); }
+      }
+      break;
+    case SKIM_TAP_PRUNE:
+      p->last_prune = p->stream_us;
+      skim_station_table_prune(p->stations, p->stream_us, STATION_TTL_US);
+      break;
   }
 }
 

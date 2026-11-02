@@ -19,6 +19,15 @@
  * must still list DL1ABC (the panadapter shows what it hears), the feed
  * must never send it.
  *
+ * gh#28 decode tap: the same band through the offline pipeline with the
+ * RBN tap and the decode tap collected — two passes, a 130 s hole (every
+ * station TTL-pruned, so the comeback re-spots), a third pass, then the
+ * band 30 kHz lower (a centre change flushes the extractors). Every tap
+ * line must read back as the event it was written from; a tap-mode
+ * pipeline fed those lines must produce the RBN tap byte for byte and the
+ * same station table; and with the prune ticks dropped from the tap the
+ * replay must DIVERGE — the ticks are what makes the replay exact.
+ *
  * Part of skimmer-for-linux. GPL-3.0-or-later.
  */
 #include <gio/gio.h>
@@ -261,6 +270,110 @@ static void on_station(const SkimStation *st, gpointer user) {
   g_mutex_unlock(&c_lock);
 }
 
+/* --- gh#28 decode tap: collectors and the tap-mode replay -------------------------- */
+
+static SkimPipeline *t_pipe;           /* the pipeline whose taps we collect   */
+static GPtrArray    *t_events;         /* SkimTapEvent* copies, in order       */
+static GPtrArray    *t_lines;          /* their lines, same order              */
+static GHashTable   *t_stations;       /* call → SkimStation* (last state)     */
+
+/* The RBN tap as one text line per record, stamped with the pipeline's
+ * stream frames — what skimmer-replay writes, minus the UTC. */
+static void rbn_collect(const char *call, const char *mode, double freq_hz,
+                        double snr_db, double speed, gpointer user) {
+  char khz[G_ASCII_DTOSTR_BUF_SIZE];
+  g_ascii_formatd(khz, sizeof(khz), "%.2f", freq_hz / 1000.0);
+  g_string_append_printf(user, "%" G_GUINT64_FORMAT "\t%s\t%s\t%s\t%.0f\t%.0f\n",
+                         skim_pipeline_frames(t_pipe), call, khz, mode, snr_db,
+                         speed);
+}
+
+static void tap_collect(const SkimTapEvent *ev, gpointer user) {
+  (void)user;
+  g_ptr_array_add(t_events, g_memdup2(ev, sizeof(*ev)));
+  g_ptr_array_add(t_lines, skim_tap_event_to_line(ev));
+}
+
+static void t_station(const SkimStation *st, gpointer user) {
+  (void)user;
+  SkimStation *copy = g_hash_table_lookup(t_stations, st->call);
+  if (!copy) {
+    copy = g_new0(SkimStation, 1);
+    g_hash_table_insert(t_stations, g_strdup(st->call), copy);
+  }
+  *copy = *st;
+}
+
+static void t_gone(const SkimStation *st, gpointer user) {
+  (void)user;
+  g_hash_table_remove(t_stations, st->call);
+}
+
+static int by_call(gconstpointer a, gconstpointer b) {
+  return strcmp((*(const SkimStation *const *)a)->call,
+                (*(const SkimStation *const *)b)->call);
+}
+
+/* The final station table as text (sorted by call); frees t_stations. */
+static char *t_table(void) {
+  GPtrArray *rows = g_ptr_array_new();
+  GHashTableIter it;
+  gpointer key, val;
+  g_hash_table_iter_init(&it, t_stations);
+  while (g_hash_table_iter_next(&it, &key, &val)) { g_ptr_array_add(rows, val); }
+  g_ptr_array_sort(rows, by_call);
+  GString *s = g_string_new(NULL);
+  for (guint i = 0; i < rows->len; i++) {
+    const SkimStation *st = g_ptr_array_index(rows, i);
+    char khz[G_ASCII_DTOSTR_BUF_SIZE];
+    g_ascii_formatd(khz, sizeof(khz), "%.2f", st->freq_hz / 1000.0);
+    g_string_append_printf(s, "%s %s %u %.2f %s\n", st->call, khz, st->reports,
+                           st->score, st->cq ? "CQ" : "-");
+  }
+  g_ptr_array_free(rows, TRUE);
+  g_hash_table_destroy(t_stations);
+  t_stations = NULL;
+  return g_string_free(s, FALSE);
+}
+
+static void feed_band(SkimPipeline *p, double center) {
+  for (guint off = 0; off + BLK <= g_band_frames; off += BLK) {
+    skim_pipeline_feed(p, g_band + 2 * (gsize)off, BLK, RATE, center);
+  }
+}
+
+/* A tap-mode pipeline over the collected lines; its RBN tap into rbn, its
+ * station table returned. drop_prune leaves the P lines out. */
+static char *tap_replay(GPtrArray *lines, GString *rbn, gboolean drop_prune) {
+  SkimPipelineConfig cfg = {
+    .chan_bw_hz   = 125.0,
+    .rbn_tap      = rbn_collect,
+    .rbn_tap_user = rbn,
+  };
+  SkimPipeline *p = skim_pipeline_new(&cfg);
+  t_pipe = p;
+  skim_pipeline_set_station_cb(p, t_station, NULL);
+  skim_pipeline_set_station_gone_cb(p, t_gone, NULL);
+  GError *err = NULL;
+  if (!skim_pipeline_start_tap(p, &err)) {
+    printf("       tap-mode pipeline did not start: %s\n", err ? err->message : "?");
+    g_clear_error(&err);
+  }
+  for (guint i = 0; i < lines->len; i++) {
+    SkimTapEvent e;
+    if (!skim_tap_line_parse(g_ptr_array_index(lines, i), &e))
+      continue;
+    if (drop_prune && e.kind == SKIM_TAP_PRUNE)
+      continue;
+    skim_pipeline_feed_tap(p, &e);
+  }
+  skim_pipeline_stop(p);
+  char *table = t_table();
+  skim_pipeline_free(p);
+  t_pipe = NULL;
+  return table;
+}
+
 int main(void) {
   printf("=== RBN telnet feed gate (offline) ===\n");
 
@@ -501,6 +614,120 @@ int main(void) {
     cap_free(a);
     skim_rbn_feed_free(f);
     g_string_free(c_stations, TRUE);
+  }
+
+  /* -- gh#28: the decode tap replays to the identical RBN tap ------------------- */
+  {
+    /* Run A: IQ through the whole pipeline, both taps collected. */
+    GString *rbn_a = g_string_new(NULL);
+    GPtrArray *events = g_ptr_array_new_with_free_func(g_free);
+    GPtrArray *lines  = g_ptr_array_new_with_free_func(g_free);
+    t_lines = lines;
+    t_events = events;
+    t_stations = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    SkimPipelineConfig cfg = {
+      .chan_bw_hz      = 125.0,
+      .rbn_tap         = rbn_collect,
+      .rbn_tap_user    = rbn_a,
+      .decode_tap      = tap_collect,
+      .decode_tap_user = NULL,
+    };
+    SkimPipeline *p = skim_pipeline_new(&cfg);
+    t_pipe = p;
+    skim_pipeline_set_station_cb(p, t_station, NULL);
+    skim_pipeline_set_station_gone_cb(p, t_gone, NULL);
+    GError *err = NULL;
+    check("tap: offline pipeline starts", skim_pipeline_start_offline(p, &err));
+    for (int pass = 0; pass < 2; pass++) { feed_band(p, CENTER); }
+    /* 130 s of nothing: past the 120 s station TTL — the prune tick that
+     * follows takes every station out, their RBN memo with them, and the
+     * third pass re-spots both callers (the tick's time decides that). */
+    skim_pipeline_feed_gap(p, 130 * RATE);
+    feed_band(p, CENTER);
+    feed_band(p, CENTER - 30000.0);              /* retune: extractors flushed */
+    skim_pipeline_stop(p);
+    char *table_a = t_table();
+    const guint64 rbn_n = skim_pipeline_rbn_spots(p);
+    skim_pipeline_free(p);
+    t_pipe = NULL;
+
+    guint n_kind[5] = { 0 };
+    for (guint i = 0; i < events->len; i++) {
+      const SkimTapEvent *e = g_ptr_array_index(events, i);
+      if ((guint)e->kind < 5) { n_kind[e->kind]++; }
+    }
+    printf("       tap: %u decodes, %u resets, %u flushes, %u prunes, %u bank; "
+           "RBN tap %" G_GUINT64_FORMAT " records\n",
+           n_kind[SKIM_TAP_DECODE], n_kind[SKIM_TAP_RESET],
+           n_kind[SKIM_TAP_FLUSH], n_kind[SKIM_TAP_PRUNE], n_kind[SKIM_TAP_BANK],
+           rbn_n);
+    check("tap: the RBN tap re-spotted both callers after the hole (≥ 5 records)",
+          rbn_n >= 5 && strstr(rbn_a->str, "OK1BR") && strstr(rbn_a->str, "DL1ABC"));
+    check("tap: carries decodes, the bank, the centre flush and prune ticks",
+          n_kind[SKIM_TAP_DECODE] > 0 && n_kind[SKIM_TAP_BANK] == 1 &&
+          n_kind[SKIM_TAP_FLUSH] == 1 && n_kind[SKIM_TAP_PRUNE] >= 20);
+
+    /* Every line reads back as the event it came from — exactly. */
+    guint bad = 0;
+    for (guint i = 0; i < lines->len; i++) {
+      SkimTapEvent e;
+      const SkimTapEvent *o = g_ptr_array_index(events, i);
+      if (!skim_tap_line_parse(g_ptr_array_index(lines, i), &e) ||
+          e.kind != o->kind || e.frames != o->frames || e.now_us != o->now_us ||
+          e.chan != o->chan || e.slot != o->slot || e.contested != o->contested ||
+          e.sig_hz != o->sig_hz || e.d.confidence != o->d.confidence ||
+          e.d.speed != o->d.speed || e.d.snr_db != o->d.snr_db ||
+          e.rate != o->rate || e.nchan != o->nchan ||
+          e.chan_bw_hz != o->chan_bw_hz || strcmp(e.d.text, o->d.text) != 0) {
+        if (bad < 3) {
+          printf("       line %u does not round-trip: %s\n", i,
+                 (char *)g_ptr_array_index(lines, i));
+        }
+        bad++;
+      }
+    }
+    check("tap: every line parses back to its event, doubles and text exact",
+          bad == 0 && lines->len == events->len && lines->len > 0);
+    gboolean comment_ok = TRUE;
+    {
+      SkimTapEvent e;
+      comment_ok = !skim_tap_line_parse("# a comment", &e) &&
+                   !skim_tap_line_parse("", &e) &&
+                   !skim_tap_line_parse("X\t1\t2", &e) &&
+                   !skim_tap_line_parse("D\t1\t2\t3", &e);
+    }
+    check("tap: comments, blanks and short lines are not events", comment_ok);
+
+    /* Run B: the tap alone through a tap-mode pipeline. */
+    GString *rbn_b = g_string_new(NULL);
+    t_stations = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    char *table_b = tap_replay(lines, rbn_b, FALSE);
+    check("tap: the tap replay reproduces the RBN tap byte for byte",
+          g_string_equal(rbn_a, rbn_b) && rbn_b->len > 0);
+    check("tap: …and the station table (call, kHz, reports, score, cq)",
+          g_strcmp0(table_a, table_b) == 0);
+    if (!g_string_equal(rbn_a, rbn_b) || g_strcmp0(table_a, table_b) != 0) {
+      printf("       RBN A:\n%s       RBN B:\n%s       table A:\n%s       table B:\n%s",
+             rbn_a->str, rbn_b->str, table_a, table_b);
+    }
+
+    /* Run C: the same tap WITHOUT its prune ticks must come out different —
+     * the pruned stations' memos never clear, the comeback after the hole
+     * is swallowed by the 600 s re-spot window. */
+    GString *rbn_c = g_string_new(NULL);
+    t_stations = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    char *table_c = tap_replay(lines, rbn_c, TRUE);
+    check("tap: without the prune ticks the replay diverges (the ticks matter)",
+          !g_string_equal(rbn_a, rbn_c));
+
+    g_free(table_a);
+    g_free(table_b);
+    g_free(table_c);
+    g_string_free(rbn_a, TRUE);
+    g_string_free(rbn_b, TRUE);
+    g_string_free(rbn_c, TRUE);
+    g_ptr_array_free(events, TRUE);
+    g_ptr_array_free(lines, TRUE);
   }
   g_free(g_band);
 
