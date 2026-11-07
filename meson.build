@@ -188,6 +188,20 @@ skimmer_deepcw_test = executable('skimmer-deepcw-test',
 test('deepcw-decode', skimmer_deepcw_test, timeout : 300,
   env : ['SKIM_DEEPCW_SYNC=1'])
 
+# gh#27: offline gate — the dB of a spot is SNR in 500 Hz (CW Skimmer's
+# scale): the channel's noise bandwidth from the taps against white noise
+# through the bank, then synthetic stations of known SNR500 through the
+# whole offline pipeline, per backend (DeepCW when the model resolves),
+# a sweep at the channel centre and one SNR across the channel.
+skimmer_snr_test = executable('skimmer-snr-test',
+  ['src/snr_test.c'],
+  include_directories : include_directories('src'),
+  dependencies : engine_deps,
+  link_with : engine_lib,
+)
+test('snr-scale', skimmer_snr_test, timeout : 300,
+  env : ['SKIM_DEEPCW_SYNC=1'])
+
 # Tone splitter: offline gate — sideband immunity, Δf 50/30 Hz splits with
 # both texts copied, Δf 15 Hz contested, slot TTL collapse/re-engage, and the
 # WHOLE offline pipeline with SKIM_TONE_SPLIT=1 (both calls, no mutations).

@@ -134,6 +134,12 @@ enum { K_MARK, K_SPACE, K_EITHER };
 #define FIST_GAIN    0.25               /* blend of an accepted fit           */
 #define FIST_CSP0    3.0                /* seeds = the ITU ideals             */
 #define FIST_WSP0    7.0
+#define SNR_RING     24                 /* mark estimates behind the SNR median
+                                         * (~2 s at 25 WPM; the first marks
+                                         * of an over come out of the replayed
+                                         * pre-roll with the trackers still
+                                         * settling, and a median forgets
+                                         * them as soon as it outnumbers them) */
 
 typedef struct {
   double rate;
@@ -225,9 +231,28 @@ typedef struct {
   /* --- estimates -------------------------------------------------------------- */
   double prev_i, prev_q;
   double foff_hz;
-  double snr_latch;                     /* SNR at the last mark commit — the
-                                         * peak tracker has decayed by the
-                                         * time a trailing break emits      */
+  double snr_latch;                     /* peak/floor ratio at the last mark
+                                         * commit (the reader's arming bar) —
+                                         * the peak tracker has decayed by
+                                         * the time a trailing break emits  */
+  double snr_band;                      /* carrier over the noise of the
+                                         * whole input band, dB: the median
+                                         * of the last SNR_RING mark
+                                         * commits' estimates (gh#27, after
+                                         * OK1HRA 5b21199)                  */
+  float  snr_ring[SNR_RING];
+  guint  snr_n, snr_head;               /* snr_n = 0: no estimate yet       */
+  double noise_bw_hz;                   /* that band's noise bandwidth
+                                         * (decode.h set_noise_bw); the
+                                         * sample rate until told          */
+  double nacc;                          /* Σ m over the running second     */
+  guint  nacc_n;
+  double nmean;                         /* mean m of the last whole second
+                                         * (decode.h noise(); 0 = none)    */
+  double band_noise;                    /* the bank's median nmean (decode.h
+                                         * set_band_noise), 0 = never told */
+  double band_enbw_hz;                  /* ...measured on channels of this
+                                         * noise bandwidth                 */
 
   /* --- run dump (SKIM_CW_DUMP_RUNS — offline ML corpus) ------------------------
    * An independent v1-style Schmitt keyer with the bootstrap's 3-sample
@@ -291,6 +316,7 @@ static gpointer cw2_channel_new(double sample_rate) {
   st->k_m_dn   = 1.0 - exp(-1.0 / (st->rate * 0.35));
   st->k_s      = 1.0 - exp(-1.0 / (st->rate * 0.25));
   st->env_hi = st->env_lo = -1.0;
+  st->noise_bw_hz = st->rate;
   st->elem_err = 0.2;
   st->fist_csp = FIST_CSP0;
   st->fist_wsp = FIST_WSP0;
@@ -1142,6 +1168,38 @@ static void lattice_commit(Cw2State *st, double lag_dits, SkimDecode *out,
       st->brk_out = FALSE;
       st->char_live = st->word_live = FALSE;   /* a new space will come      */
       st->snr_latch = 20.0 * log10(st->env_hi / MAX(st->env_lo, 1e-9));
+      {
+        /* Carrier power over the noise power of the whole input band
+         * (gh#27, after OK1HRA's estimate in 5b21199): µ_mark rides the
+         * Rician marks (E[m²] = A² + 2σ²), and the noise is a Rayleigh
+         * mean (1.2533·σ, so the noise power 2σ² = 4/π·mean²). The mean
+         * is the bank's median of the channels' mean envelope when the
+         * pipeline supplies it (the band's noise — the 3-tap MA leaves a
+         * mean alone), scaled from the channels' noise bandwidth to this
+         * lane's; else this channel's own µ_space — OK1HRA's original,
+         * which compresses above ~15 dB because filter ringing fills the
+         * element gaps of a strong station and lifts µ_s (30 dB read
+         * 25 in skimmer-snr-test; with the band's noise 29.3). */
+        const double ns = st->band_noise > 0.0
+                              ? st->band_noise * st->band_noise *
+                                    (st->noise_bw_hz / st->band_enbw_hz)
+                              : st->mu_s * st->mu_s;
+        const double pn = (4.0 / G_PI) * ns;
+        const double v  = 10.0 * log10(MAX(st->mu_m * st->mu_m - pn, 1e-3 * pn) /
+                                       MAX(pn, 1e-30));
+        st->snr_ring[st->snr_head] = (float)v;
+        st->snr_head = (st->snr_head + 1) % SNR_RING;
+        if (st->snr_n < SNR_RING) { st->snr_n++; }
+        float srt[SNR_RING];
+        memcpy(srt, st->snr_ring, st->snr_n * sizeof(float));
+        for (guint a = 1; a < st->snr_n; a++) {        /* insertion sort     */
+          const float x = srt[a]; guint b = a;
+          while (b > 0 && srt[b - 1] > x) { srt[b] = srt[b - 1]; b--; }
+          srt[b] = x;
+        }
+        st->snr_band = st->snr_n & 1 ? srt[st->snr_n / 2]
+                                     : 0.5 * (srt[st->snr_n / 2 - 1] + srt[st->snr_n / 2]);
+      }
       break;
     case SEG_ESP:
       st->esp = st->esp > 0 ? st->esp + 0.2 * (d - st->esp) : d;
@@ -1479,6 +1537,15 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
     st->ma_n++;
     float m = (st->ma[0] + st->ma[1] + st->ma[2]) / (float)MIN(st->ma_n, 3);
     st->pre[st->pre_head++ & (st->pre_size - 1)] = m;
+    /* The channel's mean envelope over the running second — the band's
+     * noise statistic (decode.h noise()); a keyed channel reads high and
+     * the bank's median discards it. */
+    st->nacc += m;
+    if (++st->nacc_n >= (guint)st->rate) {
+      st->nmean  = st->nacc / st->nacc_n;
+      st->nacc   = 0.0;
+      st->nacc_n = 0;
+    }
 
     /* Level trackers + squelch + keying-duty — v1 verbatim. */
     if (st->env_hi < 0) { st->env_hi = st->env_lo = m; }
@@ -1709,10 +1776,30 @@ static gboolean cw2_process(gpointer state, const float *iq, guint nframes,
   out->freq_offset_hz = st->foff_hz;
   const double dit_ub = st->esp > 0 ? 0.5 * (st->dit + st->esp) : st->dit;
   out->speed          = st->dit > 0 ? 1.2 * st->rate / dit_ub : 0.0;
-  out->snr_db         = st->snr_latch != 0.0
-                            ? st->snr_latch
-                            : 20.0 * log10(st->env_hi / MAX(st->env_lo, 1e-9));
+  /* SNR in 500 Hz (decode.h snr_db, gh#27): the band estimate, referred
+   * from the band's noise bandwidth to 500 Hz; before the first committed
+   * mark, the envelope's own peak/floor ratio referred the same way. */
+  out->snr_db         = (st->snr_n
+                             ? st->snr_band
+                             : 20.0 * log10(st->env_hi / MAX(st->env_lo, 1e-9))) +
+                        10.0 * log10(MAX(st->noise_bw_hz, 1e-3) / 500.0);
   return TRUE;
+}
+
+static void cw2_set_noise_bw(gpointer state, double enbw_hz) {
+  if (enbw_hz > 0) { ((Cw2State *)state)->noise_bw_hz = enbw_hz; }
+}
+
+static double cw2_noise(gpointer state) {
+  return ((Cw2State *)state)->nmean;
+}
+
+static void cw2_set_band_noise(gpointer state, double noise, double enbw_hz) {
+  Cw2State *st = state;
+  if (noise > 0 && enbw_hz > 0) {
+    st->band_noise   = noise;
+    st->band_enbw_hz = enbw_hz;
+  }
 }
 
 static double cw2_level(gpointer state) {
@@ -1746,6 +1833,10 @@ const SkimDecodeBackend *skim_decode_cw_v2(void) {
     .process        = cw2_process,
     .level          = cw2_level,
     .tone_offset_hz = cw2_tone_offset_hz,
+    .set_noise_bw   = cw2_set_noise_bw,
+    .noise          = cw2_noise,
+    .set_band_noise = cw2_set_band_noise,
+    .snr_in_500hz   = TRUE,
   };
   return &backend;
 }

@@ -22,7 +22,14 @@ typedef struct {
   double  confidence;                 /* 0.0 .. 1.0 */
   double  freq_offset_hz;             /* signal offset within the channel */
   double  speed;                      /* WPM (CW) or baud (RTTY/PSK) */
-  double  snr_db;                     /* estimated SNR of the trace */
+  double  snr_db;                     /* estimated SNR of the trace. The CW
+                                       * backends v2 and DeepCW report SNR
+                                       * in 500 Hz: key-down carrier power
+                                       * over the noise density × 500 Hz —
+                                       * the dB of CW Skimmer and of RBN
+                                       * spots (gh#27). RTTY and the
+                                       * classical v1 keep their own
+                                       * peak-over-floor ratio */
   gboolean pane_own;                  /* backend owns the PANE view of this
                                        * call's text: the pipeline must not
                                        * append text[] to the pane (the pane
@@ -117,6 +124,40 @@ struct _SkimDecodeBackend {
    * A backend without the hook is left alone through the hold, as before.
    * Optional. */
   void (*hold_begin)(gpointer state);
+
+  /* The equivalent noise bandwidth (Hz) of the stream this channel is fed
+   * — the channelizer channel's (channelizer.h enbw) or a narrow slot's
+   * filter (tone_split.h) — so a backend that measures the noise of its
+   * WHOLE input (v2's envelope trackers) can state snr_db in 500 Hz. The
+   * pipeline calls it at the lane's birth and on every block of a narrow
+   * slot (its filter rides the WPM); a backend never told assumes its
+   * input noise fills the sample rate, which is what the synthetic gates
+   * feed. A backend that measures its noise per spectral bin (DeepCW)
+   * needs no telling. Optional. */
+  void (*set_noise_bw)(gpointer state, double enbw_hz);
+
+  /* The band's noise, the way CW Skimmer measures it (VE3NEA: "the noise
+   * is estimated globally in the whole receiver bandwidth"): noise()
+   * returns this channel's noise statistic over the last second in the
+   * backend's own units — every channel's, a station's included, so the
+   * pipeline can take the MEDIAN over the bank (a station's channel reads
+   * high and is discarded by the median; a mean over the bank would rise
+   * with every strong station in a contest). set_band_noise() hands that
+   * median back, with the noise bandwidth of the channels it was taken on,
+   * so the backend refers its signal to the band's noise density instead
+   * of the noise it can see between the elements of a strong station
+   * (filter ringing fills those gaps — gh#27, the compression of OK1HRA's
+   * estimate above 15 dB). 0 = no estimate yet. Both optional; a backend
+   * never told falls back to its own channel's noise. */
+  double (*noise)(gpointer state);
+  void   (*set_band_noise)(gpointer state, double noise, double enbw_hz);
+
+  /* TRUE: snr_db is SNR in 500 Hz as described at SkimDecode.snr_db, and
+   * the pipeline may complete it — it adds back what the channel filter
+   * took off a tone away from the channel centre (channelizer.h
+   * response_db), which the backend cannot see. FALSE: the backend's own
+   * scale, passed through untouched (v1, RTTY). */
+  gboolean snr_in_500hz;
 };
 
 G_END_DECLS

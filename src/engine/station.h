@@ -32,12 +32,21 @@ G_BEGIN_DECLS
  * (Live-caught 2026-07-15: EA2BTN S&P listed at 14044 AND 14050.) */
 #define SKIM_STATION_QSY_SCORE 0.85
 
+/* A record's dB follows its reports as an EMA with this gain (gh#27): the
+ * reports come several a second while a station keys, so this is a few
+ * seconds of keying — the station's level, not the peak of its QSB. */
+#define SKIM_STATION_SNR_GAIN 0.2
+
 typedef struct {
   char    call[16];
   char    mode[8];      /* "CW", "RTTY", "PSK31" ... */
   double  freq_hz;
   double  speed;        /* WPM or baud */
-  double  snr_db;
+  double  snr_db;       /* SNR in 500 Hz for the CW backends (decode.h): an
+                         * EMA of the record's reports (gh#27)             */
+  double  snr_peak;     /* the strongest report's dB — positions the
+                         * station on its peak against ghost reports; the
+                         * table keeps it, a report leaves it 0           */
   double  score;        /* best callsign plausibility seen */
   gboolean cq;          /* heard CALLING (CQ/TEST/QRZ context) — owns the
                          * frequency; S&P answers report cq=FALSE */

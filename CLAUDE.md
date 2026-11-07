@@ -110,8 +110,15 @@ here; what was done and why is in git.
   A third backend, DeepCW (neural, ONNX Runtime via `dlopen`, model outside
   git), is chosen in Preferences → Decoding; without the runtime or the model
   the pipeline falls back to v2.
-- **`meson test` = 14 gates.** It does NOT relink the app — build
+- **`meson test` = 15 gates.** It does NOT relink the app — build
   `ninja skimmer-for-linux` explicitly or an old binary keeps running.
+- **The dB of a spot is SNR in 500 Hz** — CW Skimmer's scale, so the figure
+  stands beside other skimmers' on RBN (#27). The signal from the station's
+  channel, the noise density from the whole band (the pipeline's median over
+  the bank, `decode.h` `noise`/`set_band_noise`), the channel filter's skirt
+  added back at the tone's offset. `docs/SNR.md` has the definition, the
+  estimators and the measured numbers; `skimmer-snr-test` holds both CW
+  backends to ±2 dB on synthetic stations.
 - Richard's live instance runs from `builddir`. Recorded IQ fixtures live in
   `~/.local/share/skimmer-for-linux/fixtures/` — **never under `/var/tmp`**,
   which is cleaned after 30 days (every fixture before 2026-10 was lost that

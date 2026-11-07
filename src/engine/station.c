@@ -255,10 +255,24 @@ const SkimStation *skim_station_table_report(SkimStationTable *t,
        * replacement: single estimates scatter ±10-20 Hz around the carrier,
        * averaging converges onto it (stations sit on round frequencies;
        * 14048.99 for a 14049.00 station bugged Richard, 2026-07-15). */
-      if (st->snr_db >= e->snr_db) {
+      if (st->snr_db >= e->snr_peak) {
         e->freq_hz += 0.3 * (st->freq_hz - e->freq_hz);
-        e->snr_db  = st->snr_db;
-        e->speed   = st->speed;
+        e->snr_peak = st->snr_db;
+        e->speed    = st->speed;
+      }
+      /* The dB SHOWN follows the reports as an EMA of their POWER, not as
+       * their maximum (gh#27): the maximum of a minute of estimates is the
+       * upper edge of their scatter and, on real air, the peak of the
+       * station's QSB — CW Skimmer's figure is the signal strength over
+       * ~45 s of history "assuming the Rayleigh fading model", whose
+       * estimate is the mean power (a mean of dB values would sit 2.5 dB
+       * under it on a fully fading signal). The positioning rule above
+       * keeps comparing against the peak, so the record's frequency moves
+       * exactly as before. */
+      {
+        const double ep = pow(10.0, e->snr_db / 10.0);
+        const double rp = pow(10.0, st->snr_db / 10.0);
+        e->snr_db = 10.0 * log10(MAX(ep + SKIM_STATION_SNR_GAIN * (rp - ep), 1e-6));
       }
       e->score      = MAX(e->score, st->score);
       e->hearings   = MAX(e->hearings, st->hearings);
@@ -282,6 +296,7 @@ const SkimStation *skim_station_table_report(SkimStationTable *t,
       }
       e->freq_hz    = st->freq_hz;
       e->snr_db     = st->snr_db;
+      e->snr_peak   = st->snr_db;
       e->speed      = st->speed;
       e->score      = MAX(e->score, st->score);
       e->hearings   = MAX(e->hearings, st->hearings);
@@ -294,7 +309,8 @@ const SkimStation *skim_station_table_report(SkimStationTable *t,
     return e;
   }
   SkimStation *e = g_memdup2(st, sizeof(*st));
-  e->reports = 1;
+  e->reports  = 1;
+  e->snr_peak = st->snr_db;
   if (list) {
     list = g_slist_append(list, e);           /* head unchanged, no reinsert */
   } else {

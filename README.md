@@ -202,6 +202,9 @@ DX de OK1BR-#:   14043.0  UN8PT        CW    20 dB   0 WPM  CQ      0928Z
 DX de OK1BR-#:   14025.6  OH3KAV       CW    31 dB  35 WPM  CQ      0928Z
 ```
 
+The dB is SNR in 500 Hz — the scale CW Skimmer reports and RBN lists, so the
+figure stands beside the other skimmers' for the same station.
+
 The feed is stricter than the panadapter: a callsign reaches the panadapter at
 a confidence of 0.70, the feed at 0.85, and the feed always sends CQ callers
 only. The score alone is not enough: one copy keyed after "CQ DE" already

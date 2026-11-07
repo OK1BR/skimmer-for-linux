@@ -58,6 +58,9 @@ struct _SkimChannelizer {
   guint   *wr;              /* per-channel write index                        */
   guint   *cnt;              /* per-channel valid frames (≤ RING_CAP)         */
   guint64  dropped;
+
+  float   *resp_db;         /* |H|² in dB at 0, 1, 2 … resp_n−1 Hz (lazy)    */
+  guint    resp_n;
 };
 
 SkimChannelizer *skim_channelizer_new(double in_rate, double chan_bw_hz) {
@@ -114,6 +117,35 @@ SkimChannelizer *skim_channelizer_new_ex(double in_rate, double chan_bw_hz,
   return ch;
 }
 
+double skim_channelizer_response_db(const SkimChannelizer *ch, double off_hz) {
+  SkimChannelizer *w = (SkimChannelizer *)ch;        /* lazy table */
+  if (!w->resp_db) {
+    w->resp_n  = (guint)ceil(w->chan_bw) + 1;        /* 0 … chan_bw Hz */
+    w->resp_db = g_new(float, w->resp_n);
+    for (guint f = 0; f < w->resp_n; f++) {
+      double re = 0.0, im = 0.0;
+      const double wf = 2.0 * G_PI * (double)f / w->in_rate;
+      for (guint n = 0; n < w->P; n++) {
+        re += w->proto[n] * cos(wf * (double)n);
+        im -= w->proto[n] * sin(wf * (double)n);
+      }
+      w->resp_db[f] = (float)(10.0 * log10(MAX(re * re + im * im, 1e-12)));
+    }
+  }
+  const double a = fabs(off_hz);
+  if (a >= (double)(w->resp_n - 1))
+    return w->resp_db[w->resp_n - 1];
+  const guint i = (guint)a;
+  const double t = a - (double)i;
+  return (1.0 - t) * w->resp_db[i] + t * w->resp_db[i + 1];
+}
+
+double skim_channelizer_enbw_hz(const SkimChannelizer *ch) {
+  double e = 0.0;
+  for (guint i = 0; i < ch->P; i++) { e += (double)ch->proto[i] * ch->proto[i]; }
+  return e * ch->in_rate;
+}
+
 void skim_channelizer_free(SkimChannelizer *ch) {
   if (!ch)
     return;
@@ -125,6 +157,7 @@ void skim_channelizer_free(SkimChannelizer *ch) {
   g_free(ch->ring);
   g_free(ch->wr);
   g_free(ch->cnt);
+  g_free(ch->resp_db);
   g_free(ch);
 }
 

@@ -64,7 +64,12 @@ live session (in OK1HRA's fork, offline wins twice lost on live air — #28).
   a DE right after that call taking it back, `1` the three tokens of
   CQ's window, `0` no window after TU at all. `SKIM_ADDRESSED_DEBUG=1`
   prints every call a report or DE addressed and what that did to its
-  window (none, clean and kept, withdrawn).
+  window (none, clean and kept, withdrawn). `SKIM_NOISE_DEBUG=1` prints,
+  once a second, the band's noise profile behind the dB column (gh#27,
+  `docs/SNR.md`): the median over the bank of the channels' noise
+  statistic and its quartiles, deciles and ends in dB relative to it — on
+  the 2026-11-01 recording the quartiles sit at −1.0/+1.5 dB, the deciles
+  at −6/+3.6, which is how representative the median is.
 - Deterministic: two runs over the same input are byte-identical (cw-v2,
   2026-11-01). About 36× real time on cw-v2 at 192 kHz on the development
   machine, so an evening of air replays in minutes.

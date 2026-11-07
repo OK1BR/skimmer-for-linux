@@ -407,6 +407,14 @@ typedef struct {
   double  lvl_ema, off_ema;
   double  env_lo;               /* channel noise floor (inner bins, EMA)   */
   double  win_peak;             /* strongest line magnitude in the window  */
+  double  nacc;                 /* Σ over the running second of the frame's
+                                 * total power in the 11 bins              */
+  guint   nacc_n;
+  double  nmean;                /* that total, mean of the last whole
+                                 * second (decode.h noise(); 0 = none)     */
+  double  band_n0;              /* the band's noise density in bin units,
+                                 * N0·(Σw)² per Hz, from the bank's median
+                                 * (decode.h set_band_noise); 0 = untold   */
   double  snr_db, wpm;
   gboolean gate;
   double  ratio_db, duty;
@@ -581,13 +589,16 @@ static void workers_ensure(void) {
 }
 
 static guint g_reg;                     /* channel registration counter   */
-/* Band-wide noise floor: an EMA over EVERY channel's per-frame inner-bin
- * floor (engine thread only; one pipeline per process). A station's own
- * channel cannot measure the noise under it — a 37 dB station's inner bins
- * hold its keying leakage and its SNR read 12 dB while its −12 dB spur read
- * 14 dB (80 m fixture: the table parked OK1DOL on the spur). Against the
- * band floor the two rank as they should. */
-static double g_band_floor;
+/* The band's noise comes from the pipeline (decode.h noise /
+ * set_band_noise): the median over the bank of every channel's total
+ * power in its 11 bins over the last second. A station's own channel
+ * cannot measure the noise under it — a 37 dB station's inner bins hold
+ * its keying leakage and its SNR read 12 dB while its −12 dB spur read
+ * 14 dB (80 m fixture: the table parked OK1DOL on the spur); against the
+ * band's noise the two rank as they should. (Until gh#27 this was a
+ * process-global EMA over every channel's inner-bin floor — a mean, which
+ * every strong station in a contest lifted, taken on bins that sit on the
+ * channel filter's skirt and so read the noise 2 dB low.) */
 
 static gpointer dcw_channel_new(double rate) {
   tune_init();
@@ -803,14 +814,52 @@ static void window_stats(DcwState *st, guint64 w0, guint64 w1) {
     }
   }
   st->gate = st->ratio_db >= g_tune.gate_db && st->duty >= 0.03 && st->duty <= 0.97;
-  /* Peak over the per-bin floor, minus 10 dB: a 12.5 Hz bin holds a tenth
-   * of the 125 Hz channel's noise v2 measures against — the two engines'
-   * dB columns should mean roughly the same thing (approximate: leakage
-   * caps the readable SNR of very strong stations around 30 dB). */
-  /* SNR of the trace = the window's strongest moment (the decaying peak
-   * hold read −2…39 dB on one station between ticks after pauses). */
-  st->snr_db = 20.0 * log10(MAX(st->win_peak, 1e-12) /
-                            MAX(MIN(st->env_lo, g_band_floor), 1e-12)) - 10.0;
+  /* SNR in 500 Hz (decode.h snr_db, gh#27) — CW Skimmer's own recipe
+   * (VE3NEA via N4ZR, RBN blog 2014-03-05): the key-on samples give the
+   * signal, the noise density comes from the flat spectrum of the whole
+   * band, times 500 Hz. Here: the key-down power of the line — the frames
+   * within 3 dB of the window's peak (a dit at 25 WPM is shorter than the
+   * 80 ms DFT window, so only the solid frames inside dahs and long dits
+   * show the carrier whole) — summed over the line bin and its two
+   * neighbours: for a Hann window that sum is 1.5× the tone's bin-centre
+   * power wherever the tone sits between bins (1.47–1.50), so no
+   * scalloping term is needed. The noise power per bin comes from the
+   * band's noise density (the pipeline's median over the bank, decode.h
+   * set_band_noise) times a Hann bin's 1.5 bins of noise bandwidth, and is
+   * subtracted bin for bin; that same 18.75 Hz refers the ratio to 500 Hz.
+   * Measured in skimmer-snr-test against stations of known SNR: within
+   * 0.7 dB from 3 to 30 dB. The old column was the window peak over this
+   * channel's inner-bin floor minus 10 dB — ~8 dB high, and 2 dB of that
+   * because the inner bins sit on the channel filter's skirt. */
+  {
+    /* Noise power per bin: the band's density × a Hann bin's 1.5 bins of
+     * noise bandwidth; before the pipeline has told it, 4/π × the squared
+     * Rayleigh mean of this channel's own inner-bin floor. */
+    double nb;
+    if (st->band_n0 > 0.0) {
+      nb = st->band_n0 * (1.5 * DCW_BIN_HZ);
+    } else {
+      const double flm = MAX(st->env_lo, 1e-12);
+      nb = (4.0 / G_PI) * flm * flm;
+    }
+    const guint  b0  = p > 0 ? p - 1 : p;
+    const guint  b1  = p + 1 < DCW_KEEP ? p + 1 : p;
+    const double solid = 0.7 * mx;                       /* within 3 dB     */
+    double p3 = 0.0; guint non = 0;
+    for (guint64 f = w0; f < w1; f++) {
+      const float *r = ring_row(st, f);
+      if (r[p] <= solid) continue;
+      for (guint b = b0; b <= b1; b++) p3 += (double)r[b] * r[b];
+      non++;
+    }
+    if (non) {
+      const guint  nbins = b1 - b0 + 1;
+      const double hsum  = nbins == 3 ? 1.5 : 1.25;      /* Hann 3-bin / 2-bin */
+      const double sig   = (p3 / non - nbins * nb) / hsum;
+      st->snr_db = 10.0 * log10(MAX(sig, 1e-3 * nb) / nb) +
+                   10.0 * log10(1.5 * DCW_BIN_HZ / 500.0);
+    }
+  }
 }
 
 /* Tail dump: one line per applied window, so a frame index maps to channel
@@ -1262,8 +1311,21 @@ static void dcw_frame(DcwState *st) {
    * quietest the OTHER bins have been lately instead: fast down, ~8 s up. */
   if (st->env_lo <= 0.0) { st->env_lo = fl; }
   else { st->env_lo += 0.01 * (fl - st->env_lo); }
-  if (g_band_floor <= 0.0) { g_band_floor = fl; }
-  else { g_band_floor += 2e-6 * (fl - g_band_floor); }   /* ~10 s over the bank */
+  /* The frame's total power in the 11 bins, meaned over the running
+   * second: the band-noise statistic (decode.h noise()). Hann bins at
+   * their own spacing cover the band 1.5× over, so on a quiet channel
+   * the mean is 1.5·N0·(Σw)²·ENBW — the pipeline's median over the bank
+   * comes back through set_band_noise as the band's noise density. */
+  {
+    double tot = 0.0;
+    for (guint b = 0; b < DCW_KEEP; b++) tot += (double)mags[b] * mags[b];
+    st->nacc += tot;
+    if (++st->nacc_n >= MAX((guint)(st->rate / st->hop), 1u)) {
+      st->nmean  = st->nacc / st->nacc_n;
+      st->nacc   = 0.0;
+      st->nacc_n = 0;
+    }
+  }
   if (mags[p] > 4.0f * fl && mags[p] > 0.5 * st->lvl_ema &&
       p > 0 && p < DCW_KEEP - 1) {
     const double l = log((double)MAX(mags[p - 1], 1e-9f));
@@ -1341,6 +1403,11 @@ static gboolean dcw_process(gpointer state, const float *iq, guint nframes,
 }
 
 static double dcw_level(gpointer state) { return ((DcwState *)state)->lvl_ema; }
+static double dcw_noise(gpointer state) { return ((DcwState *)state)->nmean; }
+static void dcw_set_band_noise(gpointer state, double noise, double enbw_hz) {
+  DcwState *st = state;
+  if (noise > 0 && enbw_hz > 0) { st->band_n0 = noise / (1.5 * enbw_hz); }
+}
 static double dcw_tone_offset_hz(gpointer state) { return ((DcwState *)state)->off_ema; }
 static void dcw_set_freq(gpointer state, double freq_hz) { ((DcwState *)state)->freq_hz = freq_hz; }
 
@@ -1410,6 +1477,9 @@ const SkimDecodeBackend *skim_decode_deepcw(void) {
     .take_pane_op   = dcw_take_pane_op,
     .resync         = dcw_resync,
     .hold_begin     = dcw_hold_begin,
+    .noise          = dcw_noise,
+    .set_band_noise = dcw_set_band_noise,
+    .snr_in_500hz   = TRUE,
   };
   return &backend;
 }

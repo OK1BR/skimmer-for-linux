@@ -20,6 +20,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "callsign.h"
@@ -177,6 +178,10 @@ static void hit_free_ops(GArray *ops) {
 struct _SkimPipeline {
   SkimPipelineConfig cfg;
   SkimCwEngine       cw_engine;        /* resolved once (config + env)     */
+  double             chan_enbw;        /* one channel's noise bandwidth, Hz
+                                        * (channelizer.h, gh#27)           */
+  guint64            band_noise_due;   /* stream frame of the next band-
+                                        * noise median (band_noise_update) */
   char              *host;
 
   SkimTciClient    *tci;
@@ -894,6 +899,15 @@ static void iq_cb(const float *iq, guint nframes, double rate, double center,
 
 /* ---- engine thread ------------------------------------------------------------ */
 
+/* A decoder for one lane of the bank, told the noise bandwidth of what it
+ * will be fed (decode.h set_noise_bw — gh#27): the channel's at birth; a
+ * narrow slot's filter is told on every block (the drain loop). */
+static gpointer lane_new(const SkimPipeline *p, const SkimDecodeBackend *cw) {
+  gpointer dec = cw->channel_new(skim_channelizer_out_rate(p->bank));
+  if (cw->set_noise_bw) { cw->set_noise_bw(dec, p->chan_enbw); }
+  return dec;
+}
+
 static void bank_build(SkimPipeline *p, double rate) {
   bank_teardown(p);
   /* RTTY: wide passband (0.9·spacing — 225 Hz at the default 250, holding
@@ -909,6 +923,8 @@ static void bank_build(SkimPipeline *p, double rate) {
     return;
   }
   p->bank_rate = rate;
+  p->chan_enbw = skim_channelizer_enbw_hz(p->bank);
+  p->band_noise_due = 0;
   p->nchan = skim_channelizer_count(p->bank);
   p->dec = g_new0(gpointer, p->nchan * NSLOT);
   p->ext = g_new0(SkimCallsignExtractor *, p->nchan * NSLOT);
@@ -920,7 +936,7 @@ static void bank_build(SkimPipeline *p, double rate) {
   const SkimDecodeBackend *cw = pipe_backend(p);
   const double out_rate = skim_channelizer_out_rate(p->bank);
   for (guint c = 0; c < p->nchan; c++) {
-    p->dec[SL(c, WIDE_LANE)] = cw->channel_new(out_rate);
+    p->dec[SL(c, WIDE_LANE)] = lane_new(p, cw);
     p->ext[SL(c, WIDE_LANE)] = skim_callsign_extractor_new();
     if (p->split) {
       p->split[c] = skim_tone_split_new(out_rate);
@@ -1019,7 +1035,7 @@ static void slot_sync(SkimPipeline *p, guint c, guint s,
                (void *)p->split[c]);
   }
   if (p->dec[i]) { cw->channel_free(p->dec[i]); }
-  p->dec[i] = cw->channel_new(skim_channelizer_out_rate(p->bank));
+  p->dec[i] = lane_new(p, cw);
   if (p->ext[i]) {
     skim_callsign_extractor_reset(p->ext[i]);
   } else {
@@ -1102,6 +1118,49 @@ static void spec_feed(SkimPipeline *p, const IqBlock *b) {
 static void dispatch_text(SkimPipeline *p, guint c, guint slot, double sig_hz,
                           gboolean contested, const SkimDecode *d);
 
+static int cmp_double(const void *a, const void *b) {
+  const double x = *(const double *)a, y = *(const double *)b;
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/* The band's noise (decode.h noise / set_band_noise, gh#27): once a second
+ * of stream time, the MEDIAN over the bank of every wide lane's noise
+ * statistic — the channels with a station read high and fall out of the
+ * median — handed back to every live lane with the channels' noise
+ * bandwidth. CW Skimmer's rule: the signal from the station's channel, the
+ * noise density from the whole receiver's spectrum. */
+static void band_noise_update(SkimPipeline *p, const SkimDecodeBackend *cw) {
+  if (!cw->noise || !cw->set_band_noise || p->frames < p->band_noise_due)
+    return;
+  p->band_noise_due = p->frames + (guint64)MAX(p->bank_rate, 1.0);
+  double *v = g_new(double, p->nchan);
+  guint n = 0;
+  for (guint c = 0; c < p->nchan; c++) {
+    gpointer dec = p->dec[SL(c, WIDE_LANE)];
+    const double x = dec ? cw->noise(dec) : 0.0;
+    if (x > 0.0) { v[n++] = x; }
+  }
+  if (n >= 8) {
+    qsort(v, n, sizeof(double), cmp_double);
+    const double med = n & 1 ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
+    if (G_UNLIKELY(g_getenv("SKIM_NOISE_DEBUG"))) {
+      /* the bank's noise profile: quartiles and the two ends, in dB
+       * relative to the median — how representative the median is */
+      g_printerr("noise: t=%.0f s n=%u med %.4g  p10 %+.1f p25 %+.1f p75 %+.1f p90 %+.1f "
+                 "min %+.1f max %+.1f dB\n", pipe_now_us(p) / 1e6, n, med,
+                 20.0 * log10(v[n / 10] / med), 20.0 * log10(v[n / 4] / med),
+                 20.0 * log10(v[3 * n / 4] / med), 20.0 * log10(v[9 * n / 10] / med),
+                 20.0 * log10(v[0] / med), 20.0 * log10(v[n - 1] / med));
+    }
+    for (guint c = 0; c < p->nchan; c++) {
+      for (guint s = 0; s < NSLOT; s++) {
+        if (p->dec[SL(c, s)]) { cw->set_band_noise(p->dec[SL(c, s)], med, p->chan_enbw); }
+      }
+    }
+  }
+  g_free(v);
+}
+
 /* Pass 2 of a block: arbitrate the collected hits (p->hits) and dispatch the
  * survivors — decode log, pane, extractor, station table, spot sinks. */
 static void dispatch_hits(SkimPipeline *p, const IqBlock *b,
@@ -1111,6 +1170,15 @@ static void dispatch_hits(SkimPipeline *p, const IqBlock *b,
     const Hit *h = &g_array_index(p->hits, Hit, i);
     const guint c = h->chan;
     d = h->d;
+    /* gh#27: the tone reached the decoder through the channel filter's
+     * skirt (−6 dB at the channel edge), the band's noise density did not
+     * — add the skirt back. Capped a little past the edge: an offset
+     * estimate that has run away must not mint a +20 dB station. */
+    if (cw->snr_in_500hz && d.text[0]) {
+      const double off = CLAMP(h->eff_off, -0.6 * p->cfg.chan_bw_hz,
+                               0.6 * p->cfg.chan_bw_hz);
+      d.snr_db -= skim_channelizer_response_db(p->bank, off);
+    }
     if (cw->level && ghost_suppressed(p, p->lvl, c, h->slot, h->eff_off)) {
       p->ghosts++;
       g_free(h->aux);
@@ -1448,7 +1516,7 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
            * (Pre-reground this was slot 0; leaving it there left WIDE_LANE
            * NULL and the first block after a centre change segfaulted —
            * live-caught 2026-08-01, 45 min into a contest.) */
-          p->dec[i] = (s == WIDE_LANE) ? cwf->channel_new(out_rate) : NULL;
+          p->dec[i] = (s == WIDE_LANE) ? lane_new(p, cwf) : NULL;
           if (p->ext[i]) { skim_callsign_extractor_reset(p->ext[i]); }
           p->sgen[i] = 0;
         }
@@ -1517,6 +1585,10 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
           cw->set_freq(p->dec[SL(c, lane)],
                        chan_hz + skim_tone_split_slot_hz(sp, s));
         }
+        if (cw->set_noise_bw && insplit) {   /* the slot filter rides the WPM */
+          const double e = skim_tone_split_slot_enbw(sp, s);
+          cw->set_noise_bw(p->dec[SL(c, lane)], e > 0 ? e : p->chan_enbw);
+        }
         float sbuf[DRAIN_FRAMES * 2];
         guint m;
         while ((m = skim_tone_split_read(sp, s, sbuf, DRAIN_FRAMES)) > 0) {
@@ -1554,6 +1626,7 @@ static void process_block(SkimPipeline *p, IqBlock *b) {
     }
   }
 
+  band_noise_update(p, cw);
   dispatch_hits(p, b, cw);
 }
 

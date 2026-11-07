@@ -759,6 +759,16 @@ gboolean skim_tone_split_slot_contested(const SkimToneSplit *ts, guint slot) {
   return slot < ts->nslots ? ts->slot[slot].contested : FALSE;
 }
 
+double skim_tone_split_slot_enbw(const SkimToneSplit *ts, guint slot) {
+  if (!ts->split || slot >= ts->nslots)
+    return 0.0;
+  double e = 0.0;
+  for (guint k = 0; k < TS_TAPS; k++) {
+    e += (double)ts->slot[slot].taps[k] * ts->slot[slot].taps[k];
+  }
+  return e * ts->rate;
+}
+
 gboolean skim_tone_split_is_split(const SkimToneSplit *ts) {
   return ts->split;
 }

@@ -72,6 +72,12 @@ guint skim_tone_split_slot_gen(const SkimToneSplit *ts, guint slot);
  * decode text is beat-garbled; keep it out of the callsign candidates. */
 gboolean skim_tone_split_slot_contested(const SkimToneSplit *ts, guint slot);
 
+/* Equivalent noise bandwidth (Hz) of the slot's filter — rate·Σtaps² of
+ * the unity-gain FIR (the slot sees the channel's noise through it); 0 in
+ * passthrough, where the channel's own bandwidth applies. After OK1HRA's
+ * fork (5b21199), for the SNR-in-500-Hz conversion of gh#27. */
+double skim_tone_split_slot_enbw(const SkimToneSplit *ts, guint slot);
+
 /* TRUE while narrow slots are engaged (split or focus). FALSE = slot 0 is
  * the verbatim wide passthrough — the owner can keep a PERSISTENT decoder
  * behind it instead of resetting on every engage/collapse generation. */

@@ -44,6 +44,23 @@ guint  skim_channelizer_count(const SkimChannelizer *ch);
 /* Per-channel output sample rate (= 2·chan_bw_hz). */
 double skim_channelizer_out_rate(const SkimChannelizer *ch);
 
+/* Equivalent noise bandwidth of one channel, in Hz: ∫|H(f)|² df of the
+ * prototype = in_rate · Σh² for the unity-DC-gain taps. White input noise
+ * of density N0 leaves N0·ENBW of power in a channel, so a decoder that
+ * measures the noise of its whole input can state SNR in a reference
+ * bandwidth (500 Hz, the dB of RBN spots — gh#27). The CW bank's default
+ * geometry (±62.5 Hz cutoff, BH4, 8 taps per branch) integrates to about
+ * 0.85 of the channel spacing; the number here is from the taps, not a
+ * constant. */
+double skim_channelizer_enbw_hz(const SkimChannelizer *ch);
+
+/* The prototype's power response at off_hz from a channel's centre, in dB
+ * (≤ 0; 0 at the centre, −6 at the default ±chan_bw/2 cutoff). A tone off
+ * the centre reaches the decoder this much weaker while the band's noise
+ * density does not — the pipeline adds it back to a spot's SNR (gh#27).
+ * Tabulated at 1 Hz from the taps on first use. */
+double skim_channelizer_response_db(const SkimChannelizer *ch, double off_hz);
+
 /* Signed offset of channel chan's centre from the stream centre, in Hz. */
 double skim_channelizer_offset_hz(const SkimChannelizer *ch, guint chan);
 
