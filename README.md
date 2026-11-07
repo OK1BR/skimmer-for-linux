@@ -204,7 +204,14 @@ DX de OK1BR-#:   14025.6  OH3KAV       CW    31 dB  35 WPM  CQ      0928Z
 
 The feed is stricter than the panadapter: a callsign reaches the panadapter at
 a confidence of 0.70, the feed at 0.85, and the feed always sends CQ callers
-only. A frequency outside the amateur bands (2200 m to 6 m, the widest
+only. The score alone is not enough: one copy keyed after "CQ DE" already
+scores 0.90, and so does a garble of it. So a call goes out only once it was
+read at least twice on its channel (a call MASTER.SCP knows passes on one
+reading), and only after a hold of 8 s, during which the station table folds
+a torn reading into the full call — the line is sent from the table as it
+stands after the hold, and a telnet line cannot be taken back. The readings
+and the hold are settings in Preferences → Spots (policy after OK1HRA's
+measurements against RBN). A frequency outside the amateur bands (2200 m to 6 m, the widest
 allocation any region has) never goes out: a wide receiver span hears past
 the band edge, the panadapter shows it, the feed does not. A station is
 repeated no more often than every 600 s unless it moves.

@@ -39,6 +39,13 @@
 /* Matching the radio's TUNED frequency to a station/slot needs slack (the
  * radio tunes on its 100 Hz step, the station sits on its exact carrier). */
 #define TUNED_WINDOW_HZ   SKIM_STATION_MERGE_HZ
+/* gh#24 feed gate: the Preferences ranges and the defaults, which mirror
+ * the engine's (RBN_*_DEFAULT in pipeline.c) — change both together. */
+#define RBN_READS_MIN             1
+#define RBN_READS_MAX             5
+#define RBN_READS_DEFAULT         2
+#define RBN_SETTLE_MAX            300
+#define RBN_SETTLE_DEFAULT        8
 /* ROUTING decode text into a history slot must be TIGHT: the engine pins
  * each signal's frequency now, so a slot is one signal — a ±300 Hz routing
  * window let neighbouring stations interleave into one another's history
@@ -117,6 +124,11 @@ typedef struct {
   gboolean        rbn_enabled;   /* persisted [rbn]                           */
   char           *rbn_call;      /* spotter callsign (persisted)              */
   int             rbn_port;      /* telnet port (persisted, default 7300)     */
+  int             rbn_reads;     /* gh#24 feed gate (persisted [rbn]): readings
+                                  * a call needs (1 = any) and the hold before
+                                  * its first line in s (0 = none); the
+                                  * defaults mirror the engine's             */
+  int             rbn_settle_s;
   SkimScpUpdater *scp;           /* MASTER.SCP kept current in the background
                                   * (gh#15); NULL while switched off          */
   gboolean        scp_auto;      /* persisted [scp] auto_update, default on   */
@@ -1224,6 +1236,8 @@ static void settings_load_rbn(App *app) {
   app->rbn_enabled = FALSE;
   app->rbn_call    = NULL;
   app->rbn_port    = 7300;                     /* the CW Skimmer convention  */
+  app->rbn_reads   = RBN_READS_DEFAULT;
+  app->rbn_settle_s = RBN_SETTLE_DEFAULT;
   if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
     if (g_key_file_has_key(kf, "rbn", "enabled", NULL)) {
       app->rbn_enabled = g_key_file_get_boolean(kf, "rbn", "enabled", NULL);
@@ -1232,6 +1246,14 @@ static void settings_load_rbn(App *app) {
     if (g_key_file_has_key(kf, "rbn", "port", NULL)) {
       int port = g_key_file_get_integer(kf, "rbn", "port", NULL);
       if (port > 0 && port <= 65535) { app->rbn_port = port; }
+    }
+    if (g_key_file_has_key(kf, "rbn", "min_readings", NULL)) {
+      app->rbn_reads = CLAMP(g_key_file_get_integer(kf, "rbn", "min_readings", NULL),
+                             RBN_READS_MIN, RBN_READS_MAX);
+    }
+    if (g_key_file_has_key(kf, "rbn", "settle_s", NULL)) {
+      app->rbn_settle_s = CLAMP(g_key_file_get_integer(kf, "rbn", "settle_s", NULL),
+                                0, RBN_SETTLE_MAX);
     }
   }
   g_key_file_free(kf);
@@ -1256,6 +1278,8 @@ static void settings_save(const App *app) {
   g_key_file_set_boolean(kf, "rbn", "enabled", app->rbn_enabled);
   g_key_file_set_string(kf, "rbn", "call", app->rbn_call);
   g_key_file_set_integer(kf, "rbn", "port", app->rbn_port);
+  g_key_file_set_integer(kf, "rbn", "min_readings", app->rbn_reads);
+  g_key_file_set_integer(kf, "rbn", "settle_s", app->rbn_settle_s);
   g_key_file_set_boolean(kf, "scp", "auto_update", app->scp_auto);
   g_key_file_set_integer(kf, "ui", "decode_font_pt", app->decode_font);
   g_key_file_set_integer(kf, "ui", "palette", app->palette);
@@ -1533,6 +1557,12 @@ static SkimPipeline *pipeline_create(App *app) {
     .dict_path = g_file_test(dict, G_FILE_TEST_EXISTS) ? dict : NULL,
     .decode_log_path = dlog,
     .rbn = app->rbn,                           /* NULL when the feed is off  */
+    /* gh#24 feed gate; the engine reads 0 as "default" and < 0 as "off".
+     * The hold of a call MASTER.SCP does not know stays at the engine's
+     * default (the same hold) — a bench knob until a recording shows a
+     * longer one earns its place. */
+    .rbn_min_hearings    = (guint)app->rbn_reads,
+    .rbn_settle_s        = app->rbn_settle_s > 0 ? app->rbn_settle_s : -1,
   };
   SkimPipeline *p = skim_pipeline_new(&cfg);
   g_message("app: pipeline engine %s", skim_pipeline_cw_engine_name(p));
@@ -1723,6 +1753,8 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   GtkWidget *rsw  = g_object_get_data(G_OBJECT(dlg), "rbn-row");
   GtkWidget *rcall = g_object_get_data(G_OBJECT(dlg), "rbn-call-row");
   GtkWidget *rport = g_object_get_data(G_OBJECT(dlg), "rbn-port-row");
+  GtkWidget *rreads = g_object_get_data(G_OBJECT(dlg), "rbn-reads-row");
+  GtkWidget *rhold  = g_object_get_data(G_OBJECT(dlg), "rbn-hold-row");
   GtkWidget *scprow = g_object_get_data(G_OBJECT(dlg), "scp-row");
   const char *sv = gtk_editable_get_text(GTK_EDITABLE(row));
   char *server = g_strstrip(g_strdup(sv ? sv : ""));
@@ -1742,6 +1774,8 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   gboolean rbn_enabled = adw_switch_row_get_active(ADW_SWITCH_ROW(rsw));
   char *rbn_call = g_strstrip(g_strdup(gtk_editable_get_text(GTK_EDITABLE(rcall))));
   int rbn_port = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rport));
+  int rbn_reads = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rreads));
+  int rbn_settle = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rhold));
   guint dec_mode = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(mrow)), 1u);
   guint cw_engine = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(erow)), 1u);
   guint dcw_device = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(drow)), 1u);
@@ -1756,7 +1790,9 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   gboolean font_changed = font_pt != app->decode_font;
   gboolean rbn_changed  = rbn_enabled != app->rbn_enabled ||
                           g_strcmp0(rbn_call, app->rbn_call) != 0 ||
-                          rbn_port != app->rbn_port;
+                          rbn_port != app->rbn_port ||
+                          rbn_reads != app->rbn_reads ||
+                          rbn_settle != app->rbn_settle_s;
   if (server_changed) {
     g_free(app->server);
     app->server = server;
@@ -1784,6 +1820,8 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
     g_free(app->rbn_call);
     app->rbn_call = rbn_call;
     app->rbn_port = rbn_port;
+    app->rbn_reads = rbn_reads;
+    app->rbn_settle_s = rbn_settle;
     rbn_apply(app);
   } else {
     g_free(rbn_call);
@@ -2021,6 +2059,25 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   adw_preferences_row_set_title(ADW_PREFERENCES_ROW(rport), "Telnet port");
   adw_spin_row_set_value(ADW_SPIN_ROW(rport), app->rbn_port);
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(rgrp), rport);
+  /* gh#24: the feed gate. One copy keyed after "CQ DE" scores like a real
+   * call, and so does a garble of it — the feed asks for more before a
+   * line goes on the wire, which cannot be taken back. */
+  GtkWidget *rreads = adw_spin_row_new_with_range(RBN_READS_MIN, RBN_READS_MAX, 1);
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(rreads),
+                                "Readings before a spot");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(rreads),
+      "How often a call must be read on its channel before the feed sends "
+      "it; a call MASTER.SCP knows passes on one");
+  adw_spin_row_set_value(ADW_SPIN_ROW(rreads), app->rbn_reads);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(rgrp), rreads);
+  GtkWidget *rhold = adw_spin_row_new_with_range(0, RBN_SETTLE_MAX, 1);
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(rhold),
+                                "Hold before the first spot (s)");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(rhold),
+      "The line is sent from the station table as it stands after the "
+      "hold: a torn call folded into the full one by then never goes out");
+  adw_spin_row_set_value(ADW_SPIN_ROW(rhold), app->rbn_settle_s);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(rgrp), rhold);
   adw_preferences_page_add(p_spots, ADW_PREFERENCES_GROUP(rgrp));
 
   GtkWidget *ugrp = adw_preferences_group_new();
@@ -2067,6 +2124,8 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   g_object_set_data(G_OBJECT(dlg), "rbn-row", rsw);
   g_object_set_data(G_OBJECT(dlg), "rbn-call-row", rcall);
   g_object_set_data(G_OBJECT(dlg), "rbn-port-row", rport);
+  g_object_set_data(G_OBJECT(dlg), "rbn-reads-row", rreads);
+  g_object_set_data(G_OBJECT(dlg), "rbn-hold-row", rhold);
   g_signal_connect(dlg, "closed", G_CALLBACK(prefs_closed), app);
   adw_dialog_present(dlg, GTK_WIDGET(app->window));
 }

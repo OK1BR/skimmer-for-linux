@@ -834,6 +834,16 @@ double skim_callsign_extractor_best(SkimCallsignExtractor *x,
   return skim_callsign_extractor_best_ex(x, out, out_size, NULL);
 }
 
+guint skim_callsign_extractor_hearings(const SkimCallsignExtractor *x,
+                                       const char *call) {
+  if (!x || !call || !call[0])
+    return 0;
+  for (guint i = 0; i < x->ncand; i++) {
+    if (strcmp(x->cand[i].call, call) == 0) { return x->cand[i].count; }
+  }
+  return 0;
+}
+
 double skim_callsign_extract(const char *text, char *out, gsize out_size) {
   SkimCallsignExtractor *x = skim_callsign_extractor_new();
   skim_callsign_extractor_feed(x, text);

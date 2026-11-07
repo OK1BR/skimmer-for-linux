@@ -289,23 +289,24 @@ static GHashTable *units_of(GArray *a) {
 
 static int diff_main(const char *pa, const char *pb, gboolean list) {
   GArray *a = tap_load(pa), *b = tap_load(pb);
-  /* Compare over the time both runs cover — a warm-up shift starts later. */
-  gint64 lo = G_MININT64, hi = G_MAXINT64;
+  /* Compare from the time both runs cover — a warm-up shift starts later.
+   * The END is not trimmed: both runs end with the recording, and a feed
+   * policy that holds a call (gh#24) releases the last one AFTER the other
+   * run's last record — trimming there listed it as lost (DM1BM, 2026-11-07). */
+  gint64 lo = G_MININT64;
   GArray *tmp[2] = { a, b };
   for (int k = 0; k < 2; k++) {
-    gint64 mn = G_MAXINT64, mx = G_MININT64;
+    gint64 mn = G_MAXINT64;
     for (guint i = 0; i < tmp[k]->len; i++) {
       mn = MIN(mn, g_array_index(tmp[k], Spot, i).t);
-      mx = MAX(mx, g_array_index(tmp[k], Spot, i).t);
     }
     lo = MAX(lo, mn);
-    hi = MIN(hi, mx);
   }
   for (int k = 0; k < 2; k++) {
     GArray *f = g_array_new(FALSE, FALSE, sizeof(Spot));
     for (guint i = 0; i < tmp[k]->len; i++) {
       const Spot *s = &g_array_index(tmp[k], Spot, i);
-      if (s->t >= lo && s->t <= hi) { g_array_append_val(f, *s); }
+      if (s->t >= lo) { g_array_append_val(f, *s); }
     }
     g_array_free(tmp[k], TRUE);
     tmp[k] = f;
@@ -327,7 +328,7 @@ static int diff_main(const char *pa, const char *pb, gboolean list) {
     }
   }
   const guint uni = common + only_a + only_b;
-  printf("units (call × band × hour) over the common span: A %u, B %u, "
+  printf("units (call × band × hour) from the common start: A %u, B %u, "
          "common %u, only A %u, only B %u — %.1f %% of the union differ\n",
          g_hash_table_size(ua), g_hash_table_size(ub), common, only_a, only_b,
          uni ? 100.0 * (only_a + only_b) / uni : 0.0);

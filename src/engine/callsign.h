@@ -76,6 +76,15 @@ double skim_callsign_extractor_best_ex(SkimCallsignExtractor *x,
                                        char *out, gsize out_size,
                                        gboolean *cq_context);
 
+/* How many copies of `call` this extractor has counted: the times the call
+ * was keyed and READ on this channel — not how often the pipeline reported
+ * it (the best candidate is re-reported after every token). 0 when the
+ * call is no candidate here (never read, or evicted). The RBN feed asks
+ * for two (gh#24): one copy with DE and CQ around it already scores 0.90,
+ * and a garble keyed once reads exactly like that. */
+guint  skim_callsign_extractor_hearings(const SkimCallsignExtractor *x,
+                                        const char *call);
+
 /* One-shot convenience over a complete text buffer (same scoring). */
 double skim_callsign_extract(const char *text, char *out, gsize out_size);
 

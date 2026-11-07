@@ -63,6 +63,23 @@ typedef struct {
    * puts a label on the local panadapter — the network wants certainty. */
   SkimRbnFeed *rbn;
   double       rbn_min_score;
+  /* gh#24 — the score alone is not enough: ONE copy keyed after "CQ DE"
+   * scores 0.90, and so does a garble of it (OK1HRA, 2.3 h against RBN on
+   * 2026-10-01: 36 % of the feed's calls were never confirmed, CW Skimmer
+   * Server 2 %). A record reaches the feed only once its call was READ
+   * rbn_min_hearings times by one extractor (0 = default 2; 1 = a single
+   * reading suffices) or MASTER.SCP knows it, and only after it stayed in
+   * the station table for rbn_settle_s (0 = default 8 s; < 0 = at once);
+   * a call MASTER.SCP does NOT know waits rbn_settle_nodict_s instead
+   * (0 = default, see RBN_SETTLE_NODICT_S_DEFAULT; < 0 = rbn_settle_s).
+   * The release is from the table's CURRENT record and runs the gate
+   * again, so a torn "IZ3N" that the table folded into "IZ3NYG" meanwhile
+   * is never sent — a telnet line cannot be taken back. The hold is
+   * released on the station-table tick (every 2 s), so it lasts up to 2 s
+   * longer than set. Policy after OK1HRA's fork, written anew here. */
+  guint        rbn_min_hearings;
+  double       rbn_settle_s;
+  double       rbn_settle_nodict_s;
 
   /* gh#28 bench: the RBN policy WITHOUT the telnet server. When rbn is NULL
    * and rbn_tap is set, every record the feed would broadcast — same
@@ -199,6 +216,15 @@ void   skim_pipeline_set_spot_cq_only(SkimPipeline *p, gboolean cq_only);
 /* Snap outgoing spot frequencies (panadapter AND telnet feed) to a grid;
  * 0/1 = exact. Applies live. */
 void   skim_pipeline_set_spot_round_hz(SkimPipeline *p, guint hz);
+
+/* The RBN feed policy in force, defaults resolved: the score bar, the
+ * readings a call needs (1 = no such gate), the hold before its first line
+ * in seconds (0 = none) and the hold of a call MASTER.SCP does not know.
+ * All 0 when the pipeline has neither a feed nor an RBN tap. Any out
+ * pointer may be NULL. */
+void   skim_pipeline_rbn_policy(const SkimPipeline *p, double *min_score,
+                                guint *min_hearings, double *settle_s,
+                                double *settle_nodict_s);
 
 /* Is this frequency inside an amateur band (2200 m to 6 m, the widest
  * allocation any region has, edges inclusive)? The RBN feed refuses every

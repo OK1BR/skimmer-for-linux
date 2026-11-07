@@ -44,6 +44,9 @@ typedef struct {
   gint64  first_heard;  /* g_get_monotonic_time() */
   gint64  last_heard;
   guint   reports;      /* decode events folded into this record */
+  guint   hearings;     /* the most copies of the call ONE extractor counted
+                         * — keyed and read, not reported (callsign.h); the
+                         * RBN feed's readings gate (gh#24) */
 } SkimStation;
 
 typedef struct _SkimStationTable SkimStationTable;

@@ -202,6 +202,41 @@ static guint64 g_origin;               /* recording frame (holes counted) at
 static SkimPipeline *g_pipe;
 static guint64 g_rbn_n;
 
+/* The RBN feed policy knobs (gh#24), for an A/B of two policies over one
+ * tap: SKIM_REPLAY_RBN_MIN the score bar (0.85), SKIM_REPLAY_RBN_READS the
+ * readings a call needs (2; 1 = any single reading), SKIM_REPLAY_RBN_SETTLE
+ * the hold before its first line in seconds (8; -1 = none) and
+ * SKIM_REPLAY_RBN_SETTLE_NODICT the hold of a call MASTER.SCP does not know
+ * (-1 = the same as SETTLE). READS=1 with SETTLE=-1 is the feed as it was
+ * before gh#24. */
+static void rbn_policy_from_env(SkimPipelineConfig *cfg) {
+  const char *e;
+  if ((e = g_getenv("SKIM_REPLAY_RBN_MIN")) && e[0]) {
+    cfg->rbn_min_score = g_ascii_strtod(e, NULL);
+  }
+  if ((e = g_getenv("SKIM_REPLAY_RBN_READS")) && e[0]) {
+    cfg->rbn_min_hearings = (guint)MAX(1, atoi(e));
+  }
+  if ((e = g_getenv("SKIM_REPLAY_RBN_SETTLE")) && e[0]) {
+    const double v = g_ascii_strtod(e, NULL);
+    cfg->rbn_settle_s = v > 0 ? v : -1;
+  }
+  if ((e = g_getenv("SKIM_REPLAY_RBN_SETTLE_NODICT")) && e[0]) {
+    const double v = g_ascii_strtod(e, NULL);
+    cfg->rbn_settle_nodict_s = v > 0 ? v : -1;
+  }
+}
+
+static void print_rbn_policy(const SkimPipeline *p, const char *rlog,
+                             const char *note) {
+  double bar, settle, settle_nd;
+  guint reads;
+  skim_pipeline_rbn_policy(p, &bar, &reads, &settle, &settle_nd);
+  printf("rbn tap: %s (bar %.2f, %u reading%s or MASTER.SCP, hold %.0f s, "
+         "%.0f s for a call MASTER.SCP does not know)%s\n", rlog, bar, reads,
+         reads == 1 ? "" : "s", settle, settle_nd, note);
+}
+
 /* Stamped with the PIPELINE's stream frames (the block end the record was
  * dispatched at) plus the origin — the one clock a tap replay has too, so
  * both paths stamp a record identically. */
@@ -327,13 +362,12 @@ static int replay_tap(const char *path) {
   fseek(f, body_at, SEEK_SET);
 
   char *dict = dict_path_default();
-  const char *rmin = g_getenv("SKIM_REPLAY_RBN_MIN");
   SkimPipelineConfig cfg = {
     .mode = rtty ? SKIM_PIPELINE_MODE_RTTY : SKIM_PIPELINE_MODE_CW,
     .dict_path = dict,
-    .rbn_min_score = rmin && rmin[0] ? g_ascii_strtod(rmin, NULL) : 0,
     .rbn_tap = rbn_tap_cb,
   };
+  rbn_policy_from_env(&cfg);
   SkimPipeline *p = skim_pipeline_new(&cfg);
   g_pipe = p;
   char *rel_now = skim_callsign_dict_release();
@@ -357,9 +391,8 @@ static int replay_tap(const char *path) {
     g_clear_error(&err);
     return 1;
   }
-  printf("rbn tap: %s (bar %.2f)%s\n", rlog,
-         cfg.rbn_min_score > 0 ? cfg.rbn_min_score : 0.85,
-         g_start_unix_us > 0 ? "" : " — no start_unix_us in the header, UTC unknown");
+  print_rbn_policy(p, rlog,
+      g_start_unix_us > 0 ? "" : " — no start_unix_us in the header, UTC unknown");
 
   const gint64 t0 = g_get_monotonic_time();
   guint64 n_ev = 0, n_bad = 0, n_dec = 0;
@@ -451,7 +484,6 @@ int main(int argc, char **argv) {
     g_start_unix_us = meta_get(m, "start_unix_us:");
     g_free(m);
   }
-  const char *rmin = g_getenv("SKIM_REPLAY_RBN_MIN");
   /* SKIM_MODE=rtty replays through the RTTY backend + wide bank (the same
    * config path the app's Mode preference takes); default CW. */
   const char *menv = g_getenv("SKIM_MODE");
@@ -463,10 +495,10 @@ int main(int argc, char **argv) {
     .chan_bw_hz = 0,                   /* mode default: 125 Hz CW, 250 RTTY  */
     .dict_path = dict,
     .decode_log_path = dlog,
-    .rbn_min_score = rmin && rmin[0] ? g_ascii_strtod(rmin, NULL) : 0,
     .rbn_tap = rbn_tap_cb,
     .decode_tap = tap_write_cb,
   };
+  rbn_policy_from_env(&cfg);
   /* SKIM_CW_ENGINE=v1|v2|deepcw picks the CW engine (the app's "CW engine"
    * preference takes the same config field); the pipeline resolves the
    * DeepCW availability itself and falls back to v2 with a warning. A
@@ -518,9 +550,8 @@ int main(int argc, char **argv) {
              ev_tx ? "" : " (tx replaced by SKIM_REPLAY_HOLDS)");
     }
   }
-  printf("rbn tap: %s (bar %.2f)%s\n", rlog,
-         cfg.rbn_min_score > 0 ? cfg.rbn_min_score : 0.85,
-         g_start_unix_us > 0 ? "" : " — no start_unix_us in .meta, UTC unknown");
+  print_rbn_policy(p, rlog,
+      g_start_unix_us > 0 ? "" : " — no start_unix_us in .meta, UTC unknown");
 
   gint64 t0 = g_get_monotonic_time();
   static float buf[BLK * 2];

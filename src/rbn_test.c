@@ -19,6 +19,14 @@
  * must still list DL1ABC (the panadapter shows what it hears), the feed
  * must never send it.
  *
+ * gh#24 feed gate: a tap-mode pipeline driven by hand (decodes at chosen
+ * instants, the table tick every 2 s). With the gate off, one reading
+ * after "CQ DE" and a torn call both go out at once — the bust path. With
+ * the defaults a single reading never goes out, two readings are held 8 s
+ * and released once, the torn call read twice dies with its record when
+ * the full call evicts it, a MASTER.SCP call passes on one reading, and a
+ * call the dictionary does not know waits its longer hold.
+ *
  * gh#28 decode tap: the same band through the offline pipeline with the
  * RBN tap and the decode tap collected — two passes, a 130 s hole (every
  * station TTL-pruned, so the comeback re-spots), a third pass, then the
@@ -33,10 +41,12 @@
 #include <gio/gio.h>
 #include <locale.h>
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "engine/callsign.h"
 #include "engine/pipeline.h"
 #include "engine/rbn_feed.h"
 
@@ -372,6 +382,116 @@ static char *tap_replay(GPtrArray *lines, GString *rbn, gboolean drop_prune) {
   skim_pipeline_free(p);
   t_pipe = NULL;
   return table;
+}
+
+/* --- gh#24: a tap-mode pipeline driven by hand ------------------------------------- */
+
+/* Decodes at chosen instants on chosen channels, the station-table tick
+ * every 2 s in between — the feed policy alone, no IQ, no decoder. */
+typedef struct {
+  SkimPipeline *p;
+  GString      *rbn;                   /* the RBN tap, one line per record     */
+  gint64        now_us;
+  gint64        last_tick_us;
+} FeedSim;
+
+static void sim_ev(const FeedSim *s, SkimTapEvent *ev, SkimTapKind kind) {
+  memset(ev, 0, sizeof(*ev));
+  ev->kind   = kind;
+  ev->frames = (guint64)((double)s->now_us / G_USEC_PER_SEC * RATE);
+  ev->now_us = s->now_us;
+}
+
+static FeedSim *sim_new(guint reads, double settle_s, double settle_nodict_s) {
+  FeedSim *s = g_new0(FeedSim, 1);
+  s->rbn = g_string_new(NULL);
+  SkimPipelineConfig cfg = {
+    .chan_bw_hz          = 125.0,
+    .rbn_tap             = rbn_collect,
+    .rbn_tap_user        = s->rbn,
+    .rbn_min_hearings    = reads,
+    .rbn_settle_s        = settle_s,
+    .rbn_settle_nodict_s = settle_nodict_s,
+  };
+  s->p = skim_pipeline_new(&cfg);
+  t_pipe = s->p;                       /* rbn_collect stamps from it           */
+  GError *err = NULL;
+  if (!skim_pipeline_start_tap(s->p, &err)) {
+    printf("       sim: tap-mode pipeline did not start: %s\n",
+           err ? err->message : "?");
+    g_clear_error(&err);
+  }
+  SkimTapEvent ev;
+  sim_ev(s, &ev, SKIM_TAP_BANK);
+  ev.rate = RATE;
+  ev.nchan = 384;
+  ev.chan_bw_hz = 125.0;
+  skim_pipeline_feed_tap(s->p, &ev);
+  return s;
+}
+
+/* Advance the clock to t_s, ticking the table every 2 s on the way. */
+static void sim_to(FeedSim *s, double t_s) {
+  const gint64 target = (gint64)(t_s * G_USEC_PER_SEC);
+  while (s->last_tick_us + 2 * G_USEC_PER_SEC <= target) {
+    s->last_tick_us += 2 * G_USEC_PER_SEC;
+    s->now_us = s->last_tick_us;
+    SkimTapEvent ev;
+    sim_ev(s, &ev, SKIM_TAP_PRUNE);
+    skim_pipeline_feed_tap(s->p, &ev);
+  }
+  s->now_us = MAX(s->now_us, target);
+}
+
+static void sim_decode(FeedSim *s, double t_s, guint chan, double hz,
+                       const char *text) {
+  sim_to(s, t_s);
+  SkimTapEvent ev;
+  sim_ev(s, &ev, SKIM_TAP_DECODE);
+  ev.chan = chan;
+  ev.slot = 0;
+  ev.sig_hz = hz;
+  ev.d.confidence = 0.9;
+  ev.d.speed = 25;
+  ev.d.snr_db = 20;
+  g_strlcpy(ev.d.text, text, sizeof(ev.d.text));
+  skim_pipeline_feed_tap(s->p, &ev);
+}
+
+static void sim_free(FeedSim *s) {
+  skim_pipeline_stop(s->p);
+  skim_pipeline_free(s->p);
+  g_string_free(s->rbn, TRUE);
+  g_free(s);
+  t_pipe = NULL;
+}
+
+/* Lines of the collected RBN tap that spot `call`, and the stream second
+ * of the first of them (-1 when none). */
+static int rbn_lines(const GString *rbn, const char *call) {
+  int n = 0;
+  char **lines = g_strsplit(rbn->str, "\n", -1);
+  for (char **l = lines; *l; l++) {
+    char **f = g_strsplit(*l, "\t", -1);
+    if (g_strv_length(f) >= 2 && strcmp(f[1], call) == 0) { n++; }
+    g_strfreev(f);
+  }
+  g_strfreev(lines);
+  return n;
+}
+
+static double rbn_stamp_s(const GString *rbn, const char *call) {
+  double t = -1;
+  char **lines = g_strsplit(rbn->str, "\n", -1);
+  for (char **l = lines; *l && t < 0; l++) {
+    char **f = g_strsplit(*l, "\t", -1);
+    if (g_strv_length(f) >= 2 && strcmp(f[1], call) == 0) {
+      t = g_ascii_strtod(f[0], NULL) / RATE;
+    }
+    g_strfreev(f);
+  }
+  g_strfreev(lines);
+  return t;
 }
 
 int main(void) {
@@ -730,6 +850,110 @@ int main(void) {
     g_ptr_array_free(lines, TRUE);
   }
   g_free(g_band);
+
+  /* -- gh#24: the feed gate — readings and the settle hold ---------------------- */
+  {
+    /* The feed as it was: a single reading after "CQ DE" is on the wire at
+     * once — that is the bust path gh#24 closes. */
+    FeedSim *s = sim_new(1, -1, -1);
+    double bar, settle, settle_nd;
+    guint reads;
+    skim_pipeline_rbn_policy(s->p, &bar, &reads, &settle, &settle_nd);
+    check("gate: readings 1 / hold off resolve as the old feed (1, 0 s, 0 s)",
+          bar == 0.85 && reads == 1 && settle == 0 && settle_nd == 0);
+    sim_decode(s, 1.0, 10, 7020000.0, "CQ DE SM7XYZ K ");
+    check("gate off: one reading after CQ DE goes out at once",
+          rbn_lines(s->rbn, "SM7XYZ") == 1);
+    sim_decode(s, 3.0, 20, 7040000.0, "CQ DE IZ3N IZ3N ");
+    sim_decode(s, 6.0, 20, 7040000.0, "CQ DE IZ3NYG IZ3NYG IZ3NYG K ");
+    check("gate off: the torn IZ3N AND the full IZ3NYG both go out",
+          rbn_lines(s->rbn, "IZ3N") == 1 && rbn_lines(s->rbn, "IZ3NYG") == 1);
+    sim_free(s);
+
+    /* The defaults: two readings or MASTER.SCP, and an 8 s hold. */
+    s = sim_new(0, 0, 0);
+    skim_pipeline_rbn_policy(s->p, &bar, &reads, &settle, &settle_nd);
+    check("gate: defaults resolve to 0.85, 2 readings, 8 s, 8 s",
+          bar == 0.85 && reads == 2 && settle == 8.0 && settle_nd == 8.0);
+    sim_decode(s, 1.0, 10, 7020000.0, "CQ DE SM7XYZ K ");
+    sim_to(s, 30.0);
+    check("gate: one reading never goes out (30 s of ticks)",
+          rbn_lines(s->rbn, "SM7XYZ") == 0);
+    sim_decode(s, 31.0, 10, 7020000.0, "CQ DE SM7XYZ SM7XYZ K ");
+    sim_to(s, 37.0);
+    check("gate: two readings are HELD — nothing at 6 s into the hold",
+          rbn_lines(s->rbn, "SM7XYZ") == 0);
+    sim_to(s, 41.0);
+    check("gate: …and released at the first tick past 8 s, once",
+          rbn_lines(s->rbn, "SM7XYZ") == 1 &&
+          rbn_stamp_s(s->rbn, "SM7XYZ") >= 39.0 &&
+          rbn_stamp_s(s->rbn, "SM7XYZ") <= 41.0);
+    sim_decode(s, 45.0, 10, 7020000.0, "CQ DE SM7XYZ K ");
+    sim_to(s, 60.0);
+    check("gate: a released call keeps going through spot_out's dedup (still one line)",
+          rbn_lines(s->rbn, "SM7XYZ") == 1);
+    /* The torn call: read twice (held), then the full call outranks it in
+     * the extractor and the table evicts the clip — the held line dies
+     * with the record. The full call then takes its own hold. */
+    sim_decode(s, 61.0, 20, 7040000.0, "CQ DE IZ3N IZ3N ");
+    sim_decode(s, 64.0, 20, 7040000.0, "CQ DE IZ3NYG IZ3NYG IZ3NYG K ");
+    sim_to(s, 80.0);
+    check("gate: the torn IZ3N, held, dies with its record — never sent",
+          rbn_lines(s->rbn, "IZ3N") == 0);
+    check("gate: the full IZ3NYG goes out once, after its own hold",
+          rbn_lines(s->rbn, "IZ3NYG") == 1 && rbn_stamp_s(s->rbn, "IZ3NYG") >= 72.0);
+    check("gate: the pipeline's RBN counter agrees (2)",
+          skim_pipeline_rbn_spots(s->p) == 2);
+    sim_free(s);
+
+    /* Readings without the hold: two copies go out at once. */
+    s = sim_new(2, -1, -1);
+    sim_decode(s, 1.0, 10, 7020000.0, "CQ DE SM7XYZ K ");
+    check("gate: readings alone — one copy is not enough",
+          rbn_lines(s->rbn, "SM7XYZ") == 0);
+    sim_decode(s, 2.0, 10, 7020000.0, "CQ DE SM7XYZ K ");
+    check("gate: readings alone — the second copy goes out at once, no tick",
+          rbn_lines(s->rbn, "SM7XYZ") == 1);
+    sim_free(s);
+
+    /* The dictionary exception and the longer hold of an unknown call. */
+    char *dict = g_build_filename(g_get_tmp_dir(), "skimmer-rbn-dict.txt", NULL);
+    g_file_set_contents(dict, "# test dict\nOK1XYZ\n", -1, NULL);
+    GError *derr = NULL;
+    check("gate: a one-call dictionary loads",
+          skim_callsign_dict_load(dict, &derr) && skim_callsign_dict_size() == 1);
+    g_clear_error(&derr);
+    s = sim_new(2, 8, 30);
+    skim_pipeline_rbn_policy(s->p, &bar, &reads, &settle, &settle_nd);
+    check("gate: 8 s / 30 s resolve as set", settle == 8.0 && settle_nd == 30.0);
+    sim_decode(s, 1.0, 30, 7050000.0, "CQ DE OK1XYZ K ");
+    sim_decode(s, 1.0, 40, 7060000.0, "CQ DE SM7XYZ SM7XYZ K ");
+    sim_to(s, 12.0);
+    check("gate: a MASTER.SCP call passes on ONE reading after the short hold",
+          rbn_lines(s->rbn, "OK1XYZ") == 1);
+    check("gate: a call MASTER.SCP does not know is still held at 11 s",
+          rbn_lines(s->rbn, "SM7XYZ") == 0);
+    sim_to(s, 34.0);
+    check("gate: …and goes out after its 30 s hold",
+          rbn_lines(s->rbn, "SM7XYZ") == 1 && rbn_stamp_s(s->rbn, "SM7XYZ") >= 31.0);
+    sim_free(s);
+    /* a hold for unknown calls shorter than the dictionary hold is lifted
+     * to it; no hold at all means no hold for anyone */
+    s = sim_new(2, 8, 3);
+    skim_pipeline_rbn_policy(s->p, NULL, NULL, &settle, &settle_nd);
+    check("gate: an unknown-call hold below the dictionary hold is lifted to it",
+          settle == 8.0 && settle_nd == 8.0);
+    sim_free(s);
+    s = sim_new(2, -1, 30);
+    skim_pipeline_rbn_policy(s->p, NULL, NULL, &settle, &settle_nd);
+    check("gate: with the hold off, the unknown-call hold is off too",
+          settle == 0 && settle_nd == 0);
+    sim_free(s);
+    g_file_set_contents(dict, "", -1, NULL);     /* leave no dictionary behind */
+    skim_callsign_dict_load(dict, NULL);
+    g_unlink(dict);
+    g_free(dict);
+  }
 
   printf("\n=== %d checks, %d failures ===\n%s\n", checks, fails,
          fails ? "FAIL" : "PASS — validated CQ spots flow to the RBN sink, "

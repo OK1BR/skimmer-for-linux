@@ -34,7 +34,14 @@ live session (in OK1HRA's fork, offline wins twice lost on live air — #28).
 - `<prefix>.rbn.log`: every record the RBN feed would have broadcast — the
   feed's own policy (CQ only, score bar 0.85 or `SKIM_REPLAY_RBN_MIN`, ham
   bands, 600 s re-spot, 100 Hz QSY, 5/s), via `SkimPipelineConfig.rbn_tap`.
-  UTC = `start_unix_us` + stream time, holes included.
+  UTC = `start_unix_us` + stream time, holes included. The gh#24 gate takes
+  its knobs from the environment too: `SKIM_REPLAY_RBN_READS` (readings a
+  call needs, default 2; 1 = any), `SKIM_REPLAY_RBN_SETTLE` (the hold before
+  the first line in s, default 8; -1 = none) and
+  `SKIM_REPLAY_RBN_SETTLE_NODICT` (the hold of a call MASTER.SCP does not
+  know). `READS=1 SETTLE=-1` is the feed as it was before gh#24, so the two
+  policies replay over one tap side by side. `SKIM_RBN_DEBUG=1` traces every
+  hold, release and drop with the readings and the dictionary verdict.
 - Deterministic: two runs over the same input are byte-identical (cw-v2,
   2026-11-01). About 36× real time on cw-v2 at 192 kHz on the development
   machine, so an evening of air replays in minutes.
