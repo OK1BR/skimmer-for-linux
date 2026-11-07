@@ -46,7 +46,9 @@ typedef struct {
   guint   reports;      /* decode events folded into this record */
   guint   hearings;     /* the most copies of the call ONE extractor counted
                          * — keyed and read, not reported (callsign.h); the
-                         * RBN feed's readings gate (gh#24) */
+                         * RBN feed's readings gate (gh#24), and what
+                         * decides between a call and a longer reading of it
+                         * the dictionary knows nothing about (gh#34) */
   gint64  last_read;    /* when a copy of the call was last actually READ
                          * (the extractor's clock) — last_heard moves with
                          * every report, and a quiet channel's noise

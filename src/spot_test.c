@@ -465,6 +465,89 @@ int main(void) {
           skim_station_table_size(t) == 2);
     r.freq_hz = 3535410;
     skim_station_table_free(t);
+
+    /* -- neither call known: the readings decide (gh#34, after OK1HRA) -- */
+
+    /* "CQ CQ DESM7FBJE SM7FBJ" on OK1HRA's taps: the glued reading once,
+     * the call itself again and again */
+    t = skim_station_table_new();
+    r.hearings = 1;
+    REPORT(t, "SM7FBJE", 10);
+    m = REPORT(t, "SM7FBJ", 11);
+    check("reads: a call read once still feeds its longer reading",
+          skim_station_table_size(t) == 1 && strcmp(m->call, "SM7FBJE") == 0);
+    r.hearings = 2;
+    m = REPORT(t, "SM7FBJ", 12);
+    check("reads: read twice as often, the call evicts its glued reading",
+          skim_station_table_size(t) == 1 && strcmp(m->call, "SM7FBJ") == 0 &&
+          m->hearings == 2 && skim_station_table_lookup(t, "SM7FBJE") == NULL);
+    r.hearings = 1;
+    m = REPORT(t, "SM7FBJE", 13);
+    check("reads: a later glued reading feeds the call's record",
+          skim_station_table_size(t) == 1 && strcmp(m->call, "SM7FBJ") == 0 &&
+          m->reports == 2);
+    skim_station_table_free(t);
+
+    /* the record first, the glue after — DL1HR read 11× on 3525 kHz,
+     * 2026-11-01 20:44, then DL1HRFB read twice */
+    t = skim_station_table_new();
+    r.hearings = 11;
+    REPORT(t, "DL1HR", 10);
+    r.hearings = 2;
+    m = REPORT(t, "DL1HRFB", 11);
+    check("reads: a glued reading of a call read far more often feeds it",
+          skim_station_table_size(t) == 1 && strcmp(m->call, "DL1HR") == 0 &&
+          skim_station_table_lookup(t, "DL1HRFB") == NULL);
+    skim_station_table_free(t);
+
+    /* twice as often is the bar: 3 readings against 2 do not reach it
+     * (G0GYY 3× against G0GYYK 2×, 3558 kHz the same evening) */
+    t = skim_station_table_new();
+    r.hearings = 2;
+    REPORT(t, "G0GYYK", 10);
+    r.hearings = 3;
+    m = REPORT(t, "G0GYY", 11);
+    check("reads: fewer than twice the readings leave the longer call in place",
+          skim_station_table_size(t) == 1 && strcmp(m->call, "G0GYYK") == 0);
+    skim_station_table_free(t);
+
+    /* … and the readings never rule where torn readings are the common
+     * case: a lost leading letter, a lost final T, a single-letter suffix */
+    t = skim_station_table_new();
+    r.hearings = 1;
+    REPORT(t, "OK1FBH", 10);
+    REPORT(t, "DF1MAT", 10);
+    REPORT(t, "LA9QA", 10);
+    r.hearings = 3;
+    REPORT(t, "K1FBH", 11);
+    REPORT(t, "DF1MA", 11);
+    REPORT(t, "LA9Q", 11);
+    check("reads: a lost head, a lost final T or a one-letter suffix still feed the call",
+          skim_station_table_size(t) == 3 &&
+          skim_station_table_lookup(t, "OK1FBH") != NULL &&
+          skim_station_table_lookup(t, "DF1MAT") != NULL &&
+          skim_station_table_lookup(t, "LA9QA") != NULL &&
+          skim_station_table_lookup(t, "DF1MA") == NULL);
+    skim_station_table_free(t);
+
+    /* a portable call keeps its own suffix: F/SM7FBJ is SM7FBJ */
+    t = skim_station_table_new();
+    r.hearings = 1;
+    REPORT(t, "F/SM7FBJE", 10);
+    r.hearings = 2;
+    m = REPORT(t, "F/SM7FBJ", 11);
+    check("reads: the rule reads the call proper of a portable form",
+          skim_station_table_size(t) == 1 && strcmp(m->call, "F/SM7FBJ") == 0);
+    skim_station_table_free(t);
+
+    t = skim_station_table_new();                /* a glued CQ is no call    */
+    r.hearings = 1;
+    REPORT(t, "RV6BTCQ", 10);
+    m = REPORT(t, "RV6BT", 11);
+    check("glue: a call with CQ glued on yields to the call on one reading",
+          skim_station_table_size(t) == 1 && strcmp(m->call, "RV6BT") == 0);
+    skim_station_table_free(t);
+    r.hearings = 0;
 #undef REPORT
     /* back to no dictionary for the rest of the gate */
     g_file_set_contents(dict, "# empty\n", -1, NULL);
