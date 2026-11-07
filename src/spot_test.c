@@ -397,6 +397,34 @@ int main(void) {
     check("lookup finds the call", skim_station_table_lookup(t, "OK1BR") != NULL);
     check("prune drops idle stations",
           skim_station_table_prune(t, g_get_monotonic_time(), 0) == 1 && skim_station_table_size(t) == 0);
+    /* gh#31: a caller first flagged calling (the window past the runner's
+     * TEST), then heard addressed with the runner's report — the flag
+     * goes, and a ghost channel that never read the report cannot set it
+     * again for the record's life */
+    SkimStation pe = { .call = "PE2K", .mode = "CW", .freq_hz = 7028000,
+                       .snr_db = 20, .score = 0.95, .speed = 26, .cq = TRUE,
+                       .first_heard = 4, .last_heard = 4 };
+    const SkimStation *mp = skim_station_table_report(t, &pe);
+    check("a caller inside the window is calling until the report comes",
+          mp && mp->cq && !mp->addressed);
+    pe.cq = FALSE;
+    pe.addressed = TRUE;
+    pe.last_heard = 5;
+    mp = skim_station_table_report(t, &pe);
+    check("the runner's report after the call clears the flag", mp && !mp->cq);
+    pe.cq = TRUE;
+    pe.addressed = FALSE;
+    pe.freq_hz = 7028110;                      /* the ghost, next channel    */
+    pe.last_heard = 6;
+    mp = skim_station_table_report(t, &pe);
+    check("an addressed caller stays not calling whatever a ghost channel says",
+          mp && strcmp(mp->call, "PE2K") == 0 && !mp->cq && mp->addressed &&
+          skim_station_table_size(t) == 1);
+    pe.freq_hz = 7040000;                      /* a QSY: new place, new     */
+    pe.last_heard = 7;                         /* context                    */
+    mp = skim_station_table_report(t, &pe);
+    check("a QSY starts the record over: calling again where it now is",
+          mp && mp->cq && !mp->addressed && fabs(mp->freq_hz - 7040000) < 1);
     skim_station_table_free(t);
   }
 

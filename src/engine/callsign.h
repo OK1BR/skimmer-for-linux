@@ -70,11 +70,24 @@ double skim_callsign_extractor_best(SkimCallsignExtractor *x,
                                     char *out, gsize out_size);
 
 /* As best(), and reports whether the candidate was heard CALLING — in the
- * context of a CQ/TEST/QRZ marker (leading or trailing). The CQ-only spot
- * policy keys off this: S&P answers do not own the frequency. */
+ * context of a CQ/TEST/QRZ marker (leading or trailing), or of a TU right
+ * before it. The CQ-only spot policy keys off this: S&P answers do not own
+ * the frequency. The other side of the QSO does not count as calling
+ * (gh#31): a call the runner answered with a report ("PE2K 5NN") is
+ * calling only if a marker reached it with no over break between and the
+ * marker was not TU, and the call TU blessed is not calling once DE
+ * follows it ("TU UA3WBC DE DK2DR"). */
 double skim_callsign_extractor_best_ex(SkimCallsignExtractor *x,
                                        char *out, gsize out_size,
                                        gboolean *cq_context);
+
+/* TRUE when this extractor heard the call ADDRESSED — a report right after
+ * it, or a DE after the call TU blessed — and no clean calling window
+ * reached it (gh#31): best_ex() reports such a call not calling, and the
+ * station table drops the flag a report from a ghost channel that never
+ * read the report keeps setting. FALSE for a call it does not hold. */
+gboolean skim_callsign_extractor_addressed(const SkimCallsignExtractor *x,
+                                           const char *call);
 
 /* How many copies of `call` this extractor has counted: the times the call
  * was keyed and READ on this channel — not how often the pipeline reported

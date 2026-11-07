@@ -41,6 +41,13 @@ typedef struct {
   double  score;        /* best callsign plausibility seen */
   gboolean cq;          /* heard CALLING (CQ/TEST/QRZ context) — owns the
                          * frequency; S&P answers report cq=FALSE */
+  gboolean addressed;   /* heard being ANSWERED — a report right after the
+                         * call, or DE after the call TU blessed — with no
+                         * clean calling window of its own (callsign.h,
+                         * gh#31): the other side of a QSO, not calling.
+                         * Once set it clears cq for the record's life,
+                         * whatever a ghost channel that never read the
+                         * report keeps saying */
   gint64  first_heard;  /* g_get_monotonic_time() */
   gint64  last_heard;
   guint   reports;      /* decode events folded into this record */

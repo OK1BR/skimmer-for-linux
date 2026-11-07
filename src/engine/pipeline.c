@@ -1299,6 +1299,7 @@ static void dispatch_text(SkimPipeline *p, guint c, guint slot, double sig_hz,
   st.hearings   = skim_callsign_extractor_hearings(p->ext[SL(c, slot)], call);
   st.last_read  = skim_callsign_extractor_last_read(p->ext[SL(c, slot)], call);
   st.cq         = cq;
+  st.addressed  = skim_callsign_extractor_addressed(p->ext[SL(c, slot)], call);
   st.last_heard = pipe_now_us(p);
   st.first_heard = st.last_heard;
   if (g_getenv("SKIM_ST_DEBUG")) {

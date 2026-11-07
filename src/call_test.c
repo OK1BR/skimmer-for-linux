@@ -276,6 +276,64 @@ int main(void) {
     check("an S&P answer is NOT flagged as calling",
           strcmp(got, "EA2BTN") == 0 && !cq);
     skim_callsign_extractor_free(x);
+
+    /* The other side of the QSO — gh#31, after OK1HRA. The window past
+     * the runner's marker reaches the station that answers them (his
+     * tap, 2026-10-10: "TEST DL4KWA E TEST · P PE2K · PE2K GT 5NN" put
+     * PE2K on the feed as calling); the runner's report right after the
+     * call takes the window back — unless the window reached the call
+     * clean, with no over break and not from TU. */
+    static const struct {
+      const char *text, *call; gboolean calling, addressed; const char *what;
+    } ADDR[] = {
+      { "TEST DL4KWA TEST · PE2K PE2K 5NN ", "PE2K", FALSE, TRUE,
+        "a caller past the over break, then the runner's report: not calling (PE2K)" },
+      { "TEST DL4KWA TEST · PE2K PE2K 599015 ", "PE2K", FALSE, TRUE,
+        "…a report with the serial glued on too (PE2K 599015)" },
+      { "TEST DL4KWA TEST · PE2K PE2K ", "PE2K", TRUE, FALSE,
+        "no report yet: the window past the break still counts (PE2K)" },
+      { "TEST DL4KWA TEST · PE2K PE2K · 5NN ", "PE2K", TRUE, FALSE,
+        "a report past another over break addresses nobody (PE2K)" },
+      { "CQ TEST UR3VZ UR3VZ 5NN15 ", "UR3VZ", TRUE, FALSE,
+        "a clean CQ window outlives a report (UR3VZ 5NN15 — the runner's own CQ)" },
+      { "5NN TU · RM5Z RM5Z 599 ", "RM5Z", FALSE, TRUE,
+        "a caller after TU and the break, then 599: not calling (RM5Z)" },
+      { "TU M0NGN 5NN TU M0NGN 5NN ", "M0NGN", TRUE, FALSE,
+        "TU M0NGN 5NN: the runner re-announcing, the caller's copy lost — stays calling" },
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(ADDR); i++) {
+      x = skim_callsign_extractor_new();
+      skim_callsign_extractor_feed(x, ADDR[i].text);
+      cq = !ADDR[i].calling;
+      s = skim_callsign_extractor_best_ex(x, got, sizeof(got), &cq);
+      check(ADDR[i].what,
+            s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, ADDR[i].call) == 0 &&
+            cq == ADDR[i].calling &&
+            skim_callsign_extractor_addressed(x, ADDR[i].call) == ADDR[i].addressed);
+      skim_callsign_extractor_free(x);
+    }
+
+    /* TU blesses the very next token only: "TU 73 UA3WBC DE DK2DR" is a
+     * QSO closing, and with three tokens UA3WBC went out as calling (his
+     * live taps). A DE right after the call TU blessed takes the blessing
+     * back; past an over break the DE is a new caller's. */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "TU 73 UA3WBC DE DK2DR K ");
+    s = skim_callsign_extractor_best_ex(x, got, sizeof(got), &cq);
+    check("TU 73 UA3WBC DE DK2DR: nobody calling, DK2DR the best (DE)",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "DK2DR") == 0 && !cq &&
+          !skim_callsign_extractor_addressed(x, "UA3WBC"));
+    skim_callsign_extractor_free(x);
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "TU UA3WBC DE DK2DR K ");
+    check("TU UA3WBC DE DK2DR: the DE takes TU's blessing off UA3WBC",
+          skim_callsign_extractor_addressed(x, "UA3WBC"));
+    skim_callsign_extractor_free(x);
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "TU UA3WBC · DE DK2DR K ");
+    check("TU UA3WBC · DE DK2DR: past the break the DE is a caller's — UA3WBC keeps it",
+          !skim_callsign_extractor_addressed(x, "UA3WBC"));
+    skim_callsign_extractor_free(x);
   }
 
   /* -- degenerate fist: gaps around the markers collapse (2026-07-16) ---------- */

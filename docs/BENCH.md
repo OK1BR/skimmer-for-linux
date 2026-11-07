@@ -56,7 +56,15 @@ live session (in OK1HRA's fork, offline wins twice lost on live air — #28).
   `SKIM_CALL_DESPACE=0` turns it off for an A/B, and
   `SKIM_DESPACE_DEBUG=1` prints every call it credits (with the copies
   found and the copies added) and every repeat it refuses as a cut copy
-  of a longer call, each with the despaced text it read.
+  of a longer call, each with the despaced text it read. The other side
+  of the QSO (gh#31, `callsign.c`): `SKIM_CALL_ADDRESSED=0` turns off the
+  rule that a report right after a call withdraws a calling window that
+  reached the call past an over break or from TU; `SKIM_CALL_TU` is how
+  far TU's window reaches — `2` (the default) the very next token, with
+  a DE right after that call taking it back, `1` the three tokens of
+  CQ's window, `0` no window after TU at all. `SKIM_ADDRESSED_DEBUG=1`
+  prints every call a report or DE addressed and what that did to its
+  window (none, clean and kept, withdrawn).
 - Deterministic: two runs over the same input are byte-identical (cw-v2,
   2026-11-01). About 36× real time on cw-v2 at 192 kHz on the development
   machine, so an evening of air replays in minutes.

@@ -325,6 +325,9 @@ typedef struct {
   guint    parts;                              /* fewest tokens it came in   */
   gboolean de_marked;
   gboolean cq_context;
+  gboolean cq_clean;                           /* …by a window with no over  */
+                                               /* break in it, not TU's      */
+  gboolean addressed;                          /* a report (or DE) followed it */
   guint    ds_seq;                             /* the despaced stretch (gh#33) */
   guint    ds_cnt;                             /* copies counted in it       */
 } Cand;
@@ -333,6 +336,9 @@ struct _SkimCallsignExtractor {
   GString *tok;                                /* partial token across feeds */
   gint     de_pending;                         /* DE marker lives ≤ 2 tokens */
   gint     cq_recent;                          /* tokens since CQ (≤ window) */
+  gboolean cq_broken;                          /* an over break since that CQ */
+  gboolean tu_win;                             /* the open window is TU's    */
+  char     tu_call[CALL_MAX];                  /* the call TU's window took  */
   guint    cq_pairs;                           /* adjacent "C","Q" pairs seen */
   gboolean cq_half;                            /* last token was a lone "C"  */
   guint    tok_n;                              /* tokens processed (age clock)*/
@@ -341,10 +347,11 @@ struct _SkimCallsignExtractor {
   gboolean prev_valid;                         /* it was a valid call itself */
   gboolean prev_de;                            /* DE applied to it           */
   gboolean prev_cq;                            /* CQ window applied to it    */
+  gboolean prev_clean;                         /* …a clean one (gh#31)       */
   gboolean prev_gap;                           /* an over break came after it */
   GString *run;                                /* fragments since the last   */
   guint    run_n;                              /* edge, glued (torn call)    */
-  gboolean run_de, run_cq;
+  gboolean run_de, run_cq, run_clean;
   char     run_hit[CALL_MAX];                  /* its join counted on arrival */
   char     run_lead;                           /* lone E/T/K/R right before  */
   gboolean run_spelled;                        /* every piece one character  */
@@ -380,7 +387,7 @@ void skim_callsign_extractor_free(SkimCallsignExtractor *x) {
 static void run_clear(SkimCallsignExtractor *x) {
   g_string_set_size(x->run, 0);
   x->run_n  = 0;
-  x->run_de = x->run_cq = FALSE;
+  x->run_de = x->run_cq = x->run_clean = FALSE;
   x->run_hit[0] = '\0';
   x->run_lead = '\0';
   x->run_spelled = TRUE;
@@ -390,12 +397,15 @@ void skim_callsign_extractor_reset(SkimCallsignExtractor *x) {
   g_string_set_size(x->tok, 0);
   x->de_pending = 0;
   x->cq_recent  = CQ_WINDOW + 1;
+  x->cq_broken  = FALSE;
+  x->tu_win     = FALSE;
+  x->tu_call[0] = '\0';
   x->cq_pairs   = 0;
   x->cq_half    = FALSE;
   x->tok_n      = 0;
   x->ncand      = 0;
   x->prev_tok[0] = '\0';
-  x->prev_valid = x->prev_de = x->prev_cq = x->prev_gap = FALSE;
+  x->prev_valid = x->prev_de = x->prev_cq = x->prev_clean = x->prev_gap = FALSE;
   run_clear(x);
   g_string_set_size(x->ds_text, 0);
   g_string_set_size(x->ds_bound, 0);
@@ -416,7 +426,7 @@ static double cand_score(const SkimCallsignExtractor *x, const Cand *c) {
 }
 
 static void cand_add(SkimCallsignExtractor *x, const char *call, guint parts,
-                     gboolean de_marked, gboolean cq_context) {
+                     gboolean de_marked, gboolean cq_context, gboolean cq_clean) {
   Cand *c = NULL;
   for (guint i = 0; i < x->ncand; i++) {
     if (strcmp(x->cand[i].call, call) == 0) { c = &x->cand[i]; break; }
@@ -451,6 +461,100 @@ static void cand_add(SkimCallsignExtractor *x, const char *call, guint parts,
   c->ds_cnt++;
   if (de_marked)  { c->de_marked  = TRUE; }
   if (cq_context) { c->cq_context = TRUE; }
+  if (cq_context && cq_clean) { c->cq_clean = TRUE; }
+}
+
+/* The other side of the QSO — gh#31, after OK1HRA (ok1hra/skimmer-for-linux
+ * d678d6c and a7e4223, written anew). The calling window runs CQ_WINDOW
+ * tokens past CQ / TEST / QRZ / CWT / TU and does not close at the
+ * decoder's over break, so the station that answers the runner right
+ * after their "TEST DL4KWA" is read inside it: "TEST DL4KWA E TEST · P
+ * PE2K · PE2K GT 5NN" flagged PE2K calling at 0.85 (his tap, 2026-10-10),
+ * and such a caller clears the feed's bar with that context. Of 139 calls
+ * his feed sent in 25 h that no other skimmer confirmed (2026-10-16/17),
+ * half were real stations spotted as calling from the other side of a
+ * QSO. Two rules:
+ *  - a REPORT right after a call ("PE2K 5NN", "UR3VZ 599 15") is the
+ *    runner addressing the station that called them. The call is then
+ *    calling only if a window reached it CLEAN — no over break between
+ *    the marker and the call, and not TU's window: "CQ TEST UR3VZ UR3VZ
+ *    5NN15" is UR3VZ's own clean CQ and stays calling. A call reached
+ *    past a break with no report after it keeps the window: the break may
+ *    be QSB inside the runner's own over.
+ *  - TU blesses the very NEXT token only (SKIM_CALL_TU=2, the default —
+ *    his since v0.6.0): "TU M0NGN" is the runner re-announcing (Richard,
+ *    2026-07-15), "TU 73 UA3WBC DE DK2DR" is a QSO closing, and with
+ *    three tokens UA3WBC was spotted as calling. A DE right after the call
+ *    TU blessed, no break between, takes the blessing back: "TU UA3WBC DE
+ *    DK2DR" is DK2DR thanking the runner. SKIM_CALL_TU=1 is the window as
+ *    it was, 0 opens none after TU; SKIM_CALL_ADDRESSED=0 turns the report
+ *    rule off (docs/BENCH.md).
+ * The station table learns of a withdrawn window through
+ * skim_callsign_extractor_addressed(): a ghost channel that never read the
+ * report keeps saying "calling", and the record must not take it back. */
+static gboolean addressed_on(void) {
+  static gint on = -1;
+  if (G_UNLIKELY(on < 0)) {
+    const char *e = g_getenv("SKIM_CALL_ADDRESSED");
+    on = !(e && strcmp(e, "0") == 0);
+  }
+  return on;
+}
+
+static gint tu_mode(void) {
+  static gint mode = -1;
+  if (G_UNLIKELY(mode < 0)) {
+    const char *e = g_getenv("SKIM_CALL_TU");
+    mode = e && e[0] ? CLAMP(atoi(e), 0, 2) : 2;
+  }
+  return mode;
+}
+
+static gboolean cand_calling(const Cand *c) {
+  if (!c->cq_context)
+    return FALSE;
+  return !addressed_on() || !c->addressed || c->cq_clean;
+}
+
+/* "5NN", "599", "5NNN", "ENN", "55N" — the first two with a serial or zone
+ * glued on or not ("5NN15", "599001"); the cut and the garbled shapes
+ * only whole. */
+static gboolean report_token(const char *s) {
+  static const struct { const char *rst; gboolean serial; } RST[] = {
+    { "5NN", TRUE }, { "599", TRUE }, { "5NNN", FALSE }, { "ENN", FALSE },
+    { "55N", FALSE },
+  };
+  for (guint i = 0; i < G_N_ELEMENTS(RST); i++) {
+    const gsize n = strlen(RST[i].rst);
+    if (strncmp(s, RST[i].rst, n) != 0)
+      continue;
+    const char *t = s + n;
+    if (RST[i].serial) {
+      while (g_ascii_isdigit(*t)) { t++; }
+    }
+    if (*t == '\0')
+      return TRUE;
+  }
+  return FALSE;
+}
+
+/* The call was just addressed: `by` (a report, or DE) came right after it.
+ * SKIM_ADDRESSED_DEBUG=1 prints each one with what it did to the flag. */
+static void cand_addressed(SkimCallsignExtractor *x, const char *call,
+                           const char *by) {
+  for (guint i = 0; i < x->ncand; i++) {
+    Cand *c = &x->cand[i];
+    if (strcmp(c->call, call) != 0)
+      continue;
+    if (G_UNLIKELY(g_getenv("SKIM_ADDRESSED_DEBUG"))) {
+      g_printerr("addressed: %s by %s — %s\n", call, by,
+                 !c->cq_context ? "no window" :
+                 c->cq_clean    ? "clean window, stays calling" :
+                                  "window withdrawn");
+    }
+    c->addressed = TRUE;
+    return;
+  }
 }
 
 /* Tokens that never take part in a join: prosigns and stock CW abbreviations
@@ -515,7 +619,7 @@ static gboolean run_edge_token(const char *tok) {
 }
 
 static void run_take(SkimCallsignExtractor *x, const char *tok,
-                     gboolean de, gboolean cq) {
+                     gboolean de, gboolean cq, gboolean clean) {
   if (x->run_n > RUN_MAX)
     return;                                    /* babble — wait for an edge  */
   x->run_n++;
@@ -524,6 +628,7 @@ static void run_take(SkimCallsignExtractor *x, const char *tok,
   if (tok[1] != '\0') { x->run_spelled = FALSE; }
   if (de) { x->run_de = TRUE; }
   if (cq) { x->run_cq = TRUE; }
+  if (cq && clean) { x->run_clean = TRUE; }
 }
 
 /* E, T, K and R are stop words because noise and procedure are full of
@@ -580,7 +685,8 @@ static gboolean run_close(SkimCallsignExtractor *x, char trail) {
       if (r == 1 && strcmp(call, x->run_hit) == 0)
         break;
       for (guint i = 0; i < r; i++) {
-        cand_add(x, call, (x->run_n + r - 1) / r, x->run_de, x->run_cq);
+        cand_add(x, call, (x->run_n + r - 1) / r, x->run_de, x->run_cq,
+                 x->run_clean);
       }
     }
   }
@@ -603,13 +709,32 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
     run_clear(x);
     despace_edge(x);
     x->prev_gap = x->prev_tok[0] != '\0';
+    /* a calling window that runs past an over break may reach the OTHER
+     * station's call (gh#31) — after the run was read, so a torn call
+     * keyed before the break keeps its clean window */
+    if (x->cq_recent <= CQ_WINDOW) { x->cq_broken = TRUE; }
     return;
   }
   x->tok_n++;
-  {                                            /* gh#33: the stretch sees   */
-    const gsize bl = strlen(tok);              /* every token's bare text   */
-    const gboolean m = bl > 2 && strcmp(tok + bl - 2, "\xC2\xB7") == 0;
-    despace_note(x, tok, m ? bl - 2 : bl);
+  /* The over-break mark arrives GLUED to a character the decoder committed
+   * together with it ("NU·", "R·"): the bare token is the text, then the
+   * mark. */
+  char  bare[CALL_MAX];
+  gsize bl = strlen(tok);
+  const gboolean marked = bl > 2 && strcmp(tok + bl - 2, "\xC2\xB7") == 0;
+  g_strlcpy(bare, tok, sizeof(bare));
+  if (marked) { bare[bl - 2] = '\0'; }
+  despace_note(x, bare, strlen(bare));         /* gh#33: the stretch sees   */
+                                               /* every token's bare text   */
+  /* A report right after a call, no over break between: the runner is
+   * answering the station that called them (gh#31, cand_calling). Not the
+   * call TU blessed in one over, though — "TU M0NGN" is the runner, and
+   * with the caller's copy lost the next thing read on that channel is
+   * the report the runner sends them ("TU M0NGN 5NN" wherever no over
+   * break was written between, as under DeepCW, which writes none). */
+  if (x->prev_tok[0] && !x->prev_gap && report_token(bare) &&
+      strcmp(x->prev_tok, x->tu_call) != 0) {
+    cand_addressed(x, x->prev_tok, bare);
   }
   /* Letter-spaced CQ chain — the TORN twin of the fused "CQCQ" run: the
    * same degenerate fist that glues gaps shut also stretches them, and the
@@ -628,6 +753,12 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
     x->cq_pairs = 0;
   }
   if (strcmp(tok, "DE") == 0) {
+    /* "TU UA3WBC DE DK2DR": the call TU's window blessed is the one being
+     * thanked when DE follows it in the same over (gh#31) */
+    if (x->tu_call[0] && !x->prev_gap && strcmp(x->prev_tok, x->tu_call) == 0) {
+      cand_addressed(x, x->tu_call, "DE");
+    }
+    x->tu_call[0] = '\0';
     run_close(x, 0);
     run_clear(x);
     despace_edge(x);
@@ -647,11 +778,22 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
     run_close(x, 0);
     run_clear(x);
     despace_edge(x);
-    x->cq_recent = 0;
-    if (strcmp(tok, "TU") != 0 && x->prev_tok[0]) {
+    const gboolean is_tu = strcmp(tok, "TU") == 0;
+    x->tu_call[0] = '\0';
+    if (is_tu && tu_mode() == 0) {             /* TU ends a run, opens no    */
+      x->prev_tok[0] = '\0';                   /* window (gh#31, A/B only)   */
+      return;
+    }
+    /* TU's window holds the very next token only (gh#31): the window ages
+     * before that token reads it, so CQ_WINDOW - 1 leaves exactly one in */
+    x->tu_win    = is_tu && tu_mode() == 2;
+    x->cq_recent = x->tu_win ? CQ_WINDOW - 1 : 0;
+    x->cq_broken = FALSE;
+    if (!is_tu && x->prev_tok[0]) {
       for (guint i = 0; i < x->ncand; i++) {
         if (strcmp(x->cand[i].call, x->prev_tok) == 0) {
           x->cand[i].cq_context = TRUE;
+          if (!x->prev_gap) { x->cand[i].cq_clean = TRUE; }
           break;
         }
       }
@@ -664,6 +806,15 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
   const gboolean valid = skim_callsign_is_valid(tok) && strlen(tok) < CALL_MAX;
   const gboolean de_now = x->de_pending > 0;
   const gboolean cq_now = x->cq_recent <= CQ_WINDOW;
+  /* the window reached this token CLEAN: no over break since the marker
+   * opened it, and the marker was not TU (gh#31, cand_calling) */
+  const gboolean clean_now = cq_now && !x->cq_broken && !x->tu_win;
+  if (x->tu_win) {                             /* the one token TU blessed,  */
+    if (cq_now && valid && !x->cq_broken) {    /* in the same over: "TU      */
+      g_strlcpy(x->tu_call, tok, sizeof(x->tu_call));  /* M0NGN" — past a    */
+    }                                          /* break it is a caller's     */
+    if (!cq_now) { x->tu_win = FALSE; }
+  }
 
   /* Join hypothesis — the sloppy-fist fix: an operator who stretches an
    * inter-letter gap splits their call across two tokens ("EA3I XQ" for
@@ -683,23 +834,16 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
       const gboolean known = dict_has(join);
       if (skim_callsign_is_valid(join) &&
           (known || valid != x->prev_valid || x->prev_gap)) {
-        cand_add(x, join, 2, x->prev_de || de_now, x->prev_cq || cq_now);
+        cand_add(x, join, 2, x->prev_de || de_now, x->prev_cq || cq_now,
+                 x->prev_clean || clean_now);
         if (!valid && !x->prev_valid) {
           g_strlcpy(x->run_hit, join, sizeof(x->run_hit));
         }
       }
     }
   }
-  /* The over-break mark arrives GLUED to a character the decoder committed
-   * together with it ("NU·", "R·"): for the run that is the bare token,
-   * then the mark. */
   const gboolean de_glued = !valid && strlen(tok) >= 5 && tok[0] == 'D' &&
                             tok[1] == 'E' && skim_callsign_is_valid(tok + 2);
-  char  bare[CALL_MAX];
-  gsize bl = strlen(tok);
-  const gboolean marked = bl > 2 && strcmp(tok + bl - 2, "\xC2\xB7") == 0;
-  g_strlcpy(bare, tok, sizeof(bare));
-  if (marked) { bare[bl - 2] = '\0'; }
   if (stop || valid || de_glued || run_edge_token(bare) ||
       (marked && (join_stop_word(bare) || skim_callsign_is_valid(bare)))) {
     run_close(x, marked ? '\0' : lone_stop_letter(tok));   /* an edge    */
@@ -707,7 +851,7 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
     despace_edge(x);
     if (!marked) { x->run_lead = lone_stop_letter(tok); }
   } else {
-    run_take(x, bare, de_now, cq_now);
+    run_take(x, bare, de_now, cq_now, clean_now);
     if (marked) {
       run_close(x, 0);
       run_clear(x);
@@ -723,11 +867,12 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
    * validates; the call inherits the full DE marker, exactly as if the gap
    * had been keyed. */
   if (de_glued) {
-    cand_add(x, tok + 2, 1, TRUE, cq_now);
+    cand_add(x, tok + 2, 1, TRUE, cq_now, clean_now);
     g_strlcpy(x->prev_tok, tok + 2, sizeof(x->prev_tok));
     x->prev_valid = TRUE;
     x->prev_de    = TRUE;
     x->prev_cq    = cq_now;
+    x->prev_clean = clean_now;
     x->prev_gap   = FALSE;
     x->de_pending = 0;
     return;
@@ -737,6 +882,7 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
   x->prev_valid = valid;
   x->prev_de    = de_now;
   x->prev_cq    = cq_now;
+  x->prev_clean = clean_now;
   x->prev_gap   = FALSE;
 
   if (!valid) {
@@ -746,7 +892,7 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
     return;
   }
 
-  cand_add(x, tok, 1, de_now, cq_now);
+  cand_add(x, tok, 1, de_now, cq_now, clean_now);
   x->de_pending = 0;
 }
 
@@ -975,7 +1121,10 @@ static void despace_credit(SkimCallsignExtractor *x, const char *call,
     g_printerr("despace: %s x%u +%u%s%s |%s|\n", call, found, found - have,
                de ? " de" : "", cq ? " cq" : "", x->ds_text->str);
   }
-  for (guint k = have; k < found; k++) { cand_add(x, call, 2, de, cq); }
+  /* the stretch's own markers opened the window these copies got: clean
+   * unless an over break or a TU sits on the way (as take_token() has it) */
+  const gboolean clean = cq && !x->cq_broken && !x->tu_win;
+  for (guint k = have; k < found; k++) { cand_add(x, call, 2, de, cq, clean); }
 }
 
 #define DS_CALLS 16                            /* distinct calls one scan tallies */
@@ -1099,7 +1248,7 @@ double skim_callsign_extractor_best_ex(SkimCallsignExtractor *x,
       bc = &x->cand[i];
     }
   }
-  if (cq_context) { *cq_context = bc ? bc->cq_context : FALSE; }
+  if (cq_context) { *cq_context = bc ? cand_calling(bc) : FALSE; }
   if (!bc || best < SKIM_CALLSIGN_SPOT_THRESHOLD) {
     if (out && out_size) { out[0] = '\0'; }
     return 0.0;
@@ -1111,6 +1260,19 @@ double skim_callsign_extractor_best_ex(SkimCallsignExtractor *x,
 double skim_callsign_extractor_best(SkimCallsignExtractor *x,
                                     char *out, gsize out_size) {
   return skim_callsign_extractor_best_ex(x, out, out_size, NULL);
+}
+
+gboolean skim_callsign_extractor_addressed(const SkimCallsignExtractor *x,
+                                           const char *call) {
+  if (!x || !call || !call[0])
+    return FALSE;
+  for (guint i = 0; i < x->ncand; i++) {
+    const Cand *c = &x->cand[i];
+    if (strcmp(c->call, call) == 0) {
+      return addressed_on() && c->addressed && !cand_calling(c);
+    }
+  }
+  return FALSE;
 }
 
 guint skim_callsign_extractor_hearings(const SkimCallsignExtractor *x,
