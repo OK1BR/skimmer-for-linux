@@ -222,15 +222,28 @@ static char *sha256_hex(const guint8 *data, gsize len) {
 }
 
 /* The TLS trust store. A distro's libcurl knows its own; the one bundled into
- * an AppImage knows the BUILD distro's path, which a Fedora or openSUSE host
- * does not have — there the bundle is looked up. */
+ * an AppImage knows the BUILD distro's path: the Ubuntu build carries
+ * /etc/ssl/certs/ca-certificates.crt compiled in and fails outright
+ * (CURLE_SSL_CACERT_BADFILE, "error adding trust anchors from file") where
+ * that file is missing — the hashed /etc/ssl/certs CApath beside it does not
+ * rescue the request. So under an AppImage the bundle is looked up here and
+ * handed to CURLOPT_CAINFO.
+ *
+ * Measured 2026-11-07 (gh#23) with the f7d3de6 AppImage, strace on the walk:
+ * Fedora 44 takes the first entry — Fedora dropped the /etc/ssl/certs names
+ * AND /etc/pki/tls/certs/ca-bundle.crt in ca-certificates 2024.2.69_v8.0.401-6
+ * (2025-07-09, F43) and brought back only the /etc/ssl/certs names on
+ * 2026-04-01 (2025.2.80_v9.0.304-7); with that symlink hidden it fell through
+ * to the ca-trust PEM. openSUSE Tumbleweed has neither of the first two and
+ * takes /etc/ssl/ca-bundle.pem. Alpine is musl — an AppImage does not start
+ * there, the entry costs nothing. */
 char *skim_scp_env_ca_path(void) {
   static const char *paths[] = {
-    "/etc/ssl/certs/ca-certificates.crt",                /* Debian, Arch     */
-    "/etc/pki/tls/certs/ca-bundle.crt",                  /* Fedora, RHEL     */
-    "/etc/ssl/ca-bundle.pem",                            /* openSUSE         */
-    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", /* RHEL variants    */
-    "/etc/ssl/cert.pem",                                 /* Alpine           */
+    "/etc/ssl/certs/ca-certificates.crt",                /* Debian, Arch, Fedora ≥ 44 */
+    "/etc/pki/tls/certs/ca-bundle.crt",                  /* RHEL; Fedora ≤ 42         */
+    "/etc/ssl/ca-bundle.pem",                            /* openSUSE                  */
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", /* Fedora/RHEL, behind links */
+    "/etc/ssl/cert.pem",                                 /* Alpine                    */
   };
   const char *env = g_getenv("SSL_CERT_FILE");
   if (env && g_file_test(env, G_FILE_TEST_IS_REGULAR)) { return g_strdup(env); }

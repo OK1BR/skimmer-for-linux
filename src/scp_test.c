@@ -684,6 +684,84 @@ int main(void) {
     g_free(astate);
   }
 
+  /* -- the trust store (gh#23) --------------------------------------------------- */
+  /* Which CA bundle goes to CURLOPT_CAINFO. The TLS leg itself is not mocked
+   * here (the mock is plain HTTP); what is pinned is the precedence of the
+   * lookup, so a change to it cannot slip through under a distro build where
+   * the answer is always "none" and libcurl's own default serves. */
+  printf("--- trust store (CURLOPT_CAINFO)\n");
+  {
+    static const char *known[] = {       /* the list in scp_update.c, in order */
+      "/etc/ssl/certs/ca-certificates.crt",
+      "/etc/pki/tls/certs/ca-bundle.crt",
+      "/etc/ssl/ca-bundle.pem",
+      "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+      "/etc/ssl/cert.pem",
+    };
+    char *saved_file = g_strdup(g_getenv("SSL_CERT_FILE"));
+    char *saved_img = g_strdup(g_getenv("APPIMAGE"));
+    char *saved_dir = g_strdup(g_getenv("APPDIR"));
+    g_unsetenv("SSL_CERT_FILE");
+    g_unsetenv("APPIMAGE");
+    g_unsetenv("APPDIR");
+
+    const char *host_bundle = NULL;      /* what this build host offers        */
+    for (guint i = 0; i < G_N_ELEMENTS(known) && !host_bundle; i++) {
+      if (g_file_test(known[i], G_FILE_TEST_IS_REGULAR)) { host_bundle = known[i]; }
+    }
+
+    char *got = skim_scp_env_ca_path();
+    check("distro build (no APPIMAGE/APPDIR, no SSL_CERT_FILE): none — libcurl's own default",
+          got == NULL);
+    g_free(got);
+
+    g_setenv("APPDIR", "/nonexistent/AppDir", TRUE);
+    got = skim_scp_env_ca_path();
+    char *line = g_strdup_printf("APPDIR set: the first known bundle this host has (%s)",
+                                 host_bundle ? host_bundle : "none here");
+    check(line, g_strcmp0(got, host_bundle) == 0);
+    g_free(line);
+    g_free(got);
+    g_unsetenv("APPDIR");
+
+    g_setenv("APPIMAGE", "/nonexistent/app.AppImage", TRUE);
+    got = skim_scp_env_ca_path();
+    check("APPIMAGE alone (no APPDIR): the same lookup", g_strcmp0(got, host_bundle) == 0);
+    g_free(got);
+
+    g_setenv("SSL_CERT_FILE", dest, TRUE);           /* any regular file      */
+    got = skim_scp_env_ca_path();
+    check("SSL_CERT_FILE names a regular file: taken verbatim, before the walk",
+          g_strcmp0(got, dest) == 0);
+    g_free(got);
+    g_unsetenv("APPIMAGE");
+    got = skim_scp_env_ca_path();
+    check("…and also under a distro build", g_strcmp0(got, dest) == 0);
+    g_free(got);
+
+    g_setenv("SSL_CERT_FILE", "/nonexistent/ca.pem", TRUE);
+    got = skim_scp_env_ca_path();
+    check("SSL_CERT_FILE names a missing file: ignored (distro build → none)", got == NULL);
+    g_free(got);
+    g_setenv("APPDIR", "/nonexistent/AppDir", TRUE);
+    got = skim_scp_env_ca_path();
+    check("…ignored under an AppImage too → the walk", g_strcmp0(got, host_bundle) == 0);
+    g_free(got);
+
+    g_setenv("SSL_CERT_FILE", tmp, TRUE);            /* a directory           */
+    got = skim_scp_env_ca_path();
+    check("SSL_CERT_FILE names a directory: ignored → the walk",
+          g_strcmp0(got, host_bundle) == 0);
+    g_free(got);
+
+    if (saved_file) { g_setenv("SSL_CERT_FILE", saved_file, TRUE); } else { g_unsetenv("SSL_CERT_FILE"); }
+    if (saved_img) { g_setenv("APPIMAGE", saved_img, TRUE); } else { g_unsetenv("APPIMAGE"); }
+    if (saved_dir) { g_setenv("APPDIR", saved_dir, TRUE); } else { g_unsetenv("APPDIR"); }
+    g_free(saved_file);
+    g_free(saved_img);
+    g_free(saved_dir);
+  }
+
   g_usleep(100 * 1000);
   printf("\n=== %d checks, %d failures ===\n", checks, fails);
   printf(fails ? "FAIL\n" : "PASS — the dictionary stays current, and stays put "
