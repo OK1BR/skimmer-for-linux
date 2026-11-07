@@ -17,7 +17,8 @@
  * strongest marker, tokens shortly after CQ get a weaker one, repetitions
  * accumulate, and an optional known-call dictionary (MASTER.SCP) boosts.
  * A degenerate fist can close the gaps AROUND the markers ("CQCQCQ
- * DEEA1EYL") or every gap of the over ("CQCQCQDEEA5JQFEA5JQFK"); three
+ * DEEA1EYL") or every gap of the over ("CQCQCQDEEA5JQFEA5JQFK"), or stretch
+ * the gaps INSIDE the call to a word gap's length ("D E G 0WD T G 0WD T");
  * strictly-shaped fallbacks recover those tokens, and all of them fire only
  * where the normal path fails — cleanly keyed streams never enter them.
  * Scores: 0.55 structural+allocation, +0.25 DE, +0.10 CQ, +0.20 repeated
@@ -324,6 +325,8 @@ typedef struct {
   guint    parts;                              /* fewest tokens it came in   */
   gboolean de_marked;
   gboolean cq_context;
+  guint    ds_seq;                             /* the despaced stretch (gh#33) */
+  guint    ds_cnt;                             /* copies counted in it       */
 } Cand;
 
 struct _SkimCallsignExtractor {
@@ -345,6 +348,11 @@ struct _SkimCallsignExtractor {
   char     run_hit[CALL_MAX];                  /* its join counted on arrival */
   char     run_lead;                           /* lone E/T/K/R right before  */
   gboolean run_spelled;                        /* every piece one character  */
+  GString *ds_text;                            /* the stretch so far, spaces */
+  GString *ds_bound;                           /* dropped (gh#33); '1' where */
+  guint    ds_seq;                             /* a token began; its number  */
+  gboolean ds_frag;                            /* it holds an unread fragment */
+  gint64   ds_last_us;                         /* clock of its last token    */
   Cand     cand[MAX_CAND];
   guint    ncand;
 };
@@ -353,6 +361,8 @@ SkimCallsignExtractor *skim_callsign_extractor_new(void) {
   SkimCallsignExtractor *x = g_new0(SkimCallsignExtractor, 1);
   x->tok = g_string_new(NULL);
   x->run = g_string_new(NULL);
+  x->ds_text  = g_string_new(NULL);
+  x->ds_bound = g_string_new(NULL);
   x->cq_recent = CQ_WINDOW + 1;
   return x;
 }
@@ -362,6 +372,8 @@ void skim_callsign_extractor_free(SkimCallsignExtractor *x) {
     return;
   g_string_free(x->tok, TRUE);
   g_string_free(x->run, TRUE);
+  g_string_free(x->ds_text, TRUE);
+  g_string_free(x->ds_bound, TRUE);
   g_free(x);
 }
 
@@ -385,6 +397,10 @@ void skim_callsign_extractor_reset(SkimCallsignExtractor *x) {
   x->prev_tok[0] = '\0';
   x->prev_valid = x->prev_de = x->prev_cq = x->prev_gap = FALSE;
   run_clear(x);
+  g_string_set_size(x->ds_text, 0);
+  g_string_set_size(x->ds_bound, 0);
+  x->ds_seq++;
+  x->ds_frag = FALSE;
 }
 
 static double cand_score(const SkimCallsignExtractor *x, const Cand *c) {
@@ -428,6 +444,11 @@ static void cand_add(SkimCallsignExtractor *x, const char *call, guint parts,
   c->count++;
   c->last_tok = x->tok_n;
   c->last_us  = x->now_us;
+  if (c->ds_seq != x->ds_seq) {                /* a copy in the stretch of   */
+    c->ds_seq = x->ds_seq;                     /* text despace_scan() reads  */
+    c->ds_cnt = 0;                             /* (gh#33)                    */
+  }
+  c->ds_cnt++;
   if (de_marked)  { c->de_marked  = TRUE; }
   if (cq_context) { c->cq_context = TRUE; }
 }
@@ -499,6 +520,7 @@ static void run_take(SkimCallsignExtractor *x, const char *tok,
     return;                                    /* babble — wait for an edge  */
   x->run_n++;
   g_string_append(x->run, tok);
+  x->ds_frag = TRUE;                           /* unread — gh#33 may look    */
   if (tok[1] != '\0') { x->run_spelled = FALSE; }
   if (de) { x->run_de = TRUE; }
   if (cq) { x->run_cq = TRUE; }
@@ -565,6 +587,9 @@ static gboolean run_close(SkimCallsignExtractor *x, char trail) {
   return hit;
 }
 
+static void despace_note(SkimCallsignExtractor *x, const char *tok, gsize n);
+static void despace_edge(SkimCallsignExtractor *x);
+
 static void take_token(SkimCallsignExtractor *x, const char *tok) {
   if (strcmp(tok, "\xC2\xB7") == 0) {
     /* The decoder's over-break mark ("·") is metadata, not received text —
@@ -576,10 +601,16 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
      * station from one hearing of two scraps, SAC fixture). */
     run_close(x, 0);
     run_clear(x);
+    despace_edge(x);
     x->prev_gap = x->prev_tok[0] != '\0';
     return;
   }
   x->tok_n++;
+  {                                            /* gh#33: the stretch sees   */
+    const gsize bl = strlen(tok);              /* every token's bare text   */
+    const gboolean m = bl > 2 && strcmp(tok + bl - 2, "\xC2\xB7") == 0;
+    despace_note(x, tok, m ? bl - 2 : bl);
+  }
   /* Letter-spaced CQ chain — the TORN twin of the fused "CQCQ" run: the
    * same degenerate fist that glues gaps shut also stretches them, and the
    * CQ chain arrives as single-letter tokens "C Q C Q" (EA1EYL again,
@@ -599,6 +630,7 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
   if (strcmp(tok, "DE") == 0) {
     run_close(x, 0);
     run_clear(x);
+    despace_edge(x);
     x->de_pending = 2;
     x->prev_tok[0] = '\0';                     /* a call never straddles DE  */
     return;
@@ -614,6 +646,7 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
      * "<call> TU" the thanks may go to the OTHER station. */
     run_close(x, 0);
     run_clear(x);
+    despace_edge(x);
     x->cq_recent = 0;
     if (strcmp(tok, "TU") != 0 && x->prev_tok[0]) {
       for (guint i = 0; i < x->ncand; i++) {
@@ -671,12 +704,14 @@ static void take_token(SkimCallsignExtractor *x, const char *tok) {
       (marked && (join_stop_word(bare) || skim_callsign_is_valid(bare)))) {
     run_close(x, marked ? '\0' : lone_stop_letter(tok));   /* an edge    */
     run_clear(x);
+    despace_edge(x);
     if (!marked) { x->run_lead = lone_stop_letter(tok); }
   } else {
     run_take(x, bare, de_now, cq_now);
     if (marked) {
       run_close(x, 0);
       run_clear(x);
+      despace_edge(x);
     }
   }
 
@@ -783,17 +818,254 @@ static void take_babble(SkimCallsignExtractor *x) {
   if (x->de_pending > 0) { x->de_pending--; }
 }
 
+/* Stretched character gaps — gh#33, after OK1HRA (ok1hra/skimmer-for-linux
+ * 292439e, written anew). A fist whose character gaps stretch to a word
+ * gap's length comes out with spaces INSIDE the call: "CQ CQ CQ D E G 0WD
+ * T G 0WD T G 0WD T P SE K", "Y O4 BE X Y O4 BE X", "DE O K2B VX · O K2B
+ * VX E" (3552 kHz, 2026-11-01). On two recordings of 2026-10-15/16 that
+ * was 15–16 % of the stations CW Skimmer Server spotted and OK1HRA's
+ * skimmer missed. Token by token it cannot be read: T and E are stop words,
+ * K2B is a call of its own, and the run (gh#3) ends at every one of them —
+ * all it yields are the two-token torsos OK2B and K2BVX, and those went on
+ * the air as stations. So the text is kept once more with its spaces
+ * dropped, and after a calling or sender marker in it a call keyed back to
+ * back — twice if MASTER.SCP knows it, three times otherwise, never a copy
+ * that runs on into a longer known call — is read as that many copies.
+ *
+ * Strictly a fallback: only text the plain path left a FRAGMENT in is
+ * looked at (a cleanly keyed over has none — every token a call, a marker,
+ * a stop word or an exchange — and never enters here), and copies any path
+ * already counted in the same stretch of text are not counted again, so a
+ * clean copy beside torn ones is one copy, whichever path read it. The
+ * stretch survives the decoder's over-break mark: this fist's gap between
+ * two copies (3.7 s) is longer than the quiet that writes the mark (14
+ * dits, ~1 s at 18 WPM, cw-v2), so the mark lands BETWEEN the copies and
+ * an over holds one — and DeepCW writes no mark at all. So the stretch is
+ * read at every EDGE of the run (gh#3) — a stop word, a whole call, DE, a
+ * marker, the mark — right after the run was read and counted there (240
+ * bytes at most; the repeat has to be complete to count, so reading early
+ * changes nothing but the moment) and dropped after DS_GAP_US of silence
+ * (a copy a minute later is another transmission), at DS_MAX bytes, at a
+ * babble token (nothing reaches across one) and at a reset. A pass that
+ * finds nothing new touches no candidate: a stale call is not kept alive
+ * by the text around it.
+ * SKIM_CALL_DESPACE=0 turns the path off — the bench's A/B (docs/BENCH.md). */
+#define DS_MAX     240                         /* bytes of a stretch kept    */
+#define DS_GAP_US  (20 * G_USEC_PER_SEC)       /* silence that ends one      */
+
+static gboolean despace_on(void) {
+  static gint on = -1;
+  if (G_UNLIKELY(on < 0)) {
+    const char *e = g_getenv("SKIM_CALL_DESPACE");
+    on = !(e && strcmp(e, "0") == 0);
+  }
+  return on;
+}
+
+static void despace_clear(SkimCallsignExtractor *x) {
+  g_string_set_size(x->ds_text, 0);
+  g_string_set_size(x->ds_bound, 0);
+  x->ds_seq++;
+  x->ds_frag = FALSE;
+}
+
+/* The markers at s — CQ/TEST/QRZ chains, "DX" inside one, DE — and how
+ * many bytes they take; 0 when s opens with none. */
+static gsize despace_markers(const char *s, gboolean *cq, gboolean *de) {
+  gsize i = 0;
+  for (;;) {
+    if (strncmp(s + i, "CQ", 2) == 0)              { i += 2; *cq = TRUE; }
+    else if (strncmp(s + i, "TEST", 4) == 0)       { i += 4; *cq = TRUE; }
+    else if (strncmp(s + i, "QRZ", 3) == 0)        { i += 3; *cq = TRUE; }
+    else if (i && strncmp(s + i, "DX", 2) == 0)    { i += 2; }
+    else if (strncmp(s + i, "DE", 2) == 0)         { i += 2; *de = TRUE; }
+    else return i;
+  }
+}
+
+/* The LAST copy of a repeat, at p in the stretch (l bytes): cut short when
+ * it runs on into a longer call — then it is that call with its tail
+ * lost, not a copy of its own. Two readings of "longer call":
+ *  - the dictionary knows it ("OK1OOK1OA" is OK1OA twice, not OK1O);
+ *  - the decoder committed it as ONE token, the copy its head: "DEOK1JR·
+ *    OK1JRU" (3552.5 kHz, 2026-11-01 20:51) despaces to OK1JR twice,
+ *    MASTER.SCP knows OK1JR and not OK1JRU, and the torso took the
+ *    station's place in the table. The token boundaries tell: the copy
+ *    opens the token and the token, a valid call, outlives it. A token
+ *    that begins INSIDE the copy ("VXE" of "O K2B VXE") is no such
+ *    evidence — E and T stick to anything — and neither is a token that
+ *    is the copy with a word of the QSO glued on ("SO5CWK", "HA8ARCQ",
+ *    "G6PZDX", "DJ5AZCQ"): a valid shape, but the word says the call
+ *    ended before it. A longer call this extractor merely holds as a
+ *    candidate is not consulted: those glued shapes are candidates too,
+ *    and one of them would veto every later copy of the real call. */
+static gboolean despace_cut(const SkimCallsignExtractor *x, gsize p, gsize l) {
+  const char *s = x->ds_text->str, *b = x->ds_bound->str;
+  const gsize n = x->ds_text->len;
+  char ext[CALL_MAX];
+  for (gsize e = l + 1; e <= l + 4 && p + e <= n && e < CALL_MAX; e++) {
+    memcpy(ext, s + p, e);
+    ext[e] = '\0';
+    if (dict_has(ext))
+      return TRUE;
+  }
+  gsize te = p + l;                            /* one past the copy          */
+  if (te >= n || b[te] == '1' || b[p] != '1')
+    return FALSE;                              /* the token ends with it, or */
+  for (gsize i = p + 1; i < te; i++) {         /* began before it            */
+    if (b[i] == '1')
+      return FALSE;                            /* a token opened inside it   */
+  }
+  while (te < n && b[te] != '1') { te++; }
+  if (te - p >= CALL_MAX)
+    return FALSE;
+  memcpy(ext, s + p, te - p);
+  ext[te - p] = '\0';
+  if (!skim_callsign_is_valid(ext))
+    return FALSE;
+  const char *word = ext + l;                  /* what the token adds        */
+  gboolean cq = FALSE, de = FALSE;
+  if (join_stop_word(word) || strcmp(word, "DX") == 0 ||
+      despace_markers(word, &cq, &de) == strlen(word))
+    return FALSE;                              /* a word of the QSO glued on */
+  return TRUE;
+}
+
+/* The call keyed back to back at the head of s (n bytes): its length, the
+ * call itself and the copies in *reps; 0 when none is. Shortest first, as
+ * in take_fused_over(): "K1AK1AK1A" is K1A three times, never the
+ * structurally valid K1AK1A. */
+static gsize despace_repeat(const char *s, gsize n, char *call, guint *reps) {
+  for (gsize l = 3; l < CALL_MAX && 2 * l <= n; l++) {
+    memcpy(call, s, l);
+    call[l] = '\0';
+    if (!skim_callsign_is_valid(call))
+      continue;
+    guint k = 1;
+    while ((k + 1) * l <= n && memcmp(s + k * l, call, l) == 0) { k++; }
+    if (k < 2 || (k < 3 && !dict_has(call)))
+      continue;
+    *reps = k;
+    return l;
+  }
+  return 0;
+}
+
+/* The scan has found `found` copies of `call` in the stretch so far: count
+ * those not yet counted there by any path. The stretch is read again at
+ * every edge, so a pass that finds nothing new adds nothing — except the
+ * markers: a TEST keyed after copies already counted blesses them now. */
+static void despace_credit(SkimCallsignExtractor *x, const char *call,
+                           guint found, gboolean de, gboolean cq) {
+  guint have = 0;
+  for (guint i = 0; i < x->ncand; i++) {
+    Cand *c = &x->cand[i];
+    if (strcmp(c->call, call) == 0) {
+      have = c->ds_seq == x->ds_seq ? c->ds_cnt : 0;
+      if (have) {
+        if (de) { c->de_marked  = TRUE; }
+        if (cq) { c->cq_context = TRUE; }
+      }
+      break;
+    }
+  }
+  if (have >= found)
+    return;
+  if (G_UNLIKELY(g_getenv("SKIM_DESPACE_DEBUG"))) {
+    g_printerr("despace: %s x%u +%u%s%s |%s|\n", call, found, found - have,
+               de ? " de" : "", cq ? " cq" : "", x->ds_text->str);
+  }
+  for (guint k = have; k < found; k++) { cand_add(x, call, 2, de, cq); }
+}
+
+#define DS_CALLS 16                            /* distinct calls one scan tallies */
+
+static void despace_scan(SkimCallsignExtractor *x) {
+  const char *s = x->ds_text->str;
+  const gsize n = x->ds_text->len;
+  struct { char call[CALL_MAX]; guint found; } seen[DS_CALLS];
+  guint nseen = 0;
+  for (gsize i = 0; i + 8 <= n;) {             /* DE + a 3-char call twice   */
+    gboolean cq = FALSE, de = FALSE;
+    const gsize h = despace_markers(s + i, &cq, &de);
+    if (!h) { i++; continue; }
+    char call[CALL_MAX];
+    guint reps = 0;
+    const gsize l = despace_repeat(s + i + h, n - i - h, call, &reps);
+    if (!l) { i += h; continue; }
+    const gsize p = i + h;                     /* the copies start here      */
+    i = p + l * reps;
+    /* the cut test looks at the LAST copy only: an inner copy always runs
+     * on into the next one, and SP7AJ repeated would be refused whenever
+     * MASTER.SCP knows an SP7AJS */
+    if (despace_cut(x, p + (reps - 1) * l, l)) {
+      if (G_UNLIKELY(g_getenv("SKIM_DESPACE_DEBUG"))) {
+        g_printerr("despace: %s x%u cut — runs on into a longer call |%s|\n",
+                   call, reps, s);
+      }
+      continue;
+    }
+    /* a calling marker right after the copies blesses them too ("SD1A
+     * SD1A TEST"), as a trailing TEST does in take_token() */
+    if (!cq) {
+      gboolean c2 = FALSE, d2 = FALSE;
+      despace_markers(s + i, &c2, &d2);
+      cq = c2;
+    }
+    /* the same call keyed in two runs of the stretch ("CQ DE X X K CQ DE
+     * X X K") is counted over both */
+    guint j = 0;
+    while (j < nseen && strcmp(seen[j].call, call) != 0) { j++; }
+    if (j == nseen) {
+      if (nseen == DS_CALLS)
+        continue;                              /* babble — nothing more here */
+      g_strlcpy(seen[nseen].call, call, sizeof(seen[nseen].call));
+      seen[nseen++].found = 0;
+    }
+    seen[j].found += reps;
+    despace_credit(x, call, seen[j].found, de, cq);
+  }
+}
+
+/* A token take_token() takes — its bare text (n bytes, the mark cut off)
+ * joins the stretch before the token is read. */
+static void despace_note(SkimCallsignExtractor *x, const char *tok, gsize n) {
+  if (!despace_on() || !n)
+    return;
+  if (x->ds_text->len && x->now_us - x->ds_last_us > DS_GAP_US) {
+    despace_clear(x);
+  }
+  g_string_append_len(x->ds_text, tok, n);
+  g_string_append_c(x->ds_bound, '1');
+  for (gsize i = 1; i < n; i++) { g_string_append_c(x->ds_bound, '0'); }
+  x->ds_last_us = x->now_us;
+}
+
+/* An EDGE of the run (gh#3) — DE, a marker, a stop word, a whole call, the
+ * over-break mark, the end of the text: the run has just been read and
+ * counted, so the stretch is read now and never counts a copy twice. The
+ * cap is checked here too: a stretch of DS_MAX has been read whole. */
+static void despace_edge(SkimCallsignExtractor *x) {
+  if (!despace_on())
+    return;
+  if (x->ds_frag && x->ds_text->len) { despace_scan(x); }
+  if (x->ds_text->len > DS_MAX) { despace_clear(x); }
+}
+
 void skim_callsign_extractor_feed(SkimCallsignExtractor *x, const char *text) {
   for (const char *p = text; *p; p++) {
     const char c = *p;
     if (c == ' ' || c == '\n' || c == '\t') {
       if (x->tok->len) {
-        if (x->tok->len <= OVER_MAX && take_fused_over(x, x->tok->str)) {
+        const char *tok = x->tok->str;
+        const gsize n   = x->tok->len;
+        if (n <= OVER_MAX && take_fused_over(x, tok)) {
           /* its words went through take_token() one by one */
-        } else if (x->tok->len < CALL_MAX) {
-          take_token(x, x->tok->str);
+        } else if (n < CALL_MAX) {
+          take_token(x, tok);
         } else {
           take_babble(x);
+          despace_clear(x);                    /* nothing reaches across it  */
         }
         g_string_set_size(x->tok, 0);
       }
@@ -895,6 +1167,7 @@ double skim_callsign_extract(const char *text, char *out, gsize out_size) {
   skim_callsign_extractor_feed(x, text);
   skim_callsign_extractor_feed(x, " ");        /* flush the last token       */
   run_close(x, 0);                             /* the end of the text: an edge */
+  despace_edge(x);
   double s = skim_callsign_extractor_best(x, out, out_size);
   skim_callsign_extractor_free(x);
   return s;

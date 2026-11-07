@@ -469,8 +469,8 @@ int main(void) {
         "a run never crosses a stop word or a whole call" },
       { "I A N S M 5 S I A N M 5 S I A N S M 5 S I A ", "",
         "thirteen and more pieces are babble, whatever they spell" },
-      { "TEST E A2 D DC E A2 D DC E A2 D DC ", "",
-        "a lone E before the run may be its first letter (EA2DDC, not A2DDC)" },
+      { "TEST E A2 D DC E A2 D DC E A2 D DC ", "EA2DDC",
+        "a lone E before the run is its first letter: EA2DDC thrice (gh#33), never A2DDC" },
       { "DE F 4 I K C F 4 I K C ", "",
         "a lone K after a SPELLED run may be a letter of the call (F4IKC)" },
       { "CQ DE UA 6 H K CQ DE UA 6 H K ", "UA6H",
@@ -483,6 +483,137 @@ int main(void) {
       }
       check(PHANTOM[i].what, strcmp(got, PHANTOM[i].want) == 0);
     }
+  }
+
+  /* -- stretched character gaps (gh#33) ----------------------------------------- */
+  {
+    char got[32];
+    gboolean cq = FALSE;
+    double s;
+    SkimCallsignExtractor *x;
+
+    /* the issue's case: token by token nothing (T and E are stop words, the
+     * lone E before G0WD makes EG0WD); with the spaces dropped the call
+     * three times after CQ and DE — MASTER.SCP not needed for three */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "CQ CQ CQ D E G 0WD T G 0WD T G 0WD T P SE K \xC2\xB7 ");
+    s = skim_callsign_extractor_best_ex(x, got, sizeof(got), &cq);
+    check("stretched gaps: CQ CQ CQ D E G 0WD T ×3 P SE K → G0WDT, calling",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "G0WDT") == 0 && cq);
+    check("stretched gaps: three copies are three hearings",
+          skim_callsign_extractor_hearings(x, "G0WDT") == 3);
+    skim_callsign_extractor_free(x);
+
+    /* two copies of a call nobody knows are not enough (the run of gh#3
+     * reads "Y O4 BE X" twice by itself — no stop letter inside; G0WDT
+     * ends in one, and its run yields the torso G0WD, as before) */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "CQ DE G 0WD T G 0WD T K \xC2\xB7 ");
+    check("stretched gaps: an unknown call twice is not read",
+          skim_callsign_extractor_hearings(x, "G0WDT") == 0);
+    skim_callsign_extractor_free(x);
+
+    /* the clean over's copies are counted once, whichever path reads them */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "CQ CQ DE OK1BR OK1BR K \xC2\xB7 ");
+    skim_callsign_extractor_best(x, got, sizeof(got));
+    check("stretched gaps: a clean over is not counted twice (OK1BR ×2)",
+          strcmp(got, "OK1BR") == 0 && skim_callsign_extractor_hearings(x, "OK1BR") == 2);
+    skim_callsign_extractor_free(x);
+
+    /* a clean copy beside torn ones: one copy each */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "DE G0WDT G 0WD T G 0WD T K \xC2\xB7 ");
+    skim_callsign_extractor_best(x, got, sizeof(got));
+    check("stretched gaps: a whole copy and two torn ones are three hearings",
+          strcmp(got, "G0WDT") == 0 && skim_callsign_extractor_hearings(x, "G0WDT") == 3);
+    skim_callsign_extractor_free(x);
+
+    char *dict = g_build_filename(g_get_tmp_dir(), "skimmer-call-dict33.txt", NULL);
+    g_file_set_contents(dict, "YO4BEX\nOK2BVX\nOK2B\nK2BVX\nOK1O\nOK1OA\n", -1, NULL);
+    GError *err = NULL;
+    check("gh#33 dictionary loads", skim_callsign_dict_load(dict, &err) &&
+                                    skim_callsign_dict_size() == 6);
+    g_clear_error(&err);
+
+    /* a call MASTER.SCP knows takes two — and the run of gh#3 reading the
+     * same two copies does not make four */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "CQ DE Y O4 BE X Y O4 BE X K \xC2\xB7 ");
+    s = skim_callsign_extractor_best(x, got, sizeof(got));
+    check("stretched gaps: a known call twice → YO4BEX, two hearings",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "YO4BEX") == 0 &&
+          skim_callsign_extractor_hearings(x, "YO4BEX") == 2);
+    skim_callsign_extractor_free(x);
+    g_file_set_contents(dict, "YO4BEX\nOK2BVX\nOK2B\nK2BVX\nOK1O\nOK1OA\nG0WDT\n", -1, NULL);
+    skim_callsign_dict_load(dict, NULL);
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "CQ DE G 0WD T G 0WD T K \xC2\xB7 ");
+    s = skim_callsign_extractor_best(x, got, sizeof(got));
+    check("stretched gaps: a known G0WDT twice → G0WDT over the torso G0WD",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "G0WDT") == 0 &&
+          skim_callsign_extractor_hearings(x, "G0WDT") == 2);
+    skim_callsign_extractor_free(x);
+
+    /* 3552 kHz, 2026-11-01: the over-break mark lands between the copies,
+     * K2B is a call of its own, the joins make the torsos OK2B and K2BVX —
+     * the whole call wins once the second copy is in */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "C Q \xC2\xB7 CQ \xC2\xB7 CQ \xC2\xB7 DE O K2B VX \xC2\xB7 O K2B VX E \xC2\xB7 ");
+    s = skim_callsign_extractor_best_ex(x, got, sizeof(got), &cq);
+    check("stretched gaps: DE O K2B VX · O K2B VX E → OK2BVX across the mark, calling",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "OK2BVX") == 0 && cq);
+    check("stretched gaps: OK2BVX heard twice",
+          skim_callsign_extractor_hearings(x, "OK2BVX") == 2);
+    skim_callsign_extractor_free(x);
+
+    /* a minute of silence between the copies: two transmissions, no repeat */
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_set_now(x, 0);
+    skim_callsign_extractor_feed(x, "CQ DE O K2B VX \xC2\xB7 ");
+    skim_callsign_extractor_set_now(x, 60 * G_USEC_PER_SEC);
+    skim_callsign_extractor_feed(x, "O K2B VX E \xC2\xB7 ");
+    check("stretched gaps: copies a minute apart are not a repeat",
+          skim_callsign_extractor_hearings(x, "OK2BVX") == 0);
+    skim_callsign_extractor_free(x);
+
+    /* 3552.5 kHz, 2026-11-01 20:51: the first copy cut before the mark,
+     * the second committed whole as one token — OK1JR twice to the
+     * dictionary (it knows OK1JR, not OK1JRU), but the token says OK1JRU:
+     * no torso. Noise glued INSIDE a copy ("VXE") is not that. */
+    g_file_set_contents(dict, "OK1JR\nOK1O\nOK1OA\n", -1, NULL);
+    skim_callsign_dict_load(dict, NULL);
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "CQ CQ DEOK1JR\xC2\xB7 OK1JRU \xC2\xB7 ");
+    check("stretched gaps: DEOK1JR· OK1JRU is OK1JRU cut, not OK1JR twice",
+          skim_callsign_extractor_hearings(x, "OK1JR") == 0 &&
+          skim_callsign_extractor_hearings(x, "OK1JRU") == 1);
+    skim_callsign_extractor_free(x);
+    g_file_set_contents(dict, "OK2BVX\nOK1O\nOK1OA\n", -1, NULL);
+    skim_callsign_dict_load(dict, NULL);
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "CQ DE O K2B VX \xC2\xB7 O K2B VXE \xC2\xB7 ");
+    check("stretched gaps: a token opening inside the copy (VXE) is no cut",
+          skim_callsign_extractor_hearings(x, "OK2BVX") == 2);
+    skim_callsign_extractor_free(x);
+    x = skim_callsign_extractor_new();
+    skim_callsign_extractor_feed(x, "CQ DE O K2B VX \xC2\xB7 O K2B VXK \xC2\xB7 "
+                                    "CQ DE O K2B VX \xC2\xB7 OK2BVXCQ \xC2\xB7 ");
+    check("stretched gaps: a word of the QSO glued on (VXK, OK2BVXCQ) is no cut",
+          skim_callsign_extractor_hearings(x, "OK2BVX") == 4);
+    skim_callsign_extractor_free(x);
+
+    /* a copy that runs on into a longer known call is that call cut short */
+    s = skim_callsign_extract("DE O K 1 O O K 1 O A ", got, sizeof(got));
+    check("stretched gaps: OK1O OK1OA is OK1OA cut, not OK1O twice", s == 0.0);
+    g_file_set_contents(dict, "OK1O\n", -1, NULL);
+    skim_callsign_dict_load(dict, NULL);
+    s = skim_callsign_extract("DE O K 1 O O K 1 O A ", got, sizeof(got));
+    check("stretched gaps: control — with no OK1OA known, OK1O twice",
+          s >= SKIM_CALLSIGN_SPOT_THRESHOLD && strcmp(got, "OK1O") == 0);
+    g_file_set_contents(dict, "", -1, NULL);
+    skim_callsign_dict_load(dict, NULL);
+    g_free(dict);
   }
 
   /* -- dictionary boost -------------------------------------------------------- */

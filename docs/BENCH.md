@@ -50,7 +50,13 @@ live session (in OK1HRA's fork, offline wins twice lost on live air — #28).
   call sent folds a cut or glued twin of itself, default 600; -1 = off).
   `SKIM_RBN_DEBUG=1` traces every hold, release, drop, stale refusal and
   look-alike hold (`NEAR`, `FOLD`, with the rival) with the readings, the
-  dictionary verdict and the age of the last reading.
+  dictionary verdict and the age of the last reading. The extractor's
+  reading of stretched character gaps (gh#33, `callsign.c`) is on by
+  default and does not depend on the over-break mark (DeepCW writes none);
+  `SKIM_CALL_DESPACE=0` turns it off for an A/B, and
+  `SKIM_DESPACE_DEBUG=1` prints every call it credits (with the copies
+  found and the copies added) and every repeat it refuses as a cut copy
+  of a longer call, each with the despaced text it read.
 - Deterministic: two runs over the same input are byte-identical (cw-v2,
   2026-11-01). About 36× real time on cw-v2 at 192 kHz on the development
   machine, so an evening of air replays in minutes.
