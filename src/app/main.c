@@ -48,6 +48,14 @@
 #define RBN_SETTLE_DEFAULT        8
 #define RBN_FRESH_MAX             600
 #define RBN_FRESH_DEFAULT         120   /* gh#26; = the station TTL         */
+/* gh#29 look-alike rules (feed_twins.h): the radius both look within, the
+ * memo of calls read (near-call) and the window of calls sent (fold). */
+#define RBN_TWIN_HZ_MAX           2000
+#define RBN_TWIN_HZ_DEFAULT       300
+#define RBN_NEAR_MAX              7200
+#define RBN_NEAR_DEFAULT          3600
+#define RBN_FOLD_MAX              3600
+#define RBN_FOLD_DEFAULT          600
 /* ROUTING decode text into a history slot must be TIGHT: the engine pins
  * each signal's frequency now, so a slot is one signal — a ±300 Hz routing
  * window let neighbouring stations interleave into one another's history
@@ -133,6 +141,12 @@ typedef struct {
   int             rbn_settle_s;
   int             rbn_fresh_s;   /* gh#26 (persisted [rbn]): a call must have
                                   * been read within this many s (0 = any)  */
+  int             rbn_twin_hz;   /* gh#29 (persisted [rbn]): the look-alike
+                                  * rules' radius (0 = both off), the memo
+                                  * of calls read and the window of calls
+                                  * sent, in s (0 = that rule off)          */
+  int             rbn_near_s;
+  int             rbn_fold_s;
   SkimScpUpdater *scp;           /* MASTER.SCP kept current in the background
                                   * (gh#15); NULL while switched off          */
   gboolean        scp_auto;      /* persisted [scp] auto_update, default on   */
@@ -1243,6 +1257,9 @@ static void settings_load_rbn(App *app) {
   app->rbn_reads   = RBN_READS_DEFAULT;
   app->rbn_settle_s = RBN_SETTLE_DEFAULT;
   app->rbn_fresh_s = RBN_FRESH_DEFAULT;
+  app->rbn_twin_hz = RBN_TWIN_HZ_DEFAULT;
+  app->rbn_near_s  = RBN_NEAR_DEFAULT;
+  app->rbn_fold_s  = RBN_FOLD_DEFAULT;
   if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
     if (g_key_file_has_key(kf, "rbn", "enabled", NULL)) {
       app->rbn_enabled = g_key_file_get_boolean(kf, "rbn", "enabled", NULL);
@@ -1263,6 +1280,18 @@ static void settings_load_rbn(App *app) {
     if (g_key_file_has_key(kf, "rbn", "fresh_s", NULL)) {
       app->rbn_fresh_s = CLAMP(g_key_file_get_integer(kf, "rbn", "fresh_s", NULL),
                                0, RBN_FRESH_MAX);
+    }
+    if (g_key_file_has_key(kf, "rbn", "twin_hz", NULL)) {
+      app->rbn_twin_hz = CLAMP(g_key_file_get_integer(kf, "rbn", "twin_hz", NULL),
+                               0, RBN_TWIN_HZ_MAX);
+    }
+    if (g_key_file_has_key(kf, "rbn", "near_s", NULL)) {
+      app->rbn_near_s = CLAMP(g_key_file_get_integer(kf, "rbn", "near_s", NULL),
+                              0, RBN_NEAR_MAX);
+    }
+    if (g_key_file_has_key(kf, "rbn", "fold_s", NULL)) {
+      app->rbn_fold_s = CLAMP(g_key_file_get_integer(kf, "rbn", "fold_s", NULL),
+                              0, RBN_FOLD_MAX);
     }
   }
   g_key_file_free(kf);
@@ -1290,6 +1319,9 @@ static void settings_save(const App *app) {
   g_key_file_set_integer(kf, "rbn", "min_readings", app->rbn_reads);
   g_key_file_set_integer(kf, "rbn", "settle_s", app->rbn_settle_s);
   g_key_file_set_integer(kf, "rbn", "fresh_s", app->rbn_fresh_s);
+  g_key_file_set_integer(kf, "rbn", "twin_hz", app->rbn_twin_hz);
+  g_key_file_set_integer(kf, "rbn", "near_s", app->rbn_near_s);
+  g_key_file_set_integer(kf, "rbn", "fold_s", app->rbn_fold_s);
   g_key_file_set_boolean(kf, "scp", "auto_update", app->scp_auto);
   g_key_file_set_integer(kf, "ui", "decode_font_pt", app->decode_font);
   g_key_file_set_integer(kf, "ui", "palette", app->palette);
@@ -1574,6 +1606,9 @@ static SkimPipeline *pipeline_create(App *app) {
     .rbn_min_hearings    = (guint)app->rbn_reads,
     .rbn_settle_s        = app->rbn_settle_s > 0 ? app->rbn_settle_s : -1,
     .rbn_fresh_s         = app->rbn_fresh_s > 0 ? app->rbn_fresh_s : -1,
+    .rbn_twin_hz         = app->rbn_twin_hz > 0 ? app->rbn_twin_hz : -1,
+    .rbn_near_s          = app->rbn_near_s > 0 ? app->rbn_near_s : -1,
+    .rbn_fold_s          = app->rbn_fold_s > 0 ? app->rbn_fold_s : -1,
   };
   SkimPipeline *p = skim_pipeline_new(&cfg);
   g_message("app: pipeline engine %s", skim_pipeline_cw_engine_name(p));
@@ -1767,6 +1802,9 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   GtkWidget *rreads = g_object_get_data(G_OBJECT(dlg), "rbn-reads-row");
   GtkWidget *rhold  = g_object_get_data(G_OBJECT(dlg), "rbn-hold-row");
   GtkWidget *rfresh = g_object_get_data(G_OBJECT(dlg), "rbn-fresh-row");
+  GtkWidget *rtwin  = g_object_get_data(G_OBJECT(dlg), "rbn-twin-row");
+  GtkWidget *rnear  = g_object_get_data(G_OBJECT(dlg), "rbn-near-row");
+  GtkWidget *rfold  = g_object_get_data(G_OBJECT(dlg), "rbn-fold-row");
   GtkWidget *scprow = g_object_get_data(G_OBJECT(dlg), "scp-row");
   const char *sv = gtk_editable_get_text(GTK_EDITABLE(row));
   char *server = g_strstrip(g_strdup(sv ? sv : ""));
@@ -1789,6 +1827,9 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   int rbn_reads = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rreads));
   int rbn_settle = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rhold));
   int rbn_fresh = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rfresh));
+  int rbn_twin = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rtwin));
+  int rbn_near = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rnear));
+  int rbn_fold = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rfold));
   guint dec_mode = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(mrow)), 1u);
   guint cw_engine = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(erow)), 1u);
   guint dcw_device = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(drow)), 1u);
@@ -1806,7 +1847,10 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
                           rbn_port != app->rbn_port ||
                           rbn_reads != app->rbn_reads ||
                           rbn_settle != app->rbn_settle_s ||
-                          rbn_fresh != app->rbn_fresh_s;
+                          rbn_fresh != app->rbn_fresh_s ||
+                          rbn_twin != app->rbn_twin_hz ||
+                          rbn_near != app->rbn_near_s ||
+                          rbn_fold != app->rbn_fold_s;
   if (server_changed) {
     g_free(app->server);
     app->server = server;
@@ -1837,6 +1881,9 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
     app->rbn_reads = rbn_reads;
     app->rbn_settle_s = rbn_settle;
     app->rbn_fresh_s = rbn_fresh;
+    app->rbn_twin_hz = rbn_twin;
+    app->rbn_near_s = rbn_near;
+    app->rbn_fold_s = rbn_fold;
     rbn_apply(app);
   } else {
     g_free(rbn_call);
@@ -2105,6 +2152,38 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   adw_spin_row_set_value(ADW_SPIN_ROW(rfresh), app->rbn_fresh_s);
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(rgrp), rfresh);
   adw_preferences_page_add(p_spots, ADW_PREFERENCES_GROUP(rgrp));
+  /* gh#29: a misread of a call read better nearby is not a station — two
+   * rules after OK1HRA's fork (feed_twins.h). */
+  GtkWidget *tgrp = adw_preferences_group_new();
+  adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(tgrp),
+                                  "Look-alike calls on the feed");
+  adw_preferences_group_set_description(ADW_PREFERENCES_GROUP(tgrp),
+      "A call within two edits of one read better close by — a misread of "
+      "it — stays off the wire (rules by OK1HRA)");
+  GtkWidget *rtwin = adw_spin_row_new_with_range(0, RBN_TWIN_HZ_MAX, 50);
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(rtwin),
+                                "Look-alike radius (Hz)");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(rtwin),
+      "How far from a call its misreads are looked for; 0 = both rules off");
+  adw_spin_row_set_value(ADW_SPIN_ROW(rtwin), app->rbn_twin_hz);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(tgrp), rtwin);
+  GtkWidget *rnear = adw_spin_row_new_with_range(0, RBN_NEAR_MAX, 60);
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(rnear),
+                                "Remember calls read for (s)");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(rnear),
+      "A call MASTER.SCP does not know waits while a look-alike read this "
+      "recently is known to it or was read more often; 0 = off");
+  adw_spin_row_set_value(ADW_SPIN_ROW(rnear), app->rbn_near_s);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(tgrp), rnear);
+  GtkWidget *rfold = adw_spin_row_new_with_range(0, RBN_FOLD_MAX, 60);
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(rfold),
+                                "Remember calls sent for (s)");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(rfold),
+      "A cut or glued twin of a call sent this recently on that frequency "
+      "stays off the wire while the sent call is better attested; 0 = off");
+  adw_spin_row_set_value(ADW_SPIN_ROW(rfold), app->rbn_fold_s);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(tgrp), rfold);
+  adw_preferences_page_add(p_spots, ADW_PREFERENCES_GROUP(tgrp));
 
   GtkWidget *ugrp = adw_preferences_group_new();
   adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(ugrp), "Display");
@@ -2153,6 +2232,9 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   g_object_set_data(G_OBJECT(dlg), "rbn-reads-row", rreads);
   g_object_set_data(G_OBJECT(dlg), "rbn-hold-row", rhold);
   g_object_set_data(G_OBJECT(dlg), "rbn-fresh-row", rfresh);
+  g_object_set_data(G_OBJECT(dlg), "rbn-twin-row", rtwin);
+  g_object_set_data(G_OBJECT(dlg), "rbn-near-row", rnear);
+  g_object_set_data(G_OBJECT(dlg), "rbn-fold-row", rfold);
   g_signal_connect(dlg, "closed", G_CALLBACK(prefs_closed), app);
   adw_dialog_present(dlg, GTK_WIDGET(app->window));
 }

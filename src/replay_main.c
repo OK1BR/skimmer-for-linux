@@ -210,7 +210,9 @@ static guint64 g_rbn_n;
  * (-1 = the same as SETTLE). READS=1 with SETTLE=-1 is the feed as it was
  * before gh#24. SKIM_REPLAY_RBN_FRESH (gh#26) is the window in seconds
  * within which a call must have been READ for its record to go out (120;
- * -1 = none). */
+ * -1 = none). SKIM_REPLAY_RBN_TWIN_HZ, _NEAR and _FOLD (gh#29) are the
+ * look-alike rules' radius, read memo and fold window (300 Hz, 3600 s,
+ * 600 s; -1 switches the radius — both rules — or one rule off). */
 static void rbn_policy_from_env(SkimPipelineConfig *cfg) {
   const char *e;
   if ((e = g_getenv("SKIM_REPLAY_RBN_MIN")) && e[0]) {
@@ -231,17 +233,34 @@ static void rbn_policy_from_env(SkimPipelineConfig *cfg) {
     const double v = g_ascii_strtod(e, NULL);
     cfg->rbn_fresh_s = v > 0 ? v : -1;
   }
+  /* gh#29: the look-alike rules — the radius both look within (300; -1 =
+   * both off), the near-call memo (3600; -1 = off), the fold window (600;
+   * -1 = off) */
+  if ((e = g_getenv("SKIM_REPLAY_RBN_TWIN_HZ")) && e[0]) {
+    const double v = g_ascii_strtod(e, NULL);
+    cfg->rbn_twin_hz = v > 0 ? v : -1;
+  }
+  if ((e = g_getenv("SKIM_REPLAY_RBN_NEAR")) && e[0]) {
+    const double v = g_ascii_strtod(e, NULL);
+    cfg->rbn_near_s = v > 0 ? v : -1;
+  }
+  if ((e = g_getenv("SKIM_REPLAY_RBN_FOLD")) && e[0]) {
+    const double v = g_ascii_strtod(e, NULL);
+    cfg->rbn_fold_s = v > 0 ? v : -1;
+  }
 }
 
 static void print_rbn_policy(const SkimPipeline *p, const char *rlog,
                              const char *note) {
-  double bar, settle, settle_nd, fresh;
+  double bar, settle, settle_nd, fresh, twin_hz, near_s, fold_s;
   guint reads;
   skim_pipeline_rbn_policy(p, &bar, &reads, &settle, &settle_nd, &fresh);
+  skim_pipeline_rbn_twins(p, &twin_hz, &near_s, &fold_s, NULL);
   printf("rbn tap: %s (bar %.2f, %u reading%s or MASTER.SCP, hold %.0f s, "
-         "%.0f s for a call MASTER.SCP does not know, read within %.0f s)%s\n",
+         "%.0f s for a call MASTER.SCP does not know, read within %.0f s; "
+         "look-alikes within %.0f Hz: read memo %.0f s, fold %.0f s)%s\n",
          rlog, bar, reads, reads == 1 ? "" : "s", settle, settle_nd, fresh,
-         note);
+         twin_hz, near_s, fold_s, note);
 }
 
 /* Stamped with the PIPELINE's stream frames (the block end the record was
@@ -430,7 +449,10 @@ static int replay_tap(const char *path) {
   if (n_bad) {
     printf("WARNING: %" G_GUINT64_FORMAT " lines did not parse\n", n_bad);
   }
-  printf("rbn tap: %" G_GUINT64_FORMAT " records → %s\n", g_rbn_n, rlog);
+  guint64 held = 0;
+  skim_pipeline_rbn_twins(p, NULL, NULL, NULL, &held);
+  printf("rbn tap: %" G_GUINT64_FORMAT " records → %s (look-alike rules held "
+         "a call %" G_GUINT64_FORMAT " times)\n", g_rbn_n, rlog, held);
   fclose(g_rbn);
   g_free(rlog);
   g_free(source);
@@ -652,7 +674,10 @@ int main(int argc, char **argv) {
          " frames, %" G_GUINT64_FORMAT " fragments, %u stations\n",
          stream, wall, stream / MAX(wall, 0.001), frames, g_fragments, nst);
   printf("decode log: %s\n", dlog);
-  printf("rbn tap: %" G_GUINT64_FORMAT " records → %s\n", g_rbn_n, rlog);
+  guint64 held = 0;
+  skim_pipeline_rbn_twins(p, NULL, NULL, NULL, &held);
+  printf("rbn tap: %" G_GUINT64_FORMAT " records → %s (look-alike rules held "
+         "a call %" G_GUINT64_FORMAT " times)\n", g_rbn_n, rlog, held);
   printf("decode tap: %" G_GUINT64_FORMAT " decodes, %" G_GUINT64_FORMAT
          " resets, %" G_GUINT64_FORMAT " flushes, %" G_GUINT64_FORMAT
          " prunes → %s\n",

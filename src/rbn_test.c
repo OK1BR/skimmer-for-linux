@@ -402,8 +402,12 @@ static void sim_ev(const FeedSim *s, SkimTapEvent *ev, SkimTapKind kind) {
   ev->now_us = s->now_us;
 }
 
+/* gh#29: the look-alike rules' knobs (0 = the engine's default, < 0 = off);
+ * NULL = all defaults. */
+typedef struct { double hz, near_s, fold_s; } SimTwins;
+
 static FeedSim *sim_new(guint reads, double settle_s, double settle_nodict_s,
-                        double fresh_s) {
+                        double fresh_s, const SimTwins *tw) {
   FeedSim *s = g_new0(FeedSim, 1);
   s->rbn = g_string_new(NULL);
   SkimPipelineConfig cfg = {
@@ -414,6 +418,9 @@ static FeedSim *sim_new(guint reads, double settle_s, double settle_nodict_s,
     .rbn_settle_s        = settle_s,
     .rbn_settle_nodict_s = settle_nodict_s,
     .rbn_fresh_s         = fresh_s,
+    .rbn_twin_hz         = tw ? tw->hz : 0,
+    .rbn_near_s          = tw ? tw->near_s : 0,
+    .rbn_fold_s          = tw ? tw->fold_s : 0,
   };
   s->p = skim_pipeline_new(&cfg);
   t_pipe = s->p;                       /* rbn_collect stamps from it           */
@@ -857,7 +864,7 @@ int main(void) {
   {
     /* The feed as it was: a single reading after "CQ DE" is on the wire at
      * once — that is the bust path gh#24 closes. */
-    FeedSim *s = sim_new(1, -1, -1, -1);
+    FeedSim *s = sim_new(1, -1, -1, -1, NULL);
     double bar, settle, settle_nd;
     guint reads;
     skim_pipeline_rbn_policy(s->p, &bar, &reads, &settle, &settle_nd, NULL);
@@ -873,7 +880,7 @@ int main(void) {
     sim_free(s);
 
     /* The defaults: two readings or MASTER.SCP, and an 8 s hold. */
-    s = sim_new(0, 0, 0, 0);
+    s = sim_new(0, 0, 0, 0, NULL);
     skim_pipeline_rbn_policy(s->p, &bar, &reads, &settle, &settle_nd, NULL);
     check("gate: defaults resolve to 0.85, 2 readings, 8 s, 8 s",
           bar == 0.85 && reads == 2 && settle == 8.0 && settle_nd == 8.0);
@@ -909,7 +916,7 @@ int main(void) {
     sim_free(s);
 
     /* Readings without the hold: two copies go out at once. */
-    s = sim_new(2, -1, -1, 0);
+    s = sim_new(2, -1, -1, 0, NULL);
     sim_decode(s, 1.0, 10, 7020000.0, "CQ DE SM7XYZ K ");
     check("gate: readings alone — one copy is not enough",
           rbn_lines(s->rbn, "SM7XYZ") == 0);
@@ -925,7 +932,7 @@ int main(void) {
     check("gate: a one-call dictionary loads",
           skim_callsign_dict_load(dict, &derr) && skim_callsign_dict_size() == 1);
     g_clear_error(&derr);
-    s = sim_new(2, 8, 30, 0);
+    s = sim_new(2, 8, 30, 0, NULL);
     skim_pipeline_rbn_policy(s->p, &bar, &reads, &settle, &settle_nd, NULL);
     check("gate: 8 s / 30 s resolve as set", settle == 8.0 && settle_nd == 30.0);
     sim_decode(s, 1.0, 30, 7050000.0, "CQ DE OK1XYZ K ");
@@ -941,12 +948,12 @@ int main(void) {
     sim_free(s);
     /* a hold for unknown calls shorter than the dictionary hold is lifted
      * to it; no hold at all means no hold for anyone */
-    s = sim_new(2, 8, 3, 0);
+    s = sim_new(2, 8, 3, 0, NULL);
     skim_pipeline_rbn_policy(s->p, NULL, NULL, &settle, &settle_nd, NULL);
     check("gate: an unknown-call hold below the dictionary hold is lifted to it",
           settle == 8.0 && settle_nd == 8.0);
     sim_free(s);
-    s = sim_new(2, -1, 30, 0);
+    s = sim_new(2, -1, 30, 0, NULL);
     skim_pipeline_rbn_policy(s->p, NULL, NULL, &settle, &settle_nd, NULL);
     check("gate: with the hold off, the unknown-call hold is off too",
           settle == 0 && settle_nd == 0);
@@ -964,7 +971,7 @@ int main(void) {
      * memo; then ONE noise token on the channel reports SM7XYZ again, both
      * readings intact — and without the freshness gate it goes out as a
      * new station. The gh#24 gate alone cannot stop it. */
-    FeedSim *s = sim_new(0, 0, 0, -1);
+    FeedSim *s = sim_new(0, 0, 0, -1, NULL);
     double fresh = -1;
     skim_pipeline_rbn_policy(s->p, NULL, NULL, NULL, NULL, &fresh);
     check("fresh: -1 resolves as no such gate (0)", fresh == 0);
@@ -980,7 +987,7 @@ int main(void) {
 
     /* The default window, 120 s: the same noise sends nothing — and the
      * station that resumes calling is read again and spotted. */
-    s = sim_new(0, 0, 0, 0);
+    s = sim_new(0, 0, 0, 0, NULL);
     skim_pipeline_rbn_policy(s->p, NULL, NULL, NULL, NULL, &fresh);
     check("fresh: the default window is 120 s", fresh == 120.0);
     sim_decode(s, 1.0, 10, 7020000.0, "CQ DE SM7XYZ SM7XYZ K ");
@@ -1005,7 +1012,7 @@ int main(void) {
 
     /* A station read within the window passes whatever the token clock
      * says: two copies 100 s apart, the second one goes out. */
-    s = sim_new(0, 0, 0, 0);
+    s = sim_new(0, 0, 0, 0, NULL);
     sim_decode(s, 1.0, 10, 7020000.0, "CQ DE SM7XYZ K ");
     sim_decode(s, 101.0, 10, 7020000.0, "CQ DE SM7XYZ K ");
     sim_to(s, 112.0);
@@ -1014,7 +1021,7 @@ int main(void) {
     sim_free(s);
 
     /* A short window set by hand: 30 s. */
-    s = sim_new(0, 0, 0, 30);
+    s = sim_new(0, 0, 0, 30, NULL);
     skim_pipeline_rbn_policy(s->p, NULL, NULL, NULL, NULL, &fresh);
     check("fresh: 30 s resolves as set", fresh == 30.0);
     sim_decode(s, 1.0, 10, 7020000.0, "CQ DE SM7XYZ SM7XYZ K ");
@@ -1024,6 +1031,165 @@ int main(void) {
     check("fresh 30 s: a ghost 149 s after the last copy stays off",
           rbn_lines(s->rbn, "SM7XYZ") == 1);
     sim_free(s);
+  }
+
+  /* -- gh#29: a misread of a call read better nearby is not a station --------- */
+  {
+    /* The recording of 2026-11-01 in miniature (OK1HRA's rules, feed_twins.h).
+     * UR4QWW, a MASTER.SCP call, is read once on its channel — answering,
+     * not calling, so it never reaches the feed; N4QWW, two edits away and
+     * 100 Hz up, is keyed twice: the gh#24 gate passes it, the near-call
+     * rule holds it. */
+    char *dict = g_build_filename(g_get_tmp_dir(), "skimmer-rbn-dict29.txt", NULL);
+    g_file_set_contents(dict, "# test dict\nUR4QWW\nSO5CW\nDK9HE\n", -1, NULL);
+    GError *derr = NULL;
+    check("twins: a three-call dictionary loads",
+          skim_callsign_dict_load(dict, &derr) && skim_callsign_dict_size() == 3);
+    g_clear_error(&derr);
+    check("twins: edits — N4QWW/UR4QWW 2, SO5CW/SO5CWK 1, OK2B/K2BVX 3, equal 0",
+          skim_callsign_edits("N4QWW", "UR4QWW") == 2 &&
+          skim_callsign_edits("SO5CW", "SO5CWK") == 1 &&
+          skim_callsign_edits("OK2B", "K2BVX") == 3 &&
+          skim_callsign_edits("OK1BR", "OK1BR") == 0);
+    check("twins: edge — DK9H heads DK9HE, K5JPL tails DK5JPL, not OK2B/K2BVX, not K2B/OK2BVX",
+          skim_callsign_is_edge("DK9H", "DK9HE") && skim_callsign_is_edge("DK5JPL", "K5JPL") &&
+          !skim_callsign_is_edge("OK2B", "K2BVX") && !skim_callsign_is_edge("K2B", "OK2BVX") &&
+          !skim_callsign_is_edge("DK9HE", "DK9HE"));
+
+    FeedSim *s = sim_new(0, 0, 0, 0, NULL);
+    double hz = 0, near_s = 0, fold_s = 0;
+    guint64 held = 99;
+    skim_pipeline_rbn_twins(s->p, &hz, &near_s, &fold_s, &held);
+    check("twins: the defaults resolve to 300 Hz, 3600 s memo, 600 s fold, nothing held",
+          hz == 300.0 && near_s == 3600.0 && fold_s == 600.0 && held == 0);
+    sim_decode(s, 1.0, 10, 3510000.0, "DE UR4QWW K ");
+    sim_decode(s, 5.0, 11, 3510100.0, "CQ DE N4QWW N4QWW K ");
+    sim_to(s, 20.0);
+    check("near: N4QWW, read twice, is held while UR4QWW (MASTER.SCP) was read 100 Hz away",
+          rbn_lines(s->rbn, "N4QWW") == 0 && rbn_lines(s->rbn, "UR4QWW") == 0);
+    skim_pipeline_rbn_twins(s->p, NULL, NULL, NULL, &held);
+    check("near: the pipeline counts the hold once (one call, one rival)", held == 1);
+    /* the memo outlives the station table: UR4QWW's record is pruned at
+     * 122 s, N4QWW comes back at 200 s and is still held */
+    sim_decode(s, 200.0, 11, 3510100.0, "CQ DE N4QWW N4QWW K ");
+    sim_to(s, 220.0);
+    check("near: …and still at 200 s, after the table pruned UR4QWW's record",
+          rbn_lines(s->rbn, "N4QWW") == 0);
+    sim_free(s);
+    /* the same two edits 500 Hz away are another signal (a fresh table:
+     * one call is one station, a report nearby merges into its record) */
+    s = sim_new(0, 0, 0, 0, NULL);
+    sim_decode(s, 1.0, 10, 3510000.0, "DE UR4QWW K ");
+    sim_decode(s, 5.0, 14, 3510500.0, "CQ DE N4QWW N4QWW K ");
+    sim_to(s, 20.0);
+    check("near: the look-alike 500 Hz from the rival is outside the radius and goes out",
+          rbn_lines(s->rbn, "N4QWW") == 1);
+    sim_free(s);
+
+    /* A short memo set by hand: 60 s. The rival read at 1 s no longer
+     * counts at 70 s. */
+    SimTwins tw = { 0, 60, 0 };
+    s = sim_new(0, 0, 0, 0, &tw);
+    skim_pipeline_rbn_twins(s->p, &hz, &near_s, &fold_s, NULL);
+    check("twins: 60 s memo resolves as set, the rest default",
+          hz == 300.0 && near_s == 60.0 && fold_s == 600.0);
+    sim_decode(s, 1.0, 10, 3510000.0, "DE UR4QWW K ");
+    sim_decode(s, 70.0, 11, 3510100.0, "CQ DE N4QWW N4QWW K ");
+    sim_to(s, 90.0);
+    check("near 60 s: the rival read 69 s ago is forgotten — N4QWW goes out",
+          rbn_lines(s->rbn, "N4QWW") == 1);
+    sim_free(s);
+
+    /* A dictionary call read twice stands on its own: SO5CW yields to the
+     * unknown SO5CWK only when that one was read at least three times and
+     * twice as often. Read once, SO5CW yields like an unknown call. */
+    s = sim_new(0, 0, 0, 0, NULL);
+    sim_decode(s, 1.0, 10, 3513000.0, "CQ DE SO5CWK SO5CWK SO5CWK K ");
+    sim_to(s, 12.0);
+    check("near: SO5CWK read three times, no rival yet — goes out",
+          rbn_lines(s->rbn, "SO5CWK") == 1);
+    sim_decode(s, 20.0, 11, 3513100.0, "CQ DE SO5CW SO5CW K ");
+    sim_to(s, 40.0);
+    check("near: SO5CW (MASTER.SCP, read twice) is NOT held by a look-alike read 3 times (< 2×)",
+          rbn_lines(s->rbn, "SO5CW") == 1);
+    sim_free(s);
+    s = sim_new(0, 0, 0, 0, NULL);
+    sim_decode(s, 1.0, 10, 3513000.0, "CQ DE SO5CWK SO5CWK SO5CWK SO5CWK K ");
+    sim_decode(s, 20.0, 11, 3513100.0, "CQ DE SO5CW SO5CW K ");
+    sim_to(s, 40.0);
+    check("near: …but IS held by one read 4 times (≥ 3 and ≥ 2×)",
+          rbn_lines(s->rbn, "SO5CWK") == 1 && rbn_lines(s->rbn, "SO5CW") == 0);
+    sim_free(s);
+    s = sim_new(0, 0, 0, 0, NULL);
+    sim_decode(s, 1.0, 10, 3513000.0, "CQ DE SO5CWK SO5CWK SO5CWK K ");
+    sim_decode(s, 20.0, 11, 3513100.0, "CQ DE SO5CW K ");
+    sim_to(s, 40.0);
+    check("near: SO5CW read ONCE passed on the dictionary's word alone — yields to a look-alike read 3 times",
+          rbn_lines(s->rbn, "SO5CW") == 0);
+    sim_free(s);
+
+    /* The twin fold, near-call rule off: DK9HE went out; its record is
+     * pruned at 122 s; the cut DK9H keyed twice at 200 s passes the gate
+     * and would start a new station — the memo of what was SENT folds it. */
+    SimTwins fold_only = { 0, -1, 0 };
+    s = sim_new(0, 0, 0, 0, &fold_only);
+    skim_pipeline_rbn_twins(s->p, &hz, &near_s, &fold_s, NULL);
+    check("twins: near -1 resolves as off, the fold stays",
+          hz == 300.0 && near_s == 0 && fold_s == 600.0);
+    sim_decode(s, 1.0, 10, 3524000.0, "CQ DE DK9HE DK9HE K ");
+    sim_to(s, 12.0);
+    check("fold: DK9HE goes out after its hold", rbn_lines(s->rbn, "DK9HE") == 1);
+    sim_decode(s, 200.0, 11, 3524100.0, "CQ DE DK9H DK9H K ");
+    sim_to(s, 220.0);
+    check("fold: the cut DK9H 200 s later (DK9HE's record long pruned) is folded",
+          rbn_lines(s->rbn, "DK9H") == 0);
+    skim_pipeline_rbn_twins(s->p, NULL, NULL, NULL, &held);
+    check("fold: the pipeline counts the fold", held == 1);
+    /* the station's own QSY 3 kHz up (its record moves, the memo follows
+     * the line) is its run going on — never folded by anything */
+    sim_decode(s, 300.0, 34, 3527000.0, "CQ DE DK9HE DK9HE K ");
+    sim_to(s, 312.0);                          /* a new record, a new hold   */
+    check("fold: its own QSY line 3 kHz up is its run going on, never folded",
+          rbn_lines(s->rbn, "DK9HE") == 2);
+    sim_free(s);
+    /* a better-attested twin goes out — the feed often sends the garble
+     * first (K5JPL 12 s before DK5JPL, 2026-11-01 19:28) */
+    s = sim_new(0, 0, 0, 0, &fold_only);
+    sim_decode(s, 1.0, 10, 3541000.0, "CQ DE K5JPL K5JPL K ");
+    sim_to(s, 12.0);
+    check("fold: the garble K5JPL, keyed twice first, goes out",
+          rbn_lines(s->rbn, "K5JPL") == 1);
+    sim_decode(s, 15.0, 11, 3541000.0, "CQ DE DK5JPL DK5JPL DK5JPL K ");
+    sim_to(s, 30.0);
+    check("fold: DK5JPL, read three times to K5JPL's two, is NOT folded behind it",
+          rbn_lines(s->rbn, "DK5JPL") == 1);
+    sim_free(s);
+    /* the fold window set by hand: 60 s — DK9H at 200 s is beyond it */
+    SimTwins fold60 = { 0, -1, 60 };
+    s = sim_new(0, 0, 0, 0, &fold60);
+    sim_decode(s, 1.0, 10, 3524000.0, "CQ DE DK9HE DK9HE K ");
+    sim_decode(s, 200.0, 11, 3524100.0, "CQ DE DK9H DK9H K ");
+    sim_to(s, 220.0);
+    check("fold 60 s: the line sent 190 s ago folds nothing — DK9H goes out",
+          rbn_lines(s->rbn, "DK9H") == 1);
+    sim_free(s);
+
+    /* The radius switches both rules off. */
+    SimTwins off = { -1, 0, 0 };
+    s = sim_new(0, 0, 0, 0, &off);
+    skim_pipeline_rbn_twins(s->p, &hz, &near_s, &fold_s, &held);
+    check("twins: radius -1 resolves as both rules off (0, 0, 0)",
+          hz == 0 && near_s == 0 && fold_s == 0 && held == 0);
+    sim_decode(s, 1.0, 10, 3510000.0, "DE UR4QWW K ");
+    sim_decode(s, 5.0, 11, 3510100.0, "CQ DE N4QWW N4QWW K ");
+    sim_to(s, 20.0);
+    check("twins off: N4QWW goes out beside UR4QWW (the feed before gh#29)",
+          rbn_lines(s->rbn, "N4QWW") == 1);
+    sim_free(s);
+    g_file_set_contents(dict, "", -1, NULL);     /* leave no dictionary behind */
+    skim_callsign_dict_load(dict, NULL);
+    g_unlink(dict);
+    g_free(dict);
   }
 
   printf("\n=== %d checks, %d failures ===\n%s\n", checks, fails,

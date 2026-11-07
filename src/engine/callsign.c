@@ -865,6 +865,31 @@ gint64 skim_callsign_extractor_last_read(const SkimCallsignExtractor *x,
   return -1;
 }
 
+guint skim_callsign_edits(const char *a, const char *b) {
+  const gsize la = strlen(a), lb = strlen(b);
+  if (la > 15 || lb > 15)
+    return 99;
+  guint prev[16], cur[16];
+  for (gsize j = 0; j <= lb; j++) { prev[j] = (guint)j; }
+  for (gsize i = 1; i <= la; i++) {
+    cur[0] = (guint)i;
+    for (gsize j = 1; j <= lb; j++) {
+      const guint sub = prev[j - 1] + (a[i - 1] != b[j - 1]);
+      cur[j] = MIN(MIN(prev[j] + 1, cur[j - 1] + 1), sub);
+    }
+    memcpy(prev, cur, (lb + 1) * sizeof(guint));
+  }
+  return prev[lb];
+}
+
+gboolean skim_callsign_is_edge(const char *a, const char *b) {
+  const gsize la = strlen(a), lb = strlen(b);
+  if (MIN(la, lb) < 3 || strcmp(a, b) == 0)
+    return FALSE;
+  return g_str_has_prefix(a, b) || g_str_has_prefix(b, a) ||
+         g_str_has_suffix(a, b) || g_str_has_suffix(b, a);
+}
+
 double skim_callsign_extract(const char *text, char *out, gsize out_size) {
   SkimCallsignExtractor *x = skim_callsign_extractor_new();
   skim_callsign_extractor_feed(x, text);

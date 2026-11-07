@@ -27,6 +27,7 @@
 #include "decode_cw.h"
 #include "decode_deepcw.h"
 #include "decode_rtty.h"
+#include "feed_twins.h"
 #include "spot_out.h"
 #include "tci_client.h"
 #include "tone_split.h"
@@ -67,6 +68,16 @@
  * station TTL — a station silent that long has left the table anyway, and
  * with it the feed's memo, which is exactly how the ghost got out. */
 #define RBN_FRESH_S_DEFAULT         120.0
+/* gh#29 — the look-alike rules (feed_twins.h; SkimPipelineConfig.rbn_twin_hz,
+ * .rbn_near_s, .rbn_fold_s). 300 Hz is where a misread of a neighbour's
+ * call lands — the same signal, read on the channels around it; an hour is
+ * how long a misread comes back after the right call was read (OK1HRA:
+ * EA2L 42 min after 9A2L); 600 s of sent lines is one re-spot period. */
+#define RBN_TWIN_HZ_DEFAULT         300.0
+#define RBN_NEAR_S_DEFAULT          3600.0
+#define RBN_FOLD_S_DEFAULT          600.0
+/* SKIM_RBN_DEBUG: a NEAR/FOLD line per (call, rival) pair at most this often */
+#define RBN_TWIN_TRACE_US           (120 * G_USEC_PER_SEC)
 /* A station silent this long leaves the table (and its panadapter label is
  * SPOT_DELETEd). 120 s rides out one side of a QSO; the old 600 s kept a
  * contest band map full of stations long gone (Richard, 2026-07-15). */
@@ -194,6 +205,13 @@ struct _SkimPipeline {
                                                 * this; 0 = any age          */
   GHashTable       *rbn_pending;               /* call → gint64* release time;
                                                 * 0 = released, send freely  */
+  SkimFeedTwins    *rbn_twins;                 /* gh#29 look-alike memos;
+                                                * NULL = both rules off      */
+  double            rbn_twin_hz;
+  gint64            rbn_near_us, rbn_fold_us;  /* 0 = that rule is off       */
+  guint64           rbn_twins_held;            /* calls a rule held back     */
+  GHashTable       *rbn_twins_seen;            /* "call rival" → gint64* last
+                                                * trace (debug dedup)        */
 
   GArray           *hits;                      /* Hit — one block's decodes  */
   double           *lvl;                       /* per-channel level snapshot */
@@ -496,6 +514,23 @@ SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg) {
     p->rbn_fresh_us = fresh > 0 ? (gint64)(fresh * G_USEC_PER_SEC) : 0;
     p->rbn_pending = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
                                            g_free);
+    /* gh#29: the look-alike rules; a radius ≤ 0 switches both off */
+    const double thz  = p->cfg.rbn_twin_hz == 0 ? RBN_TWIN_HZ_DEFAULT
+                                                : p->cfg.rbn_twin_hz;
+    const double near = p->cfg.rbn_near_s == 0 ? RBN_NEAR_S_DEFAULT
+                                               : p->cfg.rbn_near_s;
+    const double fold = p->cfg.rbn_fold_s == 0 ? RBN_FOLD_S_DEFAULT
+                                               : p->cfg.rbn_fold_s;
+    if (thz > 0 && (near > 0 || fold > 0)) {
+      p->rbn_twin_hz = thz;
+      p->rbn_near_us = near > 0 ? (gint64)(near * G_USEC_PER_SEC) : 0;
+      p->rbn_fold_us = fold > 0 ? (gint64)(fold * G_USEC_PER_SEC) : 0;
+      p->rbn_twins = skim_feed_twins_new(
+          thz, p->rbn_near_us, p->rbn_fold_us,
+          p->rbn_fold_us + (gint64)RBN_RESPOT_S * G_USEC_PER_SEC);
+      p->rbn_twins_seen = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                                g_free, g_free);
+    }
   }
   if (p->cfg.dict_path) {
     GError *err = NULL;
@@ -543,6 +578,8 @@ void skim_pipeline_free(SkimPipeline *p) {
   g_clear_pointer(&p->spots, skim_spot_out_free);
   g_clear_pointer(&p->rbn_spots, skim_spot_out_free);
   g_clear_pointer(&p->rbn_pending, g_hash_table_destroy);
+  g_clear_pointer(&p->rbn_twins, skim_feed_twins_free);
+  g_clear_pointer(&p->rbn_twins_seen, g_hash_table_destroy);
   g_clear_pointer(&p->dupq, skim_dup_query_free);
   IqBlock *b;
   while ((b = g_async_queue_try_pop(p->queue)) != NULL) {
@@ -587,6 +624,33 @@ static void station_gone_fwd(const SkimStation *st, gpointer user) {
 
 /* ---- RBN feed policy (gh#24) ------------------------------------------------------ */
 
+/* gh#29: a look-alike rule held st back because of `rival`. Count it and,
+ * under SKIM_RBN_DEBUG, trace it — once per (call, rival) pair per
+ * RBN_TWIN_TRACE_US, since the gate runs on every report of the record. */
+static void rbn_twin_held(SkimPipeline *p, const char *rule,
+                          const SkimStation *st, const char *rival) {
+  const gint64 now = pipe_now_us(p);
+  char *key = g_strdup_printf("%s %s", st->call, rival);
+  gint64 *last = g_hash_table_lookup(p->rbn_twins_seen, key);
+  if (last && now - *last < RBN_TWIN_TRACE_US) {
+    g_free(key);
+    return;
+  }
+  if (!last) {
+    last = g_new(gint64, 1);
+    g_hash_table_insert(p->rbn_twins_seen, key, last);
+  } else {
+    g_free(key);
+  }
+  *last = now;
+  p->rbn_twins_held++;
+  if (rbn_debug()) {
+    g_printerr("rbn: %s %s @ %.0f Hz (read %u, dict %d) held by %s t=%.1f\n",
+               rule, st->call, st->freq_hz, st->hearings,
+               skim_callsign_dict_has(st->call), rival, now / 1e6);
+  }
+}
+
 /* May this record go to the network? Heard CALLING (regardless of the
  * local CQ-only switch), inside an amateur band (the receiver hears past
  * the band edge, the network must not), its best score past the bar, its
@@ -597,8 +661,9 @@ static void station_gone_fwd(const SkimStation *st, gpointer user) {
  * call that left it is still the best candidate, readings and all, when
  * the first noise token arrives an hour later; the table has pruned the
  * record and forgotten the memo by then, and the ghost went out as a new
- * station. Traced once per record — its first report is that token. */
-static gboolean rbn_gate(const SkimPipeline *p, const SkimStation *st) {
+ * station. Traced once per record — its first report is that token. And
+ * not while a look-alike read better nearby holds it (gh#29). */
+static gboolean rbn_gate(SkimPipeline *p, const SkimStation *st) {
   if (!(st->cq && st->score >= p->rbn_min &&
         skim_pipeline_in_ham_band(st->freq_hz) &&
         (st->hearings >= p->rbn_hearings || skim_callsign_dict_has(st->call))))
@@ -612,6 +677,33 @@ static gboolean rbn_gate(const SkimPipeline *p, const SkimStation *st) {
     }
     return FALSE;
   }
+  /* gh#29 near-call: a look-alike read better within the radius lately
+   * (feed_twins.h) — the record stays off the wire while that holds, and
+   * is judged again on its next report */
+  if (p->rbn_twins) {
+    const char *rival = skim_feed_twins_near(
+        p->rbn_twins, st->call, st->freq_hz, pipe_now_us(p), st->hearings,
+        skim_callsign_dict_has(st->call));
+    if (rival) {
+      rbn_twin_held(p, "NEAR", st, rival);
+      return FALSE;
+    }
+  }
+  return TRUE;
+}
+
+/* gh#29 twin fold: is st a twin of a call the feed sent lately within the
+ * radius, better attested than this one? Asked right before a line would
+ * go out; a folded call loses its hold and is judged again next time. */
+static gboolean rbn_folded(SkimPipeline *p, const SkimStation *st) {
+  if (!p->rbn_twins)
+    return FALSE;
+  const char *rival = skim_feed_twins_fold(
+      p->rbn_twins, st->call, st->freq_hz, pipe_now_us(p), st->hearings,
+      skim_callsign_dict_has(st->call));
+  if (!rival)
+    return FALSE;
+  rbn_twin_held(p, "FOLD", st, rival);
   return TRUE;
 }
 
@@ -620,6 +712,10 @@ static gboolean rbn_gate(const SkimPipeline *p, const SkimStation *st) {
 static gboolean rbn_send(SkimPipeline *p, const SkimStation *st, const char *why) {
   const gboolean sent = skim_spot_out_emit(p->rbn_spots, st->call, st->mode,
                                            st->freq_hz, st->snr_db, st->speed);
+  if (sent && p->rbn_twins) {                  /* gh#29: the fold's memo     */
+    skim_feed_twins_sent(p->rbn_twins, st->call, st->freq_hz, pipe_now_us(p),
+                         st->hearings, skim_callsign_dict_has(st->call));
+  }
   if (sent && rbn_debug()) {
     g_printerr("rbn: SEND %s @ %.0f Hz (%s, read %u, score %.2f, dict %d) "
                "t=%.1f\n", st->call, st->freq_hz, why, st->hearings, st->score,
@@ -634,7 +730,7 @@ static gboolean rbn_send(SkimPipeline *p, const SkimStation *st, const char *why
  * the 600 s re-announce). */
 static void rbn_offer(SkimPipeline *p, const SkimStation *st) {
   if (p->rbn_settle_us <= 0) {
-    rbn_send(p, st, "at once");
+    if (!rbn_folded(p, st)) { rbn_send(p, st, "at once"); }
     return;
   }
   gint64 *due = g_hash_table_lookup(p->rbn_pending, st->call);
@@ -649,7 +745,13 @@ static void rbn_offer(SkimPipeline *p, const SkimStation *st) {
                  st->score, dict, *due / 1e6, pipe_now_us(p) / 1e6);
     }
   } else if (*due == 0) {
-    rbn_send(p, st, "released");
+    /* a released call starting a NEW run of lines may be folded (gh#29):
+     * then it takes a fresh hold next time instead of going straight on */
+    if (rbn_folded(p, st)) {
+      g_hash_table_remove(p->rbn_pending, st->call);
+    } else {
+      rbn_send(p, st, "released");
+    }
   }
 }
 
@@ -662,6 +764,7 @@ static void rbn_offer(SkimPipeline *p, const SkimStation *st) {
  * prune runs on (engine thread live, the feeder offline, the tap replay) —
  * so the IQ replay and its tap release at the same instants. */
 static void rbn_settle_tick(SkimPipeline *p, gint64 now_us) {
+  if (p->rbn_twins) { skim_feed_twins_sweep(p->rbn_twins, now_us); }
   if (!p->rbn_pending || p->rbn_settle_us <= 0)
     return;
   GHashTableIter it;
@@ -673,7 +776,11 @@ static void rbn_settle_tick(SkimPipeline *p, gint64 now_us) {
       continue;
     const SkimStation *st = skim_station_table_lookup(p->stations, key);
     if (st && rbn_gate(p, st)) {
-      if (rbn_send(p, st, "held")) { *due = 0; }
+      if (rbn_folded(p, st)) {
+        g_hash_table_iter_remove(&it);         /* gh#29: judged again later  */
+      } else if (rbn_send(p, st, "held")) {
+        *due = 0;
+      }
     } else {
       if (rbn_debug()) {
         g_printerr("rbn: DROP %s (%s) t=%.1f\n", (char *)key,
@@ -694,6 +801,14 @@ void skim_pipeline_rbn_policy(const SkimPipeline *p, double *min_score,
   if (settle_s)        { *settle_s        = on ? p->rbn_settle_us / 1e6 : 0; }
   if (settle_nodict_s) { *settle_nodict_s = on ? p->rbn_settle_nd_us / 1e6 : 0; }
   if (fresh_s)         { *fresh_s         = on ? p->rbn_fresh_us / 1e6 : 0; }
+}
+void skim_pipeline_rbn_twins(const SkimPipeline *p, double *radius_hz,
+                             double *near_s, double *fold_s, guint64 *held) {
+  const gboolean on = p->rbn_twins != NULL;
+  if (radius_hz) { *radius_hz = on ? p->rbn_twin_hz : 0; }
+  if (near_s)    { *near_s    = on ? p->rbn_near_us / 1e6 : 0; }
+  if (fold_s)    { *fold_s    = on ? p->rbn_fold_us / 1e6 : 0; }
+  if (held)      { *held      = p->rbn_twins_held; }
 }
 void skim_pipeline_set_text_cb(SkimPipeline *p, SkimPipelineTextCb cb, gpointer user) {
   p->text_cb = cb;
@@ -1192,6 +1307,13 @@ static void dispatch_text(SkimPipeline *p, guint c, guint slot, double sig_hz,
                st.last_heard / 1e6);
   }
   const SkimStation *merged = skim_station_table_report(p->stations, &st);
+  /* gh#29: every call the table merges is a possible rival of a misread of
+   * it nearby — remembered with the clock of its last copy actually read */
+  if (p->rbn_twins) {
+    skim_feed_twins_read(p->rbn_twins, merged->call, merged->freq_hz,
+                         merged->last_read, merged->hearings,
+                         skim_callsign_dict_has(merged->call));
+  }
   if (p->station_cb) { p->station_cb(merged, p->station_user); }
   /* The merged record's frequency is the ghost-deduped one. CQ-only
    * policy: only a station heard CALLING may reach the spot sinks —

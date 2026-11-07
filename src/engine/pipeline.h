@@ -93,6 +93,22 @@ typedef struct {
    * than the window is not a station. A station that resumes calling is
    * read again and passes. Gate after OK1HRA's fork, written anew here. */
   double       rbn_fresh_s;
+  /* gh#29 — and a misread of a call read better nearby is not a station
+   * (feed_twins.h; two rules after OK1HRA's fork, written anew). Both look
+   * within rbn_twin_hz (0 = default 300 Hz; < 0 = both rules off). The
+   * NEAR-CALL rule holds a call while a look-alike within two edits, read
+   * within rbn_near_s (0 = default 3600 s; < 0 = off), is known to
+   * MASTER.SCP or was read more often — a dictionary call read twice or
+   * more yields only to a look-alike read at least three times and twice
+   * as often. The TWIN FOLD holds a call about to start a new run of lines
+   * while a look-alike (two edits, or its head or tail) that went out
+   * within rbn_fold_s (0 = default 600 s; < 0 = off) is better attested.
+   * OK1HRA on CQ WW CW 2012: 154 of 162 misreads keyed twice had the right
+   * call read within 300 Hz in the same hour; in his live taps 225 of 477
+   * boundary busts had the right call already spotted there. */
+  double       rbn_twin_hz;
+  double       rbn_near_s;
+  double       rbn_fold_s;
 
   /* gh#28 bench: the RBN policy WITHOUT the telnet server. When rbn is NULL
    * and rbn_tap is set, every record the feed would broadcast — same
@@ -239,6 +255,13 @@ void   skim_pipeline_set_spot_round_hz(SkimPipeline *p, guint hz);
 void   skim_pipeline_rbn_policy(const SkimPipeline *p, double *min_score,
                                 guint *min_hearings, double *settle_s,
                                 double *settle_nodict_s, double *fresh_s);
+/* The look-alike rules (gh#29) as resolved: the radius in Hz (0 = both
+ * off), the near-call memo in s (0 = off), the fold window in s (0 = off),
+ * and how many times a rule held a call off the wire so far (a held call
+ * is judged again each time it qualifies, so one twin may count more than
+ * once). Any out pointer may be NULL. */
+void   skim_pipeline_rbn_twins(const SkimPipeline *p, double *radius_hz,
+                               double *near_s, double *fold_s, guint64 *held);
 
 /* Is this frequency inside an amateur band (2200 m to 6 m, the widest
  * allocation any region has, edges inclusive)? The RBN feed refuses every

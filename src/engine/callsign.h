@@ -99,6 +99,17 @@ gint64 skim_callsign_extractor_last_read(const SkimCallsignExtractor *x,
 /* One-shot convenience over a complete text buffer (same scoring). */
 double skim_callsign_extract(const char *text, char *out, gsize out_size);
 
+/* How far apart two calls are: the Levenshtein distance (an insertion, a
+ * deletion or a substitution each count one). A misread of a call is a
+ * step or two away from it (TR2C of IR2C, N4QWW of UR4QWW); a call longer
+ * than SkimStation's 15 characters is treated as far from everything. */
+guint skim_callsign_edits(const char *a, const char *b);
+
+/* TRUE when one call is the other's head or tail (both at least three
+ * characters, not equal): a boundary gone wrong — the call cut (RK3D of
+ * RK3DJW) or the next letter glued on (F6FXXK of F6FXX). */
+gboolean skim_callsign_is_edge(const char *a, const char *b);
+
 G_END_DECLS
 
 #endif /* SKIMMER_CALLSIGN_H */
