@@ -85,6 +85,17 @@ double skim_callsign_extractor_best_ex(SkimCallsignExtractor *x,
 guint  skim_callsign_extractor_hearings(const SkimCallsignExtractor *x,
                                         const char *call);
 
+/* The caller's clock, stamped on every copy read from now on — set it
+ * before feed(). Candidates age by TOKENS (traffic on the channel), not by
+ * time: through an hour of silence a call stays the best candidate with
+ * all its hearings, and the first noise token after it reports the call
+ * again (gh#26). last_read() tells that report from a fresh one — the
+ * clock at the last copy actually READ (0 while no clock was ever set),
+ * or -1 when the call is no candidate here. */
+void   skim_callsign_extractor_set_now(SkimCallsignExtractor *x, gint64 now_us);
+gint64 skim_callsign_extractor_last_read(const SkimCallsignExtractor *x,
+                                         const char *call);
+
 /* One-shot convenience over a complete text buffer (same scoring). */
 double skim_callsign_extract(const char *text, char *out, gsize out_size);
 

@@ -80,6 +80,19 @@ typedef struct {
   guint        rbn_min_hearings;
   double       rbn_settle_s;
   double       rbn_settle_nodict_s;
+  /* gh#26 — and the call must have been READ within the last rbn_fresh_s
+   * (0 = default 120 s, the station table's TTL; < 0 = no such gate). The
+   * extractor ages its candidates by tokens, not by time: on a channel
+   * that falls quiet the call that left it stays the best candidate with
+   * all its readings, the table prunes the record and forgets the feed's
+   * memo, and the first noise token later reports the call as a new
+   * station — G4BAD, gone at 23:24, went out again at 00:19, 01:00, 01:54
+   * and 03:25 (OK1HRA against RBN, 2026-10-02: 21 of the 48 unconfirmed
+   * spots left after the readings gate were such ghosts). The record
+   * carries the clock of the last copy actually read, and a report older
+   * than the window is not a station. A station that resumes calling is
+   * read again and passes. Gate after OK1HRA's fork, written anew here. */
+  double       rbn_fresh_s;
 
   /* gh#28 bench: the RBN policy WITHOUT the telnet server. When rbn is NULL
    * and rbn_tap is set, every record the feed would broadcast — same
@@ -219,12 +232,13 @@ void   skim_pipeline_set_spot_round_hz(SkimPipeline *p, guint hz);
 
 /* The RBN feed policy in force, defaults resolved: the score bar, the
  * readings a call needs (1 = no such gate), the hold before its first line
- * in seconds (0 = none) and the hold of a call MASTER.SCP does not know.
- * All 0 when the pipeline has neither a feed nor an RBN tap. Any out
- * pointer may be NULL. */
+ * in seconds (0 = none), the hold of a call MASTER.SCP does not know, and
+ * the window in seconds within which the call must have been read (0 = no
+ * such gate). All 0 when the pipeline has neither a feed nor an RBN tap.
+ * Any out pointer may be NULL. */
 void   skim_pipeline_rbn_policy(const SkimPipeline *p, double *min_score,
                                 guint *min_hearings, double *settle_s,
-                                double *settle_nodict_s);
+                                double *settle_nodict_s, double *fresh_s);
 
 /* Is this frequency inside an amateur band (2200 m to 6 m, the widest
  * allocation any region has, edges inclusive)? The RBN feed refuses every

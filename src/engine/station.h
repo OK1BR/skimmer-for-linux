@@ -47,6 +47,11 @@ typedef struct {
   guint   hearings;     /* the most copies of the call ONE extractor counted
                          * — keyed and read, not reported (callsign.h); the
                          * RBN feed's readings gate (gh#24) */
+  gint64  last_read;    /* when a copy of the call was last actually READ
+                         * (the extractor's clock) — last_heard moves with
+                         * every report, and a quiet channel's noise
+                         * re-reports a candidate long gone; the RBN
+                         * feed's freshness gate (gh#26) */
 } SkimStation;
 
 typedef struct _SkimStationTable SkimStationTable;

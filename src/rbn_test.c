@@ -402,7 +402,8 @@ static void sim_ev(const FeedSim *s, SkimTapEvent *ev, SkimTapKind kind) {
   ev->now_us = s->now_us;
 }
 
-static FeedSim *sim_new(guint reads, double settle_s, double settle_nodict_s) {
+static FeedSim *sim_new(guint reads, double settle_s, double settle_nodict_s,
+                        double fresh_s) {
   FeedSim *s = g_new0(FeedSim, 1);
   s->rbn = g_string_new(NULL);
   SkimPipelineConfig cfg = {
@@ -412,6 +413,7 @@ static FeedSim *sim_new(guint reads, double settle_s, double settle_nodict_s) {
     .rbn_min_hearings    = reads,
     .rbn_settle_s        = settle_s,
     .rbn_settle_nodict_s = settle_nodict_s,
+    .rbn_fresh_s         = fresh_s,
   };
   s->p = skim_pipeline_new(&cfg);
   t_pipe = s->p;                       /* rbn_collect stamps from it           */
@@ -855,10 +857,10 @@ int main(void) {
   {
     /* The feed as it was: a single reading after "CQ DE" is on the wire at
      * once — that is the bust path gh#24 closes. */
-    FeedSim *s = sim_new(1, -1, -1);
+    FeedSim *s = sim_new(1, -1, -1, -1);
     double bar, settle, settle_nd;
     guint reads;
-    skim_pipeline_rbn_policy(s->p, &bar, &reads, &settle, &settle_nd);
+    skim_pipeline_rbn_policy(s->p, &bar, &reads, &settle, &settle_nd, NULL);
     check("gate: readings 1 / hold off resolve as the old feed (1, 0 s, 0 s)",
           bar == 0.85 && reads == 1 && settle == 0 && settle_nd == 0);
     sim_decode(s, 1.0, 10, 7020000.0, "CQ DE SM7XYZ K ");
@@ -871,8 +873,8 @@ int main(void) {
     sim_free(s);
 
     /* The defaults: two readings or MASTER.SCP, and an 8 s hold. */
-    s = sim_new(0, 0, 0);
-    skim_pipeline_rbn_policy(s->p, &bar, &reads, &settle, &settle_nd);
+    s = sim_new(0, 0, 0, 0);
+    skim_pipeline_rbn_policy(s->p, &bar, &reads, &settle, &settle_nd, NULL);
     check("gate: defaults resolve to 0.85, 2 readings, 8 s, 8 s",
           bar == 0.85 && reads == 2 && settle == 8.0 && settle_nd == 8.0);
     sim_decode(s, 1.0, 10, 7020000.0, "CQ DE SM7XYZ K ");
@@ -907,7 +909,7 @@ int main(void) {
     sim_free(s);
 
     /* Readings without the hold: two copies go out at once. */
-    s = sim_new(2, -1, -1);
+    s = sim_new(2, -1, -1, 0);
     sim_decode(s, 1.0, 10, 7020000.0, "CQ DE SM7XYZ K ");
     check("gate: readings alone — one copy is not enough",
           rbn_lines(s->rbn, "SM7XYZ") == 0);
@@ -923,8 +925,8 @@ int main(void) {
     check("gate: a one-call dictionary loads",
           skim_callsign_dict_load(dict, &derr) && skim_callsign_dict_size() == 1);
     g_clear_error(&derr);
-    s = sim_new(2, 8, 30);
-    skim_pipeline_rbn_policy(s->p, &bar, &reads, &settle, &settle_nd);
+    s = sim_new(2, 8, 30, 0);
+    skim_pipeline_rbn_policy(s->p, &bar, &reads, &settle, &settle_nd, NULL);
     check("gate: 8 s / 30 s resolve as set", settle == 8.0 && settle_nd == 30.0);
     sim_decode(s, 1.0, 30, 7050000.0, "CQ DE OK1XYZ K ");
     sim_decode(s, 1.0, 40, 7060000.0, "CQ DE SM7XYZ SM7XYZ K ");
@@ -939,13 +941,13 @@ int main(void) {
     sim_free(s);
     /* a hold for unknown calls shorter than the dictionary hold is lifted
      * to it; no hold at all means no hold for anyone */
-    s = sim_new(2, 8, 3);
-    skim_pipeline_rbn_policy(s->p, NULL, NULL, &settle, &settle_nd);
+    s = sim_new(2, 8, 3, 0);
+    skim_pipeline_rbn_policy(s->p, NULL, NULL, &settle, &settle_nd, NULL);
     check("gate: an unknown-call hold below the dictionary hold is lifted to it",
           settle == 8.0 && settle_nd == 8.0);
     sim_free(s);
-    s = sim_new(2, -1, 30);
-    skim_pipeline_rbn_policy(s->p, NULL, NULL, &settle, &settle_nd);
+    s = sim_new(2, -1, 30, 0);
+    skim_pipeline_rbn_policy(s->p, NULL, NULL, &settle, &settle_nd, NULL);
     check("gate: with the hold off, the unknown-call hold is off too",
           settle == 0 && settle_nd == 0);
     sim_free(s);
@@ -953,6 +955,75 @@ int main(void) {
     skim_callsign_dict_load(dict, NULL);
     g_unlink(dict);
     g_free(dict);
+  }
+
+  /* -- gh#26: the stale candidate a quiet channel's noise brings back ------------ */
+  {
+    /* The extractor ages by tokens, not by time: SM7XYZ calls twice and
+     * leaves; the table prunes the record at 120 s and the feed forgets its
+     * memo; then ONE noise token on the channel reports SM7XYZ again, both
+     * readings intact — and without the freshness gate it goes out as a
+     * new station. The gh#24 gate alone cannot stop it. */
+    FeedSim *s = sim_new(0, 0, 0, -1);
+    double fresh = -1;
+    skim_pipeline_rbn_policy(s->p, NULL, NULL, NULL, NULL, &fresh);
+    check("fresh: -1 resolves as no such gate (0)", fresh == 0);
+    sim_decode(s, 1.0, 10, 7020000.0, "CQ DE SM7XYZ SM7XYZ K ");
+    sim_to(s, 12.0);
+    check("fresh off: the station goes out after its hold",
+          rbn_lines(s->rbn, "SM7XYZ") == 1);
+    sim_decode(s, 200.0, 10, 7020000.0, "E ");   /* pruned at the 122 s tick */
+    sim_to(s, 212.0);
+    check("fresh off: one noise token 199 s after the last copy sends the ghost (the bug)",
+          rbn_lines(s->rbn, "SM7XYZ") == 2);
+    sim_free(s);
+
+    /* The default window, 120 s: the same noise sends nothing — and the
+     * station that resumes calling is read again and spotted. */
+    s = sim_new(0, 0, 0, 0);
+    skim_pipeline_rbn_policy(s->p, NULL, NULL, NULL, NULL, &fresh);
+    check("fresh: the default window is 120 s", fresh == 120.0);
+    sim_decode(s, 1.0, 10, 7020000.0, "CQ DE SM7XYZ SM7XYZ K ");
+    sim_to(s, 12.0);
+    check("fresh: the station goes out after its hold",
+          rbn_lines(s->rbn, "SM7XYZ") == 1);
+    sim_decode(s, 200.0, 10, 7020000.0, "E ");
+    sim_to(s, 212.0);
+    check("fresh: the ghost 199 s after the last copy stays off the wire",
+          rbn_lines(s->rbn, "SM7XYZ") == 1);
+    sim_decode(s, 230.0, 10, 7020000.0, "T E ");
+    sim_to(s, 242.0);
+    check("fresh: more noise on the channel keeps it off",
+          rbn_lines(s->rbn, "SM7XYZ") == 1);
+    sim_decode(s, 300.0, 10, 7020000.0, "CQ DE SM7XYZ SM7XYZ K ");
+    sim_to(s, 312.0);
+    check("fresh: the station that resumes calling is read again and spotted (after its hold)",
+          rbn_lines(s->rbn, "SM7XYZ") == 2);
+    check("fresh: the pipeline's RBN counter agrees (2)",
+          skim_pipeline_rbn_spots(s->p) == 2);
+    sim_free(s);
+
+    /* A station read within the window passes whatever the token clock
+     * says: two copies 100 s apart, the second one goes out. */
+    s = sim_new(0, 0, 0, 0);
+    sim_decode(s, 1.0, 10, 7020000.0, "CQ DE SM7XYZ K ");
+    sim_decode(s, 101.0, 10, 7020000.0, "CQ DE SM7XYZ K ");
+    sim_to(s, 112.0);
+    check("fresh: the second copy 100 s after the first is read now — out after the hold",
+          rbn_lines(s->rbn, "SM7XYZ") == 1);
+    sim_free(s);
+
+    /* A short window set by hand: 30 s. */
+    s = sim_new(0, 0, 0, 30);
+    skim_pipeline_rbn_policy(s->p, NULL, NULL, NULL, NULL, &fresh);
+    check("fresh: 30 s resolves as set", fresh == 30.0);
+    sim_decode(s, 1.0, 10, 7020000.0, "CQ DE SM7XYZ SM7XYZ K ");
+    sim_to(s, 12.0);
+    sim_decode(s, 150.0, 10, 7020000.0, "E ");
+    sim_to(s, 162.0);
+    check("fresh 30 s: a ghost 149 s after the last copy stays off",
+          rbn_lines(s->rbn, "SM7XYZ") == 1);
+    sim_free(s);
   }
 
   printf("\n=== %d checks, %d failures ===\n%s\n", checks, fails,

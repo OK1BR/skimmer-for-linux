@@ -214,6 +214,41 @@ int main(void) {
     skim_callsign_extractor_free(x);
   }
 
+  /* -- the clock of the last copy READ — the RBN feed's freshness gate (gh#26) -- */
+  {
+    SkimCallsignExtractor *x = skim_callsign_extractor_new();
+    char got[32];
+    check("no clock set, no candidate: last read -1",
+          skim_callsign_extractor_last_read(x, "SM7XYZ") == -1 &&
+          skim_callsign_extractor_last_read(NULL, "SM7XYZ") == -1 &&
+          skim_callsign_extractor_last_read(x, "") == -1);
+    skim_callsign_extractor_set_now(x, 1000 * (gint64)G_USEC_PER_SEC);
+    skim_callsign_extractor_feed(x, "CQ DE SM7XYZ SM7XYZ K ");
+    check("two copies at t=1000 s: last read 1000 s",
+          skim_callsign_extractor_last_read(x, "SM7XYZ") == 1000 * (gint64)G_USEC_PER_SEC);
+    /* an hour of silence, then noise: the TOKEN clock has moved by one, so
+     * the call is still the best candidate with both hearings — the very
+     * report gh#26 is about — but its last copy is an hour old */
+    skim_callsign_extractor_set_now(x, 4600 * (gint64)G_USEC_PER_SEC);
+    skim_callsign_extractor_feed(x, "E ");
+    double s = skim_callsign_extractor_best(x, got, sizeof(got));
+    check("an hour later one noise token still reports the old call (token ageing)",
+          s >= 0.85 && strcmp(got, "SM7XYZ") == 0 &&
+          skim_callsign_extractor_hearings(x, "SM7XYZ") == 2);
+    check("…but its last read is still 1000 s — noise is not a copy",
+          skim_callsign_extractor_last_read(x, "SM7XYZ") == 1000 * (gint64)G_USEC_PER_SEC);
+    skim_callsign_extractor_set_now(x, 4601 * (gint64)G_USEC_PER_SEC);
+    skim_callsign_extractor_feed(x, "DE SM7XYZ ");
+    check("a new copy moves the last read to its clock (4601 s)",
+          skim_callsign_extractor_last_read(x, "SM7XYZ") == 4601 * (gint64)G_USEC_PER_SEC);
+    check("another candidate here keeps its own clock",
+          skim_callsign_extractor_last_read(x, "OK1BR") == -1);
+    skim_callsign_extractor_reset(x);
+    check("a reset forgets the last read with the candidate",
+          skim_callsign_extractor_last_read(x, "SM7XYZ") == -1);
+    skim_callsign_extractor_free(x);
+  }
+
   /* -- calling context: leading and trailing markers ---------------------------- */
   {
     SkimCallsignExtractor *x = skim_callsign_extractor_new();

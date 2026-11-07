@@ -46,6 +46,8 @@
 #define RBN_READS_DEFAULT         2
 #define RBN_SETTLE_MAX            300
 #define RBN_SETTLE_DEFAULT        8
+#define RBN_FRESH_MAX             600
+#define RBN_FRESH_DEFAULT         120   /* gh#26; = the station TTL         */
 /* ROUTING decode text into a history slot must be TIGHT: the engine pins
  * each signal's frequency now, so a slot is one signal — a ±300 Hz routing
  * window let neighbouring stations interleave into one another's history
@@ -129,6 +131,8 @@ typedef struct {
                                   * its first line in s (0 = none); the
                                   * defaults mirror the engine's             */
   int             rbn_settle_s;
+  int             rbn_fresh_s;   /* gh#26 (persisted [rbn]): a call must have
+                                  * been read within this many s (0 = any)  */
   SkimScpUpdater *scp;           /* MASTER.SCP kept current in the background
                                   * (gh#15); NULL while switched off          */
   gboolean        scp_auto;      /* persisted [scp] auto_update, default on   */
@@ -1238,6 +1242,7 @@ static void settings_load_rbn(App *app) {
   app->rbn_port    = 7300;                     /* the CW Skimmer convention  */
   app->rbn_reads   = RBN_READS_DEFAULT;
   app->rbn_settle_s = RBN_SETTLE_DEFAULT;
+  app->rbn_fresh_s = RBN_FRESH_DEFAULT;
   if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
     if (g_key_file_has_key(kf, "rbn", "enabled", NULL)) {
       app->rbn_enabled = g_key_file_get_boolean(kf, "rbn", "enabled", NULL);
@@ -1254,6 +1259,10 @@ static void settings_load_rbn(App *app) {
     if (g_key_file_has_key(kf, "rbn", "settle_s", NULL)) {
       app->rbn_settle_s = CLAMP(g_key_file_get_integer(kf, "rbn", "settle_s", NULL),
                                 0, RBN_SETTLE_MAX);
+    }
+    if (g_key_file_has_key(kf, "rbn", "fresh_s", NULL)) {
+      app->rbn_fresh_s = CLAMP(g_key_file_get_integer(kf, "rbn", "fresh_s", NULL),
+                               0, RBN_FRESH_MAX);
     }
   }
   g_key_file_free(kf);
@@ -1280,6 +1289,7 @@ static void settings_save(const App *app) {
   g_key_file_set_integer(kf, "rbn", "port", app->rbn_port);
   g_key_file_set_integer(kf, "rbn", "min_readings", app->rbn_reads);
   g_key_file_set_integer(kf, "rbn", "settle_s", app->rbn_settle_s);
+  g_key_file_set_integer(kf, "rbn", "fresh_s", app->rbn_fresh_s);
   g_key_file_set_boolean(kf, "scp", "auto_update", app->scp_auto);
   g_key_file_set_integer(kf, "ui", "decode_font_pt", app->decode_font);
   g_key_file_set_integer(kf, "ui", "palette", app->palette);
@@ -1563,6 +1573,7 @@ static SkimPipeline *pipeline_create(App *app) {
      * longer one earns its place. */
     .rbn_min_hearings    = (guint)app->rbn_reads,
     .rbn_settle_s        = app->rbn_settle_s > 0 ? app->rbn_settle_s : -1,
+    .rbn_fresh_s         = app->rbn_fresh_s > 0 ? app->rbn_fresh_s : -1,
   };
   SkimPipeline *p = skim_pipeline_new(&cfg);
   g_message("app: pipeline engine %s", skim_pipeline_cw_engine_name(p));
@@ -1755,6 +1766,7 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   GtkWidget *rport = g_object_get_data(G_OBJECT(dlg), "rbn-port-row");
   GtkWidget *rreads = g_object_get_data(G_OBJECT(dlg), "rbn-reads-row");
   GtkWidget *rhold  = g_object_get_data(G_OBJECT(dlg), "rbn-hold-row");
+  GtkWidget *rfresh = g_object_get_data(G_OBJECT(dlg), "rbn-fresh-row");
   GtkWidget *scprow = g_object_get_data(G_OBJECT(dlg), "scp-row");
   const char *sv = gtk_editable_get_text(GTK_EDITABLE(row));
   char *server = g_strstrip(g_strdup(sv ? sv : ""));
@@ -1776,6 +1788,7 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
   int rbn_port = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rport));
   int rbn_reads = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rreads));
   int rbn_settle = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rhold));
+  int rbn_fresh = (int)adw_spin_row_get_value(ADW_SPIN_ROW(rfresh));
   guint dec_mode = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(mrow)), 1u);
   guint cw_engine = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(erow)), 1u);
   guint dcw_device = MIN(adw_combo_row_get_selected(ADW_COMBO_ROW(drow)), 1u);
@@ -1792,7 +1805,8 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
                           g_strcmp0(rbn_call, app->rbn_call) != 0 ||
                           rbn_port != app->rbn_port ||
                           rbn_reads != app->rbn_reads ||
-                          rbn_settle != app->rbn_settle_s;
+                          rbn_settle != app->rbn_settle_s ||
+                          rbn_fresh != app->rbn_fresh_s;
   if (server_changed) {
     g_free(app->server);
     app->server = server;
@@ -1822,6 +1836,7 @@ static void prefs_closed(AdwDialog *dlg, gpointer user) {
     app->rbn_port = rbn_port;
     app->rbn_reads = rbn_reads;
     app->rbn_settle_s = rbn_settle;
+    app->rbn_fresh_s = rbn_fresh;
     rbn_apply(app);
   } else {
     g_free(rbn_call);
@@ -2078,6 +2093,17 @@ static void prefs_open(GtkButton *btn, gpointer user) {
       "hold: a torn call folded into the full one by then never goes out");
   adw_spin_row_set_value(ADW_SPIN_ROW(rhold), app->rbn_settle_s);
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(rgrp), rhold);
+  /* gh#26: a call that left a channel stays its best candidate — the first
+   * noise token later reports it as a new station, long after the station
+   * table forgot it. The feed sends only a call actually read lately. */
+  GtkWidget *rfresh = adw_spin_row_new_with_range(0, RBN_FRESH_MAX, 1);
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(rfresh),
+                                "Read within the last (s)");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(rfresh),
+      "A call goes out only if a copy of it was read this recently — noise "
+      "on a quiet channel brings back the call that left it; 0 = any age");
+  adw_spin_row_set_value(ADW_SPIN_ROW(rfresh), app->rbn_fresh_s);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(rgrp), rfresh);
   adw_preferences_page_add(p_spots, ADW_PREFERENCES_GROUP(rgrp));
 
   GtkWidget *ugrp = adw_preferences_group_new();
@@ -2126,6 +2152,7 @@ static void prefs_open(GtkButton *btn, gpointer user) {
   g_object_set_data(G_OBJECT(dlg), "rbn-port-row", rport);
   g_object_set_data(G_OBJECT(dlg), "rbn-reads-row", rreads);
   g_object_set_data(G_OBJECT(dlg), "rbn-hold-row", rhold);
+  g_object_set_data(G_OBJECT(dlg), "rbn-fresh-row", rfresh);
   g_signal_connect(dlg, "closed", G_CALLBACK(prefs_closed), app);
   adw_dialog_present(dlg, GTK_WIDGET(app->window));
 }

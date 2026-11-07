@@ -208,7 +208,9 @@ static guint64 g_rbn_n;
  * the hold before its first line in seconds (8; -1 = none) and
  * SKIM_REPLAY_RBN_SETTLE_NODICT the hold of a call MASTER.SCP does not know
  * (-1 = the same as SETTLE). READS=1 with SETTLE=-1 is the feed as it was
- * before gh#24. */
+ * before gh#24. SKIM_REPLAY_RBN_FRESH (gh#26) is the window in seconds
+ * within which a call must have been READ for its record to go out (120;
+ * -1 = none). */
 static void rbn_policy_from_env(SkimPipelineConfig *cfg) {
   const char *e;
   if ((e = g_getenv("SKIM_REPLAY_RBN_MIN")) && e[0]) {
@@ -225,16 +227,21 @@ static void rbn_policy_from_env(SkimPipelineConfig *cfg) {
     const double v = g_ascii_strtod(e, NULL);
     cfg->rbn_settle_nodict_s = v > 0 ? v : -1;
   }
+  if ((e = g_getenv("SKIM_REPLAY_RBN_FRESH")) && e[0]) {
+    const double v = g_ascii_strtod(e, NULL);
+    cfg->rbn_fresh_s = v > 0 ? v : -1;
+  }
 }
 
 static void print_rbn_policy(const SkimPipeline *p, const char *rlog,
                              const char *note) {
-  double bar, settle, settle_nd;
+  double bar, settle, settle_nd, fresh;
   guint reads;
-  skim_pipeline_rbn_policy(p, &bar, &reads, &settle, &settle_nd);
+  skim_pipeline_rbn_policy(p, &bar, &reads, &settle, &settle_nd, &fresh);
   printf("rbn tap: %s (bar %.2f, %u reading%s or MASTER.SCP, hold %.0f s, "
-         "%.0f s for a call MASTER.SCP does not know)%s\n", rlog, bar, reads,
-         reads == 1 ? "" : "s", settle, settle_nd, note);
+         "%.0f s for a call MASTER.SCP does not know, read within %.0f s)%s\n",
+         rlog, bar, reads, reads == 1 ? "" : "s", settle, settle_nd, fresh,
+         note);
 }
 
 /* Stamped with the PIPELINE's stream frames (the block end the record was

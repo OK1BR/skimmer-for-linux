@@ -309,13 +309,18 @@ gboolean skim_callsign_dict_has(const char *call) {
  * keeps a fresh last_heard and the takeover eviction never fires — the
  * tuned label flickered between the old and the new occupant (EA2BTN vs
  * IT9IQN, live-caught 2026-07-15). A runner repeats their call every CQ
- * cycle (~5-10 tokens), so 12 keeps real stations alive. */
+ * cycle (~5-10 tokens), so 12 keeps real stations alive. The one thing
+ * this clock cannot see — the candidate a quiet channel's noise brings
+ * back an hour after the station left, hearings and all — is left to the
+ * caller's clock stamped on every copy (last_us, gh#26): the RBN feed
+ * refuses a report whose last copy is older than its window. */
 #define CAND_STALE_TOKENS 12
 
 typedef struct {
   char     call[CALL_MAX];
   guint    count;
   guint    last_tok;                           /* x->tok_n at the last hit   */
+  gint64   last_us;                            /* x->now_us at the last hit  */
   guint    parts;                              /* fewest tokens it came in   */
   gboolean de_marked;
   gboolean cq_context;
@@ -328,6 +333,7 @@ struct _SkimCallsignExtractor {
   guint    cq_pairs;                           /* adjacent "C","Q" pairs seen */
   gboolean cq_half;                            /* last token was a lone "C"  */
   guint    tok_n;                              /* tokens processed (age clock)*/
+  gint64   now_us;                             /* caller's clock (set_now)   */
   char     prev_tok[CALL_MAX];                 /* previous token (join hyp.) */
   gboolean prev_valid;                         /* it was a valid call itself */
   gboolean prev_de;                            /* DE applied to it           */
@@ -421,6 +427,7 @@ static void cand_add(SkimCallsignExtractor *x, const char *call, guint parts,
   c->parts = MIN(c->parts, parts);
   c->count++;
   c->last_tok = x->tok_n;
+  c->last_us  = x->now_us;
   if (de_marked)  { c->de_marked  = TRUE; }
   if (cq_context) { c->cq_context = TRUE; }
 }
@@ -842,6 +849,20 @@ guint skim_callsign_extractor_hearings(const SkimCallsignExtractor *x,
     if (strcmp(x->cand[i].call, call) == 0) { return x->cand[i].count; }
   }
   return 0;
+}
+
+void skim_callsign_extractor_set_now(SkimCallsignExtractor *x, gint64 now_us) {
+  if (x) { x->now_us = now_us; }
+}
+
+gint64 skim_callsign_extractor_last_read(const SkimCallsignExtractor *x,
+                                         const char *call) {
+  if (!x || !call || !call[0])
+    return -1;
+  for (guint i = 0; i < x->ncand; i++) {
+    if (strcmp(x->cand[i].call, call) == 0) { return x->cand[i].last_us; }
+  }
+  return -1;
 }
 
 double skim_callsign_extract(const char *text, char *out, gsize out_size) {

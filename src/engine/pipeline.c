@@ -61,6 +61,12 @@
 #define RBN_MIN_HEARINGS_DEFAULT    2
 #define RBN_SETTLE_S_DEFAULT        8.0
 #define RBN_SETTLE_NODICT_S_DEFAULT 8.0
+/* gh#26 — a record whose call was last READ longer ago than this is a stale
+ * candidate noise brought back, not a station: the extractor ages by
+ * tokens, so a quiet channel keeps its last call for ever. The same as the
+ * station TTL — a station silent that long has left the table anyway, and
+ * with it the feed's memo, which is exactly how the ghost got out. */
+#define RBN_FRESH_S_DEFAULT         120.0
 /* A station silent this long leaves the table (and its panadapter label is
  * SPOT_DELETEd). 120 s rides out one side of a QSO; the old 600 s kept a
  * contest band map full of stations long gone (Richard, 2026-07-15). */
@@ -184,6 +190,8 @@ struct _SkimPipeline {
                                                 * 0 = none                   */
   gint64            rbn_settle_nd_us;          /* the same, call not in the
                                                 * dictionary                 */
+  gint64            rbn_fresh_us;              /* gh#26: last copy read within
+                                                * this; 0 = any age          */
   GHashTable       *rbn_pending;               /* call → gint64* release time;
                                                 * 0 = released, send freely  */
 
@@ -483,6 +491,9 @@ SkimPipeline *skim_pipeline_new(const SkimPipelineConfig *cfg) {
     p->rbn_settle_nd_us = nd > 0 && p->rbn_settle_us > 0
                               ? MAX((gint64)(nd * G_USEC_PER_SEC), p->rbn_settle_us)
                               : p->rbn_settle_us;
+    const double fresh = p->cfg.rbn_fresh_s == 0 ? RBN_FRESH_S_DEFAULT
+                                                 : p->cfg.rbn_fresh_s;
+    p->rbn_fresh_us = fresh > 0 ? (gint64)(fresh * G_USEC_PER_SEC) : 0;
     p->rbn_pending = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
                                            g_free);
   }
@@ -578,14 +589,30 @@ static void station_gone_fwd(const SkimStation *st, gpointer user) {
 
 /* May this record go to the network? Heard CALLING (regardless of the
  * local CQ-only switch), inside an amateur band (the receiver hears past
- * the band edge, the network must not), its best score past the bar, and
- * its call either read rbn_hearings times by one extractor or known to
- * MASTER.SCP. The score alone passes one copy after "CQ DE" (0.90) — and
- * a garble of it. */
+ * the band edge, the network must not), its best score past the bar, its
+ * call either read rbn_hearings times by one extractor or known to
+ * MASTER.SCP — the score alone passes one copy after "CQ DE" (0.90), and
+ * a garble of it — and a copy of it READ within the freshness window
+ * (gh#26): the extractor ages by tokens, so on a channel gone quiet the
+ * call that left it is still the best candidate, readings and all, when
+ * the first noise token arrives an hour later; the table has pruned the
+ * record and forgotten the memo by then, and the ghost went out as a new
+ * station. Traced once per record — its first report is that token. */
 static gboolean rbn_gate(const SkimPipeline *p, const SkimStation *st) {
-  return st->cq && st->score >= p->rbn_min &&
-         skim_pipeline_in_ham_band(st->freq_hz) &&
-         (st->hearings >= p->rbn_hearings || skim_callsign_dict_has(st->call));
+  if (!(st->cq && st->score >= p->rbn_min &&
+        skim_pipeline_in_ham_band(st->freq_hz) &&
+        (st->hearings >= p->rbn_hearings || skim_callsign_dict_has(st->call))))
+    return FALSE;
+  const gint64 age = pipe_now_us(p) - st->last_read;
+  if (p->rbn_fresh_us > 0 && age > p->rbn_fresh_us) {
+    if (rbn_debug() && st->reports <= 1) {
+      g_printerr("rbn: STALE %s @ %.0f Hz (read %u, last copy %.0f s ago) "
+                 "t=%.1f\n", st->call, st->freq_hz, st->hearings, age / 1e6,
+                 pipe_now_us(p) / 1e6);
+    }
+    return FALSE;
+  }
+  return TRUE;
 }
 
 /* The line itself; spot_out's dedup, QSY and rate rules have the last word.
@@ -660,12 +687,13 @@ static void rbn_settle_tick(SkimPipeline *p, gint64 now_us) {
 
 void skim_pipeline_rbn_policy(const SkimPipeline *p, double *min_score,
                               guint *min_hearings, double *settle_s,
-                              double *settle_nodict_s) {
+                              double *settle_nodict_s, double *fresh_s) {
   const gboolean on = p->rbn_spots != NULL;
   if (min_score)       { *min_score       = on ? p->rbn_min : 0; }
   if (min_hearings)    { *min_hearings    = on ? p->rbn_hearings : 0; }
   if (settle_s)        { *settle_s        = on ? p->rbn_settle_us / 1e6 : 0; }
   if (settle_nodict_s) { *settle_nodict_s = on ? p->rbn_settle_nd_us / 1e6 : 0; }
+  if (fresh_s)         { *fresh_s         = on ? p->rbn_fresh_us / 1e6 : 0; }
 }
 void skim_pipeline_set_text_cb(SkimPipeline *p, SkimPipelineTextCb cb, gpointer user) {
   p->text_cb = cb;
@@ -1129,6 +1157,8 @@ static void dispatch_text(SkimPipeline *p, guint c, guint slot, double sig_hz,
                  c, slot, sig_hz, d->text);
     }
   } else {
+    /* the clock on every copy read — the feed's freshness gate (gh#26) */
+    skim_callsign_extractor_set_now(p->ext[SL(c, slot)], pipe_now_us(p));
     skim_callsign_extractor_feed(p->ext[SL(c, slot)], d->text);
   }
   char call[24];
@@ -1152,6 +1182,7 @@ static void dispatch_text(SkimPipeline *p, guint c, guint slot, double sig_hz,
   st.snr_db     = d->snr_db;
   st.score      = score;
   st.hearings   = skim_callsign_extractor_hearings(p->ext[SL(c, slot)], call);
+  st.last_read  = skim_callsign_extractor_last_read(p->ext[SL(c, slot)], call);
   st.cq         = cq;
   st.last_heard = pipe_now_us(p);
   st.first_heard = st.last_heard;

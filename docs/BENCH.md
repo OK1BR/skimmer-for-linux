@@ -40,8 +40,11 @@ live session (in OK1HRA's fork, offline wins twice lost on live air — #28).
   the first line in s, default 8; -1 = none) and
   `SKIM_REPLAY_RBN_SETTLE_NODICT` (the hold of a call MASTER.SCP does not
   know). `READS=1 SETTLE=-1` is the feed as it was before gh#24, so the two
-  policies replay over one tap side by side. `SKIM_RBN_DEBUG=1` traces every
-  hold, release and drop with the readings and the dictionary verdict.
+  policies replay over one tap side by side. `SKIM_REPLAY_RBN_FRESH` (gh#26)
+  is the window in seconds within which a call must have been read for its
+  record to go out (default 120, the station TTL; -1 = none). `SKIM_RBN_DEBUG=1`
+  traces every hold, release, drop and stale refusal with the readings, the
+  dictionary verdict and the age of the last reading.
 - Deterministic: two runs over the same input are byte-identical (cw-v2,
   2026-11-01). About 36× real time on cw-v2 at 192 kHz on the development
   machine, so an evening of air replays in minutes.
