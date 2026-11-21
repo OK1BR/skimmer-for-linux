@@ -116,6 +116,25 @@ static gboolean call_is_clip(const char *shorter, const char *longer) {
  * DL9MGE 7× against DL9MGED 1×, DK8EO 5× against DK8EODS 1× — each real
  * call lost its record to the glued reading under the clip rule alone. */
 
+/* …and the readings overrule the dictionary where they are loud enough.
+ * MASTER.SCP is full of short calls that are the head or the tail of a
+ * real one, and "the dictionary knows the short call" then hands the
+ * station to its own torn reading: on 20 m on 2026-11-21 EB5B, a runner
+ * the dictionary does not know, was read 140 times and had 424 of its
+ * reports folded into B5B — a dictionary call, read 9 times, EB5B without
+ * its E — and B5B went out on the RBN feed. On the evening of 2026-11-01
+ * G4LNA (read 5×) fed G4L (2×) and OK2BHS (8×) was evicted by OK2B (1×).
+ * So a longer call read at least GLUE_DICT_FLOOR times and
+ * GLUE_DICT_RATIO times as often as the known short one is the station,
+ * and the short one its clip — the bar at which a dictionary call yields
+ * on the feed (feed_twins.c). Where the dictionary was right that evening
+ * the longer call stayed far below it: SN31ROTG 2 readings against 28,
+ * G6PZDX 10 against 37, OK1DXFB 1 against 23, SO5CWG 1 against 73,
+ * DL0SXDE 2 against 1 (under the floor); OL1BIC, the fixture of gh#21,
+ * 50 against 71. */
+#define GLUE_DICT_FLOOR 3u
+#define GLUE_DICT_RATIO 2u
+
 /* The call proper of a portable form — the longer side of the slash
  * ("F/OK1BR", "OK1BR/P"); the whole string when there is none. */
 static const char *call_core(const char *call, gsize *len) {
@@ -155,8 +174,9 @@ static gboolean call_is_glue(const char *shorter, guint read_short,
                              const char *longer, guint read_long) {
   if (!call_is_clip(shorter, longer) || skim_callsign_dict_has(longer))
     return FALSE;
-  if (skim_callsign_dict_has(shorter))
-    return TRUE;                            /* gh#21: the dictionary knows  */
+  if (skim_callsign_dict_has(shorter))      /* gh#21: the dictionary knows  */
+    return !(read_long >= GLUE_DICT_FLOOR &&
+             read_long >= GLUE_DICT_RATIO * MAX(read_short, 1u));
   return glue_by_reads(shorter, read_short, longer, read_long);
 }
 

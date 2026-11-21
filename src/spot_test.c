@@ -699,7 +699,7 @@ int main(void) {
     skim_station_table_free(t);
 
     /* -- the clip pair outside the 30 s fold window (gh#21) -- */
-    g_file_set_contents(dict, "# gate dict\nSN31ROT\nSO5CW\nG4L\nDL9A\nDL9ABM\n", -1, NULL);
+    g_file_set_contents(dict, "# gate dict\nSN31ROT\nSO5CW\nG4L\nDL9A\nDL9ABM\nB5B\n", -1, NULL);
     check("late clip: gate dictionary loads", skim_callsign_dict_load(dict, NULL));
 
     /* 3517.5 kHz, 2026-11-01: SN31ROT read right, then "SN31RO" 50 s later —
@@ -761,6 +761,35 @@ int main(void) {
     m = READ(t, "G4LNA", 1, 60);
     check("late clip: an unknown call is not dropped as the glue of a known short one",
           m && strcmp(m->call, "G4LNA") == 0);
+    skim_station_table_free(t);
+
+    /* -- the readings overrule the dictionary's verdict on glue (gh#21) -- */
+
+    /* inside the fold window: G4L read twice, G4LNA five times — the long
+     * call is the station, the known short one its clip */
+    t = skim_station_table_new();
+    READ(t, "G4L", 2, 10);
+    m = READ(t, "G4LNA", 5, 12);
+    check("glue: a longer call read 3× and twice as often takes the record from a known short one",
+          m && strcmp(m->call, "G4LNA") == 0 && skim_station_table_size(t) == 1 &&
+          skim_station_table_lookup(t, "G4L") == NULL);
+    m = READ(t, "G4L", 2, 13);
+    check("glue: … and the short call's next reading feeds the longer record",
+          m && strcmp(m->call, "G4LNA") == 0 && skim_station_table_size(t) == 1);
+    skim_station_table_free(t);
+    t = skim_station_table_new();
+    READ(t, "G4L", 2, 10);
+    m = READ(t, "G4LNA", 3, 12);
+    check("glue: under twice the readings the dictionary still decides",
+          m && strcmp(m->call, "G4L") == 0 && skim_station_table_size(t) == 1);
+    skim_station_table_free(t);
+    /* a lost head: EB5B read 140 times on 14 MHz, 2026-11-21, B5B (a
+     * dictionary call) 9 times */
+    t = skim_station_table_new();
+    READ(t, "B5B", 9, 10);
+    m = READ(t, "EB5B", 140, 12);
+    check("glue: a station is not folded into a known call that is its tail",
+          m && strcmp(m->call, "EB5B") == 0 && skim_station_table_size(t) == 1);
     skim_station_table_free(t);
 
     t = skim_station_table_new();                /* elsewhere on the band    */
