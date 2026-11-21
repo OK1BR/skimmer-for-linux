@@ -25,7 +25,8 @@ struct _SkimStationTable {
   SkimStationGoneFunc gone_cb;
   gpointer            gone_user;
   GHashTable *left;           /* call (owned str) → Left*: records that
-                               * went silent, kept for the twin rule         */
+                               * went silent, kept for the twin and the
+                               * late-clip rules                             */
 };
 
 /* A record that left the table — pruned, or its frequency taken over. */
@@ -147,12 +148,24 @@ static gboolean call_suffix_2(const char *call) {
 /* TRUE when `longer` reads as `shorter` with text glued on — the shorter
  * call is the station. read_short / read_long are the readings each call
  * had (SkimStation.hearings). */
+static gboolean glue_by_reads(const char *shorter, guint read_short,
+                              const char *longer, guint read_long);
+
 static gboolean call_is_glue(const char *shorter, guint read_short,
                              const char *longer, guint read_long) {
   if (!call_is_clip(shorter, longer) || skim_callsign_dict_has(longer))
     return FALSE;
   if (skim_callsign_dict_has(shorter))
     return TRUE;                            /* gh#21: the dictionary knows  */
+  return glue_by_reads(shorter, read_short, longer, read_long);
+}
+
+/* The readings' verdict alone (gh#34): `longer` is `shorter` with text
+ * glued on. */
+static gboolean glue_by_reads(const char *shorter, guint read_short,
+                              const char *longer, guint read_long) {
+  if (!call_is_clip(shorter, longer))
+    return FALSE;
   const gsize ls = strlen(shorter);
   if (strncmp(longer, shorter, ls) != 0)
     return FALSE;                           /* the head is missing, not glue */
@@ -285,7 +298,107 @@ static const char *twin_of(SkimStationTable *t, const SkimStation *st) {
   return NULL;
 }
 
-/* A record goes silent: remember it for the twins that come after. */
+/* The clip pair outside the fold window — gh#21. clip_fold() folds a torn or
+ * glued reading into the station's record only while that record is fresh
+ * (SKIM_STATION_TAKEOVER_US); half a minute later the same reading is a
+ * station of its own, and takes the frequency from the record it is a
+ * reading of. On 3517.5 kHz on 2026-11-01 SN31ROT was read right 30 times,
+ * "SN31RO" 13 times and "SN31R" 7 times, each of the two a record again and
+ * again; DK9H stood in the table — flagged CQ, so on the panadapter — for 24
+ * minutes beside DK9HE, read 49 times.
+ *
+ * So a call MASTER.SCP does not know is dropped, like a twin, when a call
+ * with a record on its frequency — or with one that left within
+ * SKIM_STATION_TWIN_MEMO_US — makes it a torn or a glued reading:
+ *  - it is the head or the tail of that call, and MASTER.SCP knows that
+ *    call or it was read more often — unless the readings make the longer
+ *    one the glued reading (gh#34);
+ *  - or it is that call with text glued on, by the readings' verdict alone
+ *    (gh#34: read twice or more and twice as often, a suffix of two letters,
+ *    the text behind the call and not a lone T; or a glued CQ).
+ * The dictionary's own verdict on glue — a known short call, an unknown
+ * long one — stays inside the fold window. MASTER.SCP is full of short
+ * calls that are the head of a real one: reaching past the window, that
+ * verdict dropped G4LNA beside G4L, OK2BHS beside OK2B and DL2ARO beside
+ * DL2A on that evening — each one the station, each unknown to the
+ * dictionary. And a call the dictionary knows is never dropped, as with
+ * the twin.
+ *
+ * The evening: 237 → 228 calls, look-alikes 43 → 36 (flagged CQ 15 → 12).
+ * Of the calls RBN confirms one goes, SQ6JA: a single RBN spot in the minute
+ * SQ6JAN had 45 on that frequency. The RBN feed keeps its 144 records and 77
+ * units; two lines differ (a K2BVX line, the torn OK2BVX, moves within its
+ * hour; an SQ6JAN line carries another speed). In the first 44 minutes of
+ * a contest recording (20 m, 2026-11-21; 333 of the 379 calls tabled are in
+ * MASTER.SCP) the rule drops two calls, Z3RM beside LZ3RM and A5OH beside
+ * EA5OH, and the feed is the same byte for byte. SKIM_ST_CLIP=0 turns the
+ * rule off (docs/BENCH.md). */
+static gboolean clip_rule_on(void) {
+  static gsize once = 0;
+  if (g_once_init_enter(&once)) {
+    const char *e = g_getenv("SKIM_ST_CLIP");
+    g_once_init_leave(&once, e && e[0] == '0' ? 1 : 2);
+  }
+  return once == 2;
+}
+
+/* TRUE when x (read rx times, unknown to the dictionary) is a torn or a
+ * glued reading of y (read ry times). */
+static gboolean clip_yields(const char *x, guint rx, const char *y, guint ry) {
+  if (call_is_clip(x, y))                      /* x is the head or tail of y */
+    return !call_is_glue(x, rx, y, ry) &&
+           (skim_callsign_dict_has(y) || ry > MAX(rx, 1u));
+  if (call_is_clip(y, x))                      /* x is y with text glued on: */
+    return glue_by_reads(y, ry, x, rx);        /* the readings alone decide  */
+  return FALSE;
+}
+
+/* The call this report is a torn or glued reading of, or NULL when it
+ * stands — clip_fold() had the fresh records first. */
+static const char *late_clip_of(SkimStationTable *t, const SkimStation *st) {
+  if (!clip_rule_on() || skim_callsign_dict_has(st->call))
+    return NULL;
+  const guint rx = call_reads(t, st->call, st->hearings);
+  GHashTableIter it;
+  gpointer key, val;
+  g_hash_table_iter_init(&it, t->by_call);
+  while (g_hash_table_iter_next(&it, &key, &val)) {
+    if (strcmp(key, st->call) == 0)
+      continue;
+    for (GSList *l = val; l; l = l->next) {
+      const SkimStation *e = l->data;
+      const guint ry = call_reads(t, key, e->hearings);
+      if (fabs(e->freq_hz - st->freq_hz) <= SKIM_STATION_MERGE_HZ &&
+          clip_yields(st->call, rx, key, ry)) {
+        if (st_debug()) {
+          g_printerr("station: CLIP %s dropped beside %s @ %.0f Hz (read %u vs "
+                     "%u, heard %.0f s ago)\n", st->call, e->call, e->freq_hz,
+                     rx, ry, (st->last_heard - e->last_heard) / 1e6);
+        }
+        return key;
+      }
+    }
+  }
+  g_hash_table_iter_init(&it, t->left);
+  while (g_hash_table_iter_next(&it, &key, &val)) {
+    const Left *g = val;
+    if (st->last_heard - g->at <= SKIM_STATION_TWIN_MEMO_US &&
+        fabs(g->hz - st->freq_hz) <= SKIM_STATION_MERGE_HZ &&
+        strcmp(key, st->call) != 0 && !g_hash_table_lookup(t->by_call, key) &&
+        clip_yields(st->call, rx, key, g->hearings)) {
+      if (st_debug()) {
+        g_printerr("station: CLIP %s dropped beside %s @ %.0f Hz (read %u vs "
+                   "%u, left, heard %.0f s ago)\n", st->call, (const char *)key,
+                   g->hz, rx, g->hearings, (st->last_heard - g->at) / 1e6);
+      }
+      return key;
+    }
+  }
+  return NULL;
+}
+
+/* A record goes silent: remember it for the twins and the clips that come
+ * after. */
 static void left_note(SkimStationTable *t, const SkimStation *e) {
   Left *g = g_hash_table_lookup(t->left, e->call);
   if (!g) {
@@ -399,6 +512,8 @@ const SkimStation *skim_station_table_report(SkimStationTable *t,
   if (folded) { return folded; }
   if (twin_of(t, st))
     return NULL;                               /* a misread, not a station  */
+  if (late_clip_of(t, st))
+    return NULL;                               /* a torn or glued reading   */
   takeover_sweep(t, st);
   GSList *list = g_hash_table_lookup(t->by_call, st->call);
   for (GSList *l = list; l; l = l->next) {

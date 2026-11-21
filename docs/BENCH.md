@@ -73,13 +73,17 @@ live session (in OK1HRA's fork, offline wins twice lost on live air — #28).
   table's twin rule (gh#21, `station.c`: a call MASTER.SCP does not know,
   read once, within two edits of a better attested call on its frequency is
   dropped as a misread of it) is on by default; `SKIM_ST_TWIN=0` turns it
-  off for an A/B. The feed's score does not see the table — what the
+  off for an A/B. So is its rule for the clip pair past the 30 s fold
+  window (an unknown call that is the head or tail of a call known or read
+  more often there, or that call with text glued on by the readings, is
+  dropped the same way); `SKIM_ST_CLIP=0` turns that one off. The feed's score does not see the table — what the
   callsign column and the panadapter show: on the 2026-11-01 recording the
   feed scored 71 confirmed and 6 look-alike units while the table had held
   252 calls, 57 of them a look-alike of a call RBN spotted within 1 kHz.
   `SKIM_ST_DEBUG=1` is the trace the table is judged from: every report
   with its score, readings and `cq` / `addr` flags, and every `TWIN …
-  dropped beside …`, `EVICT` and `FOLD` with its reason.
+  dropped beside …`, `CLIP … dropped beside …`, `EVICT` and `FOLD` with
+  its reason.
 - Deterministic: two runs over the same input are byte-identical (cw-v2,
   2026-11-01). About 36× real time on cw-v2 at 192 kHz on the development
   machine, so an evening of air replays in minutes.

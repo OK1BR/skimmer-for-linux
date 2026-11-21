@@ -645,12 +645,13 @@ int main(void) {
     r.freq_hz = 3566000;
     skim_station_table_free(t);
 
-    /* a torn tail is a clip pair — the clip rules own it, as before */
+    /* a head or tail is no twin — the clip rules own the pair: read once
+     * each, 50 s apart, the torn call takes the frequency as it always did */
     t = skim_station_table_new();
-    READ(t, "SN31ROT", 30, 10);
-    m = READ(t, "SN31RO", 1, 60);
+    READ(t, "DJ4GX", 1, 10);
+    m = READ(t, "DJ4G", 1, 60);
     check("twin: a head or tail of the call is left to the clip rules",
-          m && strcmp(m->call, "SN31RO") == 0);
+          m && strcmp(m->call, "DJ4G") == 0);
     skim_station_table_free(t);
 
     /* the table remembers how often it read a call: back on another
@@ -695,6 +696,80 @@ int main(void) {
     check("twin: … and its record is not evicted by it",
           m && skim_station_table_size(t) == 2 &&
           skim_station_table_lookup(t, "9A9A") != NULL);
+    skim_station_table_free(t);
+
+    /* -- the clip pair outside the 30 s fold window (gh#21) -- */
+    g_file_set_contents(dict, "# gate dict\nSN31ROT\nSO5CW\nG4L\nDL9A\nDL9ABM\n", -1, NULL);
+    check("late clip: gate dictionary loads", skim_callsign_dict_load(dict, NULL));
+
+    /* 3517.5 kHz, 2026-11-01: SN31ROT read right, then "SN31RO" 50 s later —
+     * past the fold window it used to take the frequency */
+    t = skim_station_table_new();
+    READ(t, "SN31ROT", 22, 10);
+    m = READ(t, "SN31RO", 13, 60);
+    check("late clip: an unknown head of a known call is dropped past the fold window",
+          m == NULL && skim_station_table_size(t) == 1 &&
+          skim_station_table_lookup(t, "SN31ROT") != NULL);
+    check("late clip: … and after the call's record was pruned",
+          skim_station_table_prune(t, 140 * S, 120 * S) == 1 &&
+          READ(t, "SN31RO", 13, 281) == NULL && skim_station_table_size(t) == 0);
+    m = READ(t, "SN31RO", 13, 3612);
+    check("late clip: an hour after the call was last heard its head stands",
+          m && strcmp(m->call, "SN31RO") == 0);
+    skim_station_table_free(t);
+
+    /* neither call known: the one read more often is the station */
+    t = skim_station_table_new();
+    READ(t, "DK5JPL", 9, 10);
+    m = READ(t, "K5JPL", 2, 60);
+    check("late clip: an unknown tail yields to an unknown call read more often",
+          m == NULL && skim_station_table_size(t) == 1);
+    skim_station_table_free(t);
+    t = skim_station_table_new();
+    READ(t, "SM7FBJE", 1, 10);                   /* gh#34 the other way round */
+    m = READ(t, "SM7FBJ", 2, 60);
+    check("late clip: a call read twice as often as its glued reading still stands",
+          m && strcmp(m->call, "SM7FBJ") == 0);
+    skim_station_table_free(t);
+
+    /* a call the dictionary knows is never dropped: DL9A beside DL9ABM */
+    t = skim_station_table_new();
+    READ(t, "DL9ABM", 18, 10);
+    m = READ(t, "DL9A", 2, 60);
+    check("late clip: a known call stands, whatever it is the head of",
+          m && strcmp(m->call, "DL9A") == 0);
+    skim_station_table_free(t);
+
+    /* glue past the window goes by the readings: SO5CWK beside SO5CW */
+    t = skim_station_table_new();
+    READ(t, "SO5CW", 26, 10);
+    m = READ(t, "SO5CWK", 2, 131);
+    check("late clip: a glued reading of a call read far more often is dropped",
+          m == NULL && skim_station_table_size(t) == 1);
+    skim_station_table_free(t);
+    t = skim_station_table_new();
+    READ(t, "G0GYY", 3, 10);
+    m = READ(t, "G0GYYK", 2, 60);
+    check("late clip: fewer than twice the readings leave the glued reading standing",
+          m && strcmp(m->call, "G0GYYK") == 0);
+    skim_station_table_free(t);
+
+    /* … and not by the dictionary: G4L is a call, G4LNA the station — past
+     * the fold window a known short call does not make a long one its glue */
+    t = skim_station_table_new();
+    READ(t, "G4L", 2, 10);
+    m = READ(t, "G4LNA", 1, 60);
+    check("late clip: an unknown call is not dropped as the glue of a known short one",
+          m && strcmp(m->call, "G4LNA") == 0);
+    skim_station_table_free(t);
+
+    t = skim_station_table_new();                /* elsewhere on the band    */
+    READ(t, "SN31ROT", 22, 10);
+    r.freq_hz = 3566400;
+    m = READ(t, "SN31RO", 13, 60);
+    check("late clip: 400 Hz away the head is a call of its own",
+          m && skim_station_table_size(t) == 2);
+    r.freq_hz = 3566000;
     skim_station_table_free(t);
 #undef READ
     g_file_set_contents(dict, "# empty\n", -1, NULL);

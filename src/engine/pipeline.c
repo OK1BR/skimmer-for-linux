@@ -1378,7 +1378,7 @@ static void dispatch_text(SkimPipeline *p, guint c, guint slot, double sig_hz,
   }
   const SkimStation *merged = skim_station_table_report(p->stations, &st);
   if (!merged)
-    return;                    /* a misread of a station on this frequency — gh#21 */
+    return;          /* a misread of a station on this frequency: no record — gh#21 */
   /* gh#29: every call the table merges is a possible rival of a misread of
    * it nearby — remembered with the clock of its last copy actually read */
   if (p->rbn_twins) {

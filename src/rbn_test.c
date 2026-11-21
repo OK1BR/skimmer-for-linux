@@ -1129,8 +1129,12 @@ int main(void) {
     sim_free(s);
 
     /* The twin fold, near-call rule off: DK9HE went out; its record is
-     * pruned at 122 s; the cut DK9H keyed twice at 200 s passes the gate
-     * and would start a new station — the memo of what was SENT folds it. */
+     * pruned at 122 s; DK9HEK, the call with a letter glued on, keyed twice
+     * at 200 s passes the gate and would start a new station — the memo of
+     * what was SENT folds it. (The cut DK9H of the 2026-11-01 recording
+     * never gets this far any more: an unknown head of a known call is
+     * dropped by the station table, gh#21. The glued call read as often as
+     * the call itself is what the table lets stand.) */
     SimTwins fold_only = { 0, -1, 0 };
     s = sim_new(0, 0, 0, 0, &fold_only);
     skim_pipeline_rbn_twins(s->p, &hz, &near_s, &fold_s, NULL);
@@ -1139,10 +1143,10 @@ int main(void) {
     sim_decode(s, 1.0, 10, 3524000.0, "CQ DE DK9HE DK9HE K ");
     sim_to(s, 12.0);
     check("fold: DK9HE goes out after its hold", rbn_lines(s->rbn, "DK9HE") == 1);
-    sim_decode(s, 200.0, 11, 3524100.0, "CQ DE DK9H DK9H K ");
+    sim_decode(s, 200.0, 11, 3524100.0, "CQ DE DK9HEK DK9HEK K ");
     sim_to(s, 220.0);
-    check("fold: the cut DK9H 200 s later (DK9HE's record long pruned) is folded",
-          rbn_lines(s->rbn, "DK9H") == 0);
+    check("fold: the glued DK9HEK 200 s later (DK9HE's record long pruned) is folded",
+          rbn_lines(s->rbn, "DK9HEK") == 0);
     skim_pipeline_rbn_twins(s->p, NULL, NULL, NULL, &held);
     check("fold: the pipeline counts the fold", held == 1);
     /* the station's own QSY 3 kHz up (its record moves, the memo follows
@@ -1164,14 +1168,14 @@ int main(void) {
     check("fold: DK5JPL, read three times to K5JPL's two, is NOT folded behind it",
           rbn_lines(s->rbn, "DK5JPL") == 1);
     sim_free(s);
-    /* the fold window set by hand: 60 s — DK9H at 200 s is beyond it */
+    /* the fold window set by hand: 60 s — DK9HEK at 200 s is beyond it */
     SimTwins fold60 = { 0, -1, 60 };
     s = sim_new(0, 0, 0, 0, &fold60);
     sim_decode(s, 1.0, 10, 3524000.0, "CQ DE DK9HE DK9HE K ");
-    sim_decode(s, 200.0, 11, 3524100.0, "CQ DE DK9H DK9H K ");
+    sim_decode(s, 200.0, 11, 3524100.0, "CQ DE DK9HEK DK9HEK K ");
     sim_to(s, 220.0);
-    check("fold 60 s: the line sent 190 s ago folds nothing — DK9H goes out",
-          rbn_lines(s->rbn, "DK9H") == 1);
+    check("fold 60 s: the line sent 190 s ago folds nothing — DK9HEK goes out",
+          rbn_lines(s->rbn, "DK9HEK") == 1);
     sim_free(s);
 
     /* The radius switches both rules off. */
@@ -1209,6 +1213,20 @@ int main(void) {
     sim_to(s, 40.0);
     check("table twin: the runner's line went out, none for the twin",
           rbn_lines(s->rbn, "DK8EO") == 1 && rbn_lines(s->rbn, "DM8EO") == 0);
+    sim_free(s);
+
+    /* The cut DK9H of the 2026-11-01 recording, 200 s after DK9HE's last
+     * call (its record pruned at 122 s): DK9HE was read more often, the
+     * table drops the torn reading and no station comes of it. */
+    s = sim_new(0, 0, 0, 0, NULL);
+    sim_decode(s, 1.0, 10, 3524000.0, "CQ DE DK9HE DK9HE DK9HE K ");
+    sim_to(s, 130.0);
+    check("table clip: the runner's record is pruned after its TTL",
+          skim_pipeline_stations(s->p) == 0);
+    sim_decode(s, 200.0, 11, 3524100.0, "CQ DE DK9H DK9H K ");
+    sim_to(s, 220.0);
+    check("table clip: the cut call 200 s later is no station and puts no line out",
+          skim_pipeline_stations(s->p) == 0 && rbn_lines(s->rbn, "DK9H") == 0);
     sim_free(s);
   }
 

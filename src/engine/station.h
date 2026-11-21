@@ -94,15 +94,17 @@ void skim_station_table_set_gone_cb(SkimStationTable *t, SkimStationGoneFunc cb,
  * there, and for this long after the record left: a station in a long QSO
  * gives its call every few minutes, the record lives two. The radius is
  * SKIM_STATION_MERGE_HZ. Two edits, 300 Hz and an hour are what the RBN
- * feed's near-call rule looks within (feed_twins.h). */
+ * feed's near-call rule looks within (feed_twins.h). The same memo serves
+ * the clip pair that comes after the fold window (station.c). */
 #define SKIM_STATION_TWIN_EDITS   2
 #define SKIM_STATION_TWIN_MEMO_US ((gint64)3600 * G_USEC_PER_SEC)
 
 /* Insert or update. Ghost rule: an existing record with the same call within
  * SKIM_STATION_SAMECALL_HZ absorbs the report; the frequency/SNR of the
  * STRONGER report wins. Returns the merged record (owned by the table), or
- * NULL when the report was dropped as a twin of a better attested call
- * (gh#21) — then nothing in the table changed. */
+ * NULL when the report was dropped as a twin of a better attested call or
+ * as a torn or glued reading of one (gh#21) — then nothing in the table
+ * changed. */
 const SkimStation *skim_station_table_report(SkimStationTable *t,
                                              const SkimStation *st);
 
