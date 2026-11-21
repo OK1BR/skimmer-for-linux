@@ -584,6 +584,125 @@ int main(void) {
     g_free(dict);
   }
 
+  /* -- the twin: a call read once beside a better attested look-alike (gh#21) -- */
+  {
+    const gint64 S = G_USEC_PER_SEC;
+    SkimStation r = { .mode = "CW", .freq_hz = 3566000, .snr_db = 20,
+                      .score = 0.80, .speed = 24 };
+#define READ(tab, c, n, sec) \
+  (g_strlcpy(r.call, (c), sizeof(r.call)), r.hearings = (n), \
+   r.first_heard = r.last_heard = (sec) * S, skim_station_table_report((tab), &r))
+
+    /* 3566 kHz on 2026-11-01: DK8EO read again and again, DM8EO once */
+    SkimStationTable *t = skim_station_table_new();
+    READ(t, "DK8EO", 3, 10);
+    const SkimStation *m = READ(t, "DM8EO", 1, 12);
+    check("twin: a call read once beside a look-alike read more often is dropped",
+          m == NULL && skim_station_table_size(t) == 1);
+    m = READ(t, "DM8EO", 2, 20);
+    check("twin: read twice, the call stands beside its look-alike",
+          m && strcmp(m->call, "DM8EO") == 0 && skim_station_table_size(t) == 2);
+    skim_station_table_free(t);
+
+    t = skim_station_table_new();                /* read once each           */
+    READ(t, "DJ4GX", 1, 10);
+    m = READ(t, "SJ4GX", 1, 12);
+    check("twin: read once each, neither call yields",
+          m && skim_station_table_size(t) == 2);
+    skim_station_table_free(t);
+
+    /* the misread first: SN1ROT 21 s before the first SN31ROT — inside the
+     * 30 s a silent record is given, so it is the twin rule that evicts */
+    t = skim_station_table_new();
+    READ(t, "SN1ROT", 1, 10);
+    m = READ(t, "SN31ROT", 3, 31);
+    check("twin: the better attested call evicts its twin's record at once",
+          m && strcmp(m->call, "SN31ROT") == 0 && skim_station_table_size(t) == 1 &&
+          skim_station_table_lookup(t, "SN1ROT") == NULL);
+    skim_station_table_free(t);
+
+    /* the station left the table: DL9ABM gave its call every few minutes,
+     * S9ABM came 271 s after its last one */
+    t = skim_station_table_new();
+    READ(t, "DL9ABM", 11, 10);
+    check("twin: the station's record is pruned after its TTL",
+          skim_station_table_prune(t, 140 * S, 120 * S) == 1 &&
+          skim_station_table_size(t) == 0);
+    m = READ(t, "S9ABM", 1, 281);
+    check("twin: a look-alike of a station that left within the hour is dropped",
+          m == NULL && skim_station_table_size(t) == 0);
+    m = READ(t, "S9ABM", 1, 3612);
+    check("twin: an hour after the station was last heard the call stands",
+          m && strcmp(m->call, "S9ABM") == 0);
+    skim_station_table_free(t);
+
+    t = skim_station_table_new();                /* elsewhere on the band    */
+    READ(t, "DK8EO", 3, 10);
+    r.freq_hz = 3566400;
+    m = READ(t, "DM8EO", 1, 12);
+    check("twin: 400 Hz away it is another station",
+          m && skim_station_table_size(t) == 2);
+    r.freq_hz = 3566000;
+    skim_station_table_free(t);
+
+    /* a torn tail is a clip pair — the clip rules own it, as before */
+    t = skim_station_table_new();
+    READ(t, "SN31ROT", 30, 10);
+    m = READ(t, "SN31RO", 1, 60);
+    check("twin: a head or tail of the call is left to the clip rules",
+          m && strcmp(m->call, "SN31RO") == 0);
+    skim_station_table_free(t);
+
+    /* the table remembers how often it read a call: back on another
+     * channel's extractor, whose first copy this is, the call is no twin */
+    t = skim_station_table_new();
+    READ(t, "OZ4UN", 17, 10);
+    skim_station_table_prune(t, 140 * S, 120 * S);
+    READ(t, "OZ4UT", 2, 200);
+    m = READ(t, "OZ4UN", 1, 205);
+    check("twin: a call the table read often before is no twin on its return",
+          m && strcmp(m->call, "OZ4UN") == 0 && skim_station_table_size(t) == 2);
+    skim_station_table_free(t);
+
+    /* the dictionary: UR4QWW answered once on 3510 kHz, N4QWW is two edits
+     * away; IZ2FME and 9A1AR ran, 9A9A is a call too */
+    char *dict = g_build_filename(g_get_tmp_dir(), "skimmer-spot-dict21.txt", NULL);
+    g_file_set_contents(dict, "# gate dict\nUR4QWW\nIZ2FME\n9A1AR\n9A9A\n", -1, NULL);
+    check("twin: gate dictionary loads", skim_callsign_dict_load(dict, NULL));
+    t = skim_station_table_new();
+    READ(t, "UR4QWW", 1, 10);
+    m = READ(t, "N4QWW", 1, 12);
+    check("twin: an unknown call read once yields to a known look-alike read once",
+          m == NULL && skim_station_table_size(t) == 1);
+    skim_station_table_free(t);
+
+    /* a call the dictionary knows is never a twin: in a contest the short
+     * known calls sit two edits apart all over the band (EW2A beside EA2N,
+     * 14 MHz, 2026-11-21) */
+    t = skim_station_table_new();
+    READ(t, "IZ2FMI", 5, 10);
+    m = READ(t, "IZ2FME", 1, 12);
+    check("twin: a known call read once stands beside an unknown one read often",
+          m && strcmp(m->call, "IZ2FME") == 0 && skim_station_table_size(t) == 2);
+    skim_station_table_free(t);
+
+    t = skim_station_table_new();                /* both known               */
+    READ(t, "9A1AR", 15, 10);
+    m = READ(t, "9A9A", 1, 12);
+    check("twin: a known call read once stands beside a known one read often",
+          m && skim_station_table_size(t) == 2);
+    m = READ(t, "9A1AR", 16, 13);
+    check("twin: … and its record is not evicted by it",
+          m && skim_station_table_size(t) == 2 &&
+          skim_station_table_lookup(t, "9A9A") != NULL);
+    skim_station_table_free(t);
+#undef READ
+    g_file_set_contents(dict, "# empty\n", -1, NULL);
+    skim_callsign_dict_load(dict, NULL);
+    g_remove(dict);
+    g_free(dict);
+  }
+
   /* -- spot policy units -------------------------------------------------------- */
   {
     SkimSpotOut *so = skim_spot_out_new(NULL);

@@ -69,7 +69,17 @@ live session (in OK1HRA's fork, offline wins twice lost on live air — #28).
   `docs/SNR.md`): the median over the bank of the channels' noise
   statistic and its quartiles, deciles and ends in dB relative to it — on
   the 2026-11-01 recording the quartiles sit at −1.0/+1.5 dB, the deciles
-  at −6/+3.6, which is how representative the median is.
+  at −6/+3.6, which is how representative the median is. The station
+  table's twin rule (gh#21, `station.c`: a call MASTER.SCP does not know,
+  read once, within two edits of a better attested call on its frequency is
+  dropped as a misread of it) is on by default; `SKIM_ST_TWIN=0` turns it
+  off for an A/B. The feed's score does not see the table — what the
+  callsign column and the panadapter show: on the 2026-11-01 recording the
+  feed scored 71 confirmed and 6 look-alike units while the table had held
+  252 calls, 57 of them a look-alike of a call RBN spotted within 1 kHz.
+  `SKIM_ST_DEBUG=1` is the trace the table is judged from: every report
+  with its score, readings and `cq` / `addr` flags, and every `TWIN …
+  dropped beside …`, `EVICT` and `FOLD` with its reason.
 - Deterministic: two runs over the same input are byte-identical (cw-v2,
   2026-11-01). About 36× real time on cw-v2 at 192 kHz on the development
   machine, so an evening of air replays in minutes.

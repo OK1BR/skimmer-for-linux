@@ -1192,6 +1192,26 @@ int main(void) {
     g_free(dict);
   }
 
+  /* -- gh#21: a twin read once never reaches the table; the pipeline goes on ----- */
+  {
+    /* DK8EO runs on 3566 kHz; the channel beside it reads "DM8EO" once —
+     * the table drops the report (station.c), and dispatch has no record
+     * to spot. Read a second time, it is a station like any other. */
+    FeedSim *s = sim_new(0, 0, 0, 0, NULL);
+    sim_decode(s, 1.0, 10, 3566000.0, "CQ DE DK8EO DK8EO DK8EO K ");
+    check("table twin: the runner is tabled", skim_pipeline_stations(s->p) == 1);
+    sim_decode(s, 10.0, 11, 3566100.0, "DE DM8EO K ");
+    check("table twin: its look-alike read once is not",
+          skim_pipeline_stations(s->p) == 1);
+    sim_decode(s, 20.0, 11, 3566100.0, "DE DM8EO K ");
+    check("table twin: read a second time it is a station",
+          skim_pipeline_stations(s->p) == 2);
+    sim_to(s, 40.0);
+    check("table twin: the runner's line went out, none for the twin",
+          rbn_lines(s->rbn, "DK8EO") == 1 && rbn_lines(s->rbn, "DM8EO") == 0);
+    sim_free(s);
+  }
+
   printf("\n=== %d checks, %d failures ===\n%s\n", checks, fails,
          fails ? "FAIL" : "PASS — validated CQ spots flow to the RBN sink, "
                           "deduped and well-formed.");

@@ -1371,11 +1371,14 @@ static void dispatch_text(SkimPipeline *p, guint c, guint slot, double sig_hz,
   st.last_heard = pipe_now_us(p);
   st.first_heard = st.last_heard;
   if (g_getenv("SKIM_ST_DEBUG")) {
-    g_printerr("report: ch %u slot %u %s @ %.0f Hz score %.2f read %u t=%.0f s\n",
+    g_printerr("report: ch %u slot %u %s @ %.0f Hz score %.2f read %u%s%s t=%.0f s\n",
                c, slot, st.call, st.freq_hz, score, st.hearings,
+               st.cq ? " cq" : "", st.addressed ? " addr" : "",
                st.last_heard / 1e6);
   }
   const SkimStation *merged = skim_station_table_report(p->stations, &st);
+  if (!merged)
+    return;                    /* a misread of a station on this frequency — gh#21 */
   /* gh#29: every call the table merges is a possible rival of a misread of
    * it nearby — remembered with the clock of its last copy actually read */
   if (p->rbn_twins) {
